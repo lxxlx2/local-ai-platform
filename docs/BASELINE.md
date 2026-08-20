@@ -1,5 +1,9 @@
 # V1 baseline
 
+## Gateway V0.2 development baseline
+
+The currently running Bot remains V0.1 until an owner-performed restart. V0.2 code adds public/private routing, isolated local development repositories, a secret firewall, bounded context/memory interfaces, file policy, queue/quotas, and remote-provider adapters. Remote PostgreSQL, remote object storage, and a production embedding provider are not configured.
+
 ## Hardware and system
 
 - MacBook Pro, `Mac16,5`; Apple M4 Max (16 CPU cores: 12 performance / 4 efficiency), 40 GPU cores, 48GB unified memory, approximately 1TB internal SSD.
