@@ -1,0 +1,40 @@
+# Models and caches
+models/
+cache/
+*.safetensors
+*.gguf
+*.incomplete
+
+# Runtime and temporary data
+runtime/
+tmp/
+inbox/
+output/
+logs/
+
+# Raw benchmark artifacts
+benchmarks/**/*.jsonl
+benchmarks/**/context-*-raw.json
+benchmarks/**/stability-30min.log
+benchmarks/**/stability-30min-requests.json
+
+# Secrets
+.env
+.env.*
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
