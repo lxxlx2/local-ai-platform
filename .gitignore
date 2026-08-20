@@ -17,6 +17,7 @@ benchmarks/**/*.jsonl
 benchmarks/**/context-*-raw.json
 benchmarks/**/stability-30min.log
 benchmarks/**/stability-30min-requests.json
+benchmarks/**/idle-observation.log
 
 # Secrets
 .env
