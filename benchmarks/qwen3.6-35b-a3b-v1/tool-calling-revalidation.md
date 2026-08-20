@@ -18,3 +18,13 @@ Chat round trips, five total multi-turn round trips, streaming tool-call event a
 The model template accepts tools and emits XML tool-call markup; oMLX parses it to OpenAI-compatible structures. The earlier stability harness observed no `delta.tool_calls` chunks because it only inspected streaming deltas; source inspection shows oMLX can emit structured calls at final stream completion. This is a supported hypothesis, not a conclusive streaming validation.
 
 Raw API responses are stored locally in the git-ignored `tool-calling-revalidation-raw.json` artifact.
+
+## Phase 3B final acceptance
+
+- **Multi-turn:** 5/5 PASS. Every initial Responses request returned a structured call with the expected function and JSON arguments; every `function_call_output` was accepted and generated a grounded final answer. The Bangkok/Tokyo answers rendered `C` as `°C`, which is semantically equivalent to the deterministic mock value and not a tool-result failure. Tool loops: 0.
+- **Chat streaming:** PASS. The SSE stream exposed a structured call delta with call id, `get_weather`, and assembled JSON arguments `{"city": "Bangkok"}`.
+- **Responses streaming:** PASS. The SSE stream emitted the implemented function-call event sequence; call id, function name, and assembled arguments were all present and JSON-valid.
+- **Streaming round trip:** not separately executed; non-streaming Responses final answer was used after the streamed-call acceptance evidence.
+- **Codex-like isolated sequence:** NOT EXECUTED. Consequently the filesystem boundary, command allowlist, patch correctness, pytest execution, and agent-loop metrics are untested.
+
+`CODEX_LOCAL_READY=NO`: the remaining blocker is the unexecuted isolated Codex-like sequence, not a model/service/configuration failure. The 19/20 reliability failure remains classified as a single harness-observed missing/non-validated structured call; its raw per-call details were not preserved, so it cannot be attributed conclusively beyond model/output variability. No production configuration change or oMLX restart is indicated.

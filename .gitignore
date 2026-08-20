@@ -19,6 +19,7 @@ benchmarks/**/stability-30min.log
 benchmarks/**/stability-30min-requests.json
 benchmarks/**/idle-observation.log
 benchmarks/**/tool-calling-revalidation-raw.json
+benchmarks/**/tool-calling-final-raw.json
 
 # Secrets
 .env
