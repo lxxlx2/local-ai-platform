@@ -31,3 +31,7 @@ The final 64K cross-context question reached the 1,500-token output cap. Swap de
 30-minute mixed workload: 30 requests, 30 successful, 0 API errors, context isolation PASS, JSON PASS, Structured Tool Calling NOT VALIDATED. Swap was 1,046.25MiB at start and 1,038.25MiB at end; thermal NORMAL.
 
 Production context guidance: Chat/X/Sticker/Livestream realtime 8K; Codex pending tool validation, Novel writing/review, and Research 32K; special long context 64K.
+
+## Control-plane position
+
+Telegram Bot is the planned primary Chinese-button control plane. Qwen3.6 is the FAST/default local model for bounded single-request tasks, not a Coding Agent or Codex replacement: real multi-step structured-agent loops failed to progress beyond repeated list/test calls. Deterministic task, approval, permissions, and audit layers retain execution authority.

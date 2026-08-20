@@ -20,6 +20,8 @@ benchmarks/**/stability-30min-requests.json
 benchmarks/**/idle-observation.log
 benchmarks/**/tool-calling-revalidation-raw.json
 benchmarks/**/tool-calling-final-raw.json
+benchmarks/**/codex-like-agent-raw.json
+benchmarks/**/responses-agent-loop-raw.json
 
 # Secrets
 .env
