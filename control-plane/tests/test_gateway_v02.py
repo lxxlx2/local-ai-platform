@@ -3,9 +3,12 @@ import pytest
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.authorization import AuthorizationDenied, authorize
 from local_ai_control.services.chat import ChatService
+from local_ai_control.services.omlx import ModelReply
 from local_ai_control.services.files import UnsafeFile, safe_public_upload
 from local_ai_control.services.memory import ContextAssembler
 from local_ai_control.services.queue import DeterministicQueue, QueuedJob, Priority
+from local_ai_control.services.intent import classify_owner_text
+from local_ai_control.services.rate_limit import PublicRateLimiter
 from local_ai_control.services.remote import LocalObjectStorage, PostgresAdapter, S3CompatibleObjectStorage
 from local_ai_control.services.security import SecretFirewall
 from local_ai_control.services.storage import ScopedSQLiteRepository
@@ -84,10 +87,18 @@ def test_recent_context_is_bounded(public_repo, identities):
 
 def test_file_sandbox_and_archive_rejection(tmp_path):
     root = tmp_path / "public-jobs"
-    assert safe_public_upload(root, "note.txt", b"safe").parent == root
+    assert safe_public_upload(root, "note.txt", b"safe", "text/plain").parent == root
     for name in ("../escape.txt", "/tmp/escape.txt", "x.zip", "run.sh"):
         with pytest.raises(UnsafeFile):
             safe_public_upload(root, name, b"x")
+    with pytest.raises(UnsafeFile):
+        safe_public_upload(root, "note.txt", b"x", "application/octet-stream")
+    external = tmp_path / "external"
+    external.mkdir()
+    link = tmp_path / "linked-jobs"
+    link.symlink_to(external, target_is_directory=True)
+    with pytest.raises(UnsafeFile):
+        safe_public_upload(link, "note.txt", b"x")
 
 
 def test_owner_priority_queue(identities):
@@ -96,6 +107,19 @@ def test_owner_priority_queue(identities):
     queue.put(QueuedJob(Priority.PUBLIC_INTERACTIVE, public.internal_user_id, "chat"))
     queue.put(QueuedJob(Priority.OWNER_INTERACTIVE, owner.internal_user_id, "chat"))
     assert queue.get().user_id == owner.internal_user_id
+
+
+def test_owner_control_intent_is_preview_only(identities):
+    owner, public, _ = identities
+    assert classify_owner_text(owner.role, "帮我检查归灯记最近5章的人物设定冲突").kind == "CONTROL_INTENT"
+    assert classify_owner_text(public.role, "帮我检查归灯记最近5章的人物设定冲突").kind == "CHAT_INTENT"
+
+
+def test_public_rate_limit_does_not_limit_owner(identities):
+    owner, public, _ = identities
+    limiter = PublicRateLimiter(per_minute=2, per_hour=5, per_day=10)
+    assert limiter.allow(public) and limiter.allow(public) and not limiter.allow(public)
+    assert limiter.allow(owner)
 
 
 def test_object_storage_and_remote_not_configured(tmp_path):
@@ -109,9 +133,9 @@ def test_object_storage_and_remote_not_configured(tmp_path):
 
 class FakeProvider:
     def __init__(self): self.calls = 0
-    def generate(self, prompt):
+    def generate(self, prompt, max_output_tokens=1024):
         self.calls += 1
-        return {"output_text": "安全回复"}
+        return ModelReply("安全回复", "completed", None, 2, max_output_tokens)
 
 
 def test_blocked_secret_never_calls_provider_or_stores(public_repo, identities):
@@ -120,6 +144,6 @@ def test_blocked_secret_never_calls_provider_or_stores(public_repo, identities):
     provider = FakeProvider()
     chat = ChatService(public_repo, provider)
     answer = chat.reply(user, session, "Bearer abcdefghijklmnopqrstuvwxyz12345")
-    assert "没有发送给 AI" in answer
+    assert "没有发送给 AI" in answer.text
     assert provider.calls == 0
     assert public_repo.recent_messages(user, session) == []

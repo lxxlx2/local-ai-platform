@@ -1,0 +1,13 @@
+# Engineering acceptance
+
+## Self-Acceptance First
+
+`pytest PASS` does not equal product acceptance. Each change must follow this order:
+
+```text
+code → unit → integration → real local service → security → acceptance harness → self acceptance → user UX acceptance
+```
+
+The final user test is a small visual and interaction gate, not outsourced QA. Reproduce every user-found defect with a stable fixture, document the failure layer and root cause, and keep the regression test permanently.
+
+For Telegram chat, acceptance includes the actual provider, canonical persistence, the shared output renderer, chunk reconstruction, a capture transport, and security regressions. Runtime reports contain metrics only and remain Git-ignored.

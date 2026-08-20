@@ -12,7 +12,10 @@ from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.authorization import AuthorizationDenied, authorize
 from local_ai_control.services.chat import ChatService
 from local_ai_control.services.control import ControlPlane
+from local_ai_control.services.intent import classify_owner_text, preview_text
 from local_ai_control.services.omlx import OmlxProvider
+from local_ai_control.services.output import TelegramOutputRenderer
+from local_ai_control.services.rate_limit import PublicRateLimiter
 from local_ai_control.services.security import SECRET_BLOCK_MESSAGE, SecretFirewall
 from local_ai_control.services.storage import ScopedSQLiteRepository
 
@@ -63,6 +66,8 @@ async def run():
     public_repo = ScopedSQLiteRepository(settings.public_db_path, "public")
     private_repo.migrate(); public_repo.migrate()
     firewall = SecretFirewall()
+    renderer = TelegramOutputRenderer()
+    rate_limiter = PublicRateLimiter(settings.public_messages_per_minute, settings.public_messages_per_hour, settings.public_messages_per_day)
     bot = Bot(settings.token)
     dp = Dispatcher()
 
@@ -81,6 +86,13 @@ async def run():
         title, keyboard = home_for(ctx)
         await target.answer(title, reply_markup=keyboard)
 
+    async def send_chat_output(message, text):
+        rendered = renderer.package(text)
+        for chunk in rendered.chunks:
+            await message.answer(chunk, parse_mode=None)
+        logging.info("telegram output chars=%s chunks=%s", len(rendered.canonical_text), len(rendered.chunks))
+        return rendered
+
     @dp.message(CommandStart())
     async def start(message: Message):
         await respond_home(message, identity(message))
@@ -93,13 +105,24 @@ async def run():
             logging.warning("security blocked type=%s user=%s", decision.category, ctx.internal_user_id)
             await message.answer(SECRET_BLOCK_MESSAGE)
             return
+        intent = classify_owner_text(ctx.role, message.text)
+        if intent.kind == "CONTROL_INTENT":
+            await message.answer(preview_text(intent), reply_markup=inline([[("⬅️ 返回首页", "home")]]))
+            return
+        if not rate_limiter.allow(ctx):
+            await message.answer("请求过于频繁，请稍后再试。")
+            return
         session_id = await chat_session(ctx)
         try:
-            answer = ChatService(repo_for(ctx), OmlxProvider(), firewall).reply(ctx, session_id, message.text)
+            result = ChatService(repo_for(ctx), OmlxProvider(), firewall).reply(ctx, session_id, message.text)
         except Exception as error:
             logging.warning("chat unavailable type=%s role=%s", type(error).__name__, ctx.role)
-            answer = "AI 服务暂时不可用，请稍后重试。"
-        await message.answer(answer)
+            result = None
+        if result is None:
+            await send_chat_output(message, "AI 服务暂时不可用，请稍后重试。")
+            return
+        await send_chat_output(message, result.text)
+        logging.info("chat completion status=%s output_tokens=%s requested_limit=%s", result.finish_reason, result.output_tokens, result.requested_max_output_tokens)
 
     @dp.callback_query(F.data == "chat:new")
     async def new_chat(query: CallbackQuery):
@@ -151,6 +174,27 @@ async def run():
         await query.message.answer("🧠 模型\n\nQwen3.6：已加载｜TEXT：可用｜CODING_AGENT：不可用\nVision / Audio / Embedding / Image Generation：未安装。\n不会自动下载模型。", reply_markup=inline([[("⬅️ 返回首页", "home")]]))
         await query.answer()
 
+    @dp.callback_query(F.data == "owner:memory")
+    async def owner_memory(query: CallbackQuery):
+        ctx = identity(query)
+        try:
+            authorize(ctx, "owner:memory")
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True); return
+        await query.message.answer("🧠 我的记忆\n\n可用：最近记忆、长期偏好、项目记忆、搜索、删除/设置。\n当前为本地开发存储；语义向量检索仍等待 Embedding Provider。", reply_markup=inline([[("⬅️ 返回首页", "home")]]))
+        await query.answer()
+
+    @dp.callback_query(F.data.in_({"owner:image", "owner:video", "owner:file"}))
+    async def owner_capability(query: CallbackQuery):
+        ctx = identity(query)
+        try:
+            authorize(ctx, query.data)
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True); return
+        text = {"owner:image": "当前尚未安装图片理解模型。", "owner:video": "当前尚未安装 Whisper 或视频分析模型。", "owner:file": "当前仅规划 txt / md 安全文件分析；不会读取私人项目文件。"}[query.data]
+        await query.message.answer(text, reply_markup=inline([[("⬅️ 返回首页", "home")]]))
+        await query.answer()
+
     @dp.callback_query(F.data.startswith(("owner:", "private:", "guidengji:")))
     async def private_route(query: CallbackQuery):
         ctx = identity(query)
@@ -164,7 +208,7 @@ async def run():
     @dp.callback_query(F.data.startswith("public:"))
     async def public_route(query: CallbackQuery):
         ctx = identity(query)
-        labels = {"public:image": "图片 AI 理解模型尚未安装。", "public:video": "视频 AI 分析模型尚未安装。", "public:file": "当前仅规划 txt / md 安全文件入口；不接受压缩包或可执行文件。", "public:tasks": "当前没有可显示的任务。", "public:memory": "长期记忆默认关闭；未来可在这里明确启用、查看和删除。", "public:usage": "公共额度处于保守本地开发配置。", "public:help": "请不要发送助记词、私钥、密码或 API Token。链接不会自动下载。"}
+        labels = {"public:image": "当前尚未安装图片理解模型。", "public:video": "当前尚未安装 Whisper 或视频分析模型。", "public:file": "当前仅规划 txt / md 安全文件入口；不接受压缩包或可执行文件。", "public:tasks": "当前没有可显示的任务。", "public:memory": "长期记忆默认未启用。启用后只会保存你的记忆；当前可用功能仍在本地开发模式。", "public:usage": "公共额度处于保守本地开发配置。", "public:help": "请不要发送助记词、私钥、密码或 API Token。链接不会自动下载。"}
         await query.message.answer(labels.get(query.data, "该功能暂不可用。"), reply_markup=inline([[("⬅️ 返回首页", "home")]]))
         await query.answer()
 

@@ -4,6 +4,10 @@
 
 The currently running Bot remains V0.1 until an owner-performed restart. V0.2 code adds public/private routing, isolated local development repositories, a secret firewall, bounded context/memory interfaces, file policy, queue/quotas, and remote-provider adapters. Remote PostgreSQL, remote object storage, and a production embedding provider are not configured.
 
+## Chat-output self-acceptance
+
+V0.2 uses a shared safe-plain-text Telegram renderer and a 3,600-character chunker for Owner and Public chat. Default output budget is 1,024 tokens; explicit detailed requests may use 4,096. Responses API completion metadata is retained in application control flow. An incomplete answer is not silently stored or sent as a complete answer. The ignored runtime acceptance report stores only metrics, not answers or credentials.
+
 ## Hardware and system
 
 - MacBook Pro, `Mac16,5`; Apple M4 Max (16 CPU cores: 12 performance / 4 efficiency), 40 GPU cores, 48GB unified memory, approximately 1TB internal SSD.
