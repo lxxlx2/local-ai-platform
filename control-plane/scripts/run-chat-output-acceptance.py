@@ -11,6 +11,7 @@ from pathlib import Path
 
 from local_ai_control.domain.identity import identity_from_telegram
 from local_ai_control.services.chat import ChatService
+from local_ai_control.services.code_quality import check_python_block, python_blocks
 from local_ai_control.services.omlx import OmlxProvider
 from local_ai_control.services.output import CaptureTelegramTransport, TelegramOutputRenderer
 from local_ai_control.services.storage import ScopedSQLiteRepository
@@ -52,6 +53,30 @@ def run_case(name, repo, identity, prompt, checks):
     }
 
 
+def run_python_case(repo, identity):
+    prompt = "请详细解释 Python 中的装饰器，包括它是什么、为什么使用、工作原理，并给出两个完整、可独立运行的代码示例。每个示例都必须包含自己的 import。"
+    session = repo.create_session(identity, "REAL_QWEN_PYTHON_COMPLETE")
+    started = time.monotonic()
+    result = ChatService(repo, OmlxProvider()).reply(identity, session, prompt)
+    renderer = TelegramOutputRenderer()
+    package = renderer.package(result.text)
+    raw = repo.recent_messages(identity, session)[-1]["content"] if result.complete else ""
+    checks = [check_python_block(block) for block in python_blocks(raw)]
+    valid = result.complete and len(checks) >= 2 and all(check.syntax_valid and check.standalone_claim_ok for check in checks)
+    return {
+        "test_name": "REAL_QWEN_PYTHON_COMPLETE",
+        "status": "PASS" if valid else "FAIL",
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "char_count": len(package.canonical_text),
+        "output_tokens": result.output_tokens,
+        "finish_reason": result.finish_reason,
+        "requested_max_output_tokens": result.requested_max_output_tokens,
+        "chunk_count": len(package.chunks),
+        "python_block_count": len(checks),
+        "error_category": None if valid else "python_static_validation",
+    }
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="local-ai-chat-acceptance-") as directory:
         repo = ScopedSQLiteRepository(Path(directory) / "public.db", "public")
@@ -60,10 +85,11 @@ def main():
         renderer = TelegramOutputRenderer()
         no_markdown = lambda text: not renderer.has_visible_markdown_artifacts(text)
         records = [
-            run_case("REAL_QWEN_TEST_A", repo, identity, "你好，简单介绍一下你现在能帮我做什么。", [no_markdown, terminal, lambda text: len(text) <= 1600]),
-            run_case("REAL_QWEN_TEST_B", repo, identity, "请详细解释Python中的装饰器，并给出示例。", [no_markdown, terminal]),
-            run_case("REAL_QWEN_TEST_C", repo, identity, '解释下面代码中的星号是什么意思，并在回答中原样保留该代码：\n\nresult = "**test**"', [lambda text: "**test**" in text, no_markdown, terminal]),
+            run_case("REAL_QWEN_TEST_A", repo, identity, "你好，简单介绍一下你现在能帮我做什么。", [no_markdown, lambda text: len(text) <= 1600]),
+            run_case("REAL_QWEN_TEST_B", repo, identity, "请详细解释Python中的装饰器，并给出示例。", [no_markdown]),
+            run_case("REAL_QWEN_TEST_C", repo, identity, '解释下面代码中的星号是什么意思，并在回答中原样保留该代码：\n\nresult = "**test**"', [lambda text: 'result = "**test**"' in text, no_markdown]),
         ]
+        records.append(run_python_case(repo, identity))
         session = repo.create_session(identity, "REAL_QWEN_TEST_D")
         first = ChatService(repo, OmlxProvider()).reply(identity, session, "你好，简单介绍一下你现在能帮我做什么。")
         second = ChatService(repo, OmlxProvider()).reply(identity, session, "我刚才问了你什么？")

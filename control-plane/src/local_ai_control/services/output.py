@@ -13,13 +13,12 @@ class RenderedOutput:
 
 
 class TelegramOutputRenderer:
-    """Presentation-only safe plain-text renderer shared by Owner and Public chat."""
+    """Shared safe plain-text renderer. It never sends model HTML to Telegram."""
     def render(self, text: str) -> str:
         protected, values = self._protect_literals(text)
         lines = []
         for line in protected.splitlines(keepends=True):
-            if re.match(r"^\s{0,3}#{1,6}\s+", line):
-                line = re.sub(r"^(\s{0,3})#{1,6}\s+", r"\1", line)
+            line = re.sub(r"^(\s{0,3})#{1,6}\s+", r"\1", line)
             line = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", line)
             line = re.sub(r"__([^_\n]+)__", r"\1", line)
             lines.append(line)
@@ -30,30 +29,52 @@ class TelegramOutputRenderer:
         return RenderedOutput(canonical, tuple(chunk_text(canonical)))
 
     def has_visible_markdown_artifacts(self, rendered_text: str) -> bool:
-        protected, _ = self._protect_literals(rendered_text)
-        return bool(re.search(r"(^|\n)\s*#{1,6}\s+|\*\*[^*\n]+\*\*|__[^_\n]+__", protected))
+        for line in rendered_text.splitlines():
+            if line.startswith("    ") or line.startswith("代码：") or line.startswith("代码（") or re.match(r"\s*[A-Za-z_][\w.\[\]]*\s*=", line):
+                continue
+            line = re.sub(r"〔代码：[\s\S]*?〕", "", line)
+            try:
+                if line.strip().startswith(("{", "[")) and json.loads(line.strip()) is not None:
+                    continue
+            except (ValueError, json.JSONDecodeError):
+                pass
+            if re.search(r"^\s*#{1,6}\s+|\*\*[^*\n]+\*\*|__[^_\n]+__|```", line):
+                return True
+        return False
 
     def _protect_literals(self, text: str):
         values = []
-        def hold(match):
-            values.append(match.group(0))
+
+        def hold(value):
+            values.append(value)
             return f"\uE000{len(values)-1}\uE001"
-        text = re.sub(r"```[\s\S]*?```", hold, text)
-        text = re.sub(r"`[^`\n]+`", hold, text)
-        preserved_lines = []
+
+        def code_block(match):
+            language = match.group(1).strip()
+            source = match.group(2).strip("\n")
+            label = f"代码（{language}）：" if language else "代码："
+            body = "\n".join("    " + line for line in source.splitlines())
+            return hold(label + "\n" + body + "\n")
+
+        text = re.sub(r"```([^\n`]*)\n([\s\S]*?)```", code_block, text)
+        text = re.sub(r"`([^`\n]+)`", lambda match: hold("〔代码：" + match.group(1) + "〕"), text)
+        preserved = []
         for line in text.splitlines(keepends=True):
             stripped = line.strip()
+            if line.startswith("    "):
+                preserved.append(hold(line))
+                continue
             try:
                 if stripped.startswith(("{", "[")) and json.loads(stripped) is not None:
-                    preserved_lines.append(hold(re.match(r"[\s\S]*", line)))
+                    preserved.append(hold(line))
                     continue
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
-            if re.match(r"\s*(?:\$\s+|echo\b|cd\b|ls\b|python\b|git\b|grep\b)", line):
-                preserved_lines.append(hold(re.match(r"[\s\S]*", line)))
+            if re.match(r"\s*(?:\$\s+|echo\b|cd\b|ls\b|python\b|git\b|grep\b|[A-Za-z_][\w.\[\]]*\s*=)", line):
+                preserved.append(hold(line))
             else:
-                preserved_lines.append(line)
-        return "".join(preserved_lines), values
+                preserved.append(line)
+        return "".join(preserved), values
 
     @staticmethod
     def _restore(text, values):
@@ -65,11 +86,10 @@ def chunk_text(text: str, limit=TELEGRAM_SAFE_CHUNK_SIZE):
         return ["模型没有返回可显示的内容，请稍后重试。"]
     chunks, remaining = [], text
     while len(remaining) > limit:
-        window = remaining[:limit + 1]
+        window = remaining[: limit + 1]
         cut = max(window.rfind("\n\n") + 2, window.rfind("\n") + 1)
         if cut <= 0:
-            candidates = [window.rfind(mark) + 1 for mark in "。！？.!?"]
-            cut = max(candidates)
+            cut = max(window.rfind(mark) + 1 for mark in "。！？.!?")
         if cut <= 0:
             cut = limit
         chunks.append(remaining[:cut])

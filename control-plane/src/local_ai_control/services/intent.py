@@ -13,6 +13,10 @@ class Intent:
 
 def classify_owner_text(role: Role, text: str) -> Intent:
     """A deliberately narrow deterministic control gate; ordinary text remains chat."""
+    normalized = text.replace(" ", "")
+    capability_phrases = ("你能做什么", "介绍一下你", "你现在支持什么", "你有什么功能", "当前有什么能力", "现在是什么模型", "你用的什么模型", "用的是什么模型")
+    if any(phrase in normalized for phrase in capability_phrases):
+        return Intent("CAPABILITY_INTENT")
     if role is Role.OWNER and "归灯记" in text and "人物" in text and "最近5章" in text and any(word in text for word in ("检查", "冲突")):
         return Intent("CONTROL_INTENT", "guidengji", "character_consistency_check", {"last_chapters": 5})
     return Intent("CHAT_INTENT")
