@@ -88,6 +88,12 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
         try:
             result = super()._run_selected(job)
             self._require_lease()
+            if job.current_stage is WorkflowStage.REVIEW:
+                round_number = job.review_round + 1
+                unit = self.repository.review_work_unit_for_round(job.job_id, job.owner_id, round_number)
+                self.repository.mark_review_result_consumed(
+                    job.job_id, job.owner_id, round_number, unit.review_work_unit_id,
+                )
             return result
         finally:
             self.runners[job.current_stage] = original

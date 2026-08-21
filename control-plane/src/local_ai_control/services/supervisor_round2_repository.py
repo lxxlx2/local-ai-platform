@@ -140,9 +140,7 @@ class Round2RepositoryCoreMixin:
         return unit
 
     def create_job(self, *args, metadata: Mapping | None = None, **kwargs) -> WorkflowJob:
-        prepared = {}
-        for key, value in dict(metadata or {}).items():
-            prepared[str(key)] = value if SENSITIVE_KEY.search(str(key)) else recursive_private_sanitize(value)
+        prepared = recursive_private_sanitize(dict(metadata or {}))
         return super().create_job(*args, metadata=prepared, **kwargs)
 
     def record_event(self, job_id: str | None, event_type: str, stage: WorkflowStage | None = None,

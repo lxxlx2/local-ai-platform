@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -eu
+umask 077
 ROOT=/Users/jerson/AI
 PYTHON="$ROOT/runtime/control-plane-venv/bin/python"
 RUNTIME="$ROOT/runtime/supervisor"
@@ -17,10 +18,13 @@ if [[ -f "$IDENTITY" ]]; then
     echo "Supervisor already running (PID $PID)"
     exit 0
   fi
-  if [[ "$STATUS" == "MISMATCH" || "$STATUS" == "INVALID" ]]; then
-    echo "Stale supervisor identity did not match a live supervisor; replacing identity metadata only"
+  if [[ $RC -eq 3 ]]; then
+    rm -f "$IDENTITY"
+  else
+    CANDIDATE_PID=$("$PYTHON" -m local_ai_control.supervisor.process_identity pid --file "$IDENTITY" 2>/dev/null || echo unknown)
+    echo "ORPHAN_RECONCILIATION_REQUIRED PID=$CANDIDATE_PID STATUS=$STATUS"
+    exit 1
   fi
-  rm -f "$IDENTITY"
 fi
 nohup "$PYTHON" -m local_ai_control.supervisor.app daemon </dev/null >/dev/null 2>&1 &
 PID=$!
@@ -29,6 +33,11 @@ set +e
 START_ID=$("$PYTHON" -m local_ai_control.supervisor.process_identity start-identity --pid "$PID" 2>/dev/null)
 START_RC=$?
 set -e
+if [[ $START_RC -eq 3 ]]; then
+  rm -f "$IDENTITY"
+  echo "Supervisor child exited before identity capture (PID $PID)"
+  exit 1
+fi
 if [[ $START_RC -ne 0 || -z "$START_ID" ]]; then
   echo "ORPHAN_RECONCILIATION_REQUIRED PID=$PID"
   exit 1

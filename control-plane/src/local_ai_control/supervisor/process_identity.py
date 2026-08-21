@@ -125,6 +125,15 @@ def capture(pid: int, path: Path) -> ProcessIdentity:
     return snapshot
 
 
+def classify_started_process(pid: int) -> tuple[str, str | None]:
+    snapshot = process_snapshot(pid)
+    if snapshot is None:
+        return "DEAD", None
+    if snapshot.argv != EXPECTED_ARGV or snapshot.executable != str(CONTROL_PLANE_PYTHON):
+        return "MISMATCH", None
+    return "EXPECTED", snapshot.start_identity
+
+
 def start_identity(pid: int) -> str:
     snapshot = expected_snapshot(pid)
     if snapshot is None:
@@ -181,8 +190,12 @@ def cli() -> int:
         capture(args.pid, args.file)
         return 0
     if args.command == "start-identity":
-        print(start_identity(args.pid))
-        return 0
+        status, identity = classify_started_process(args.pid)
+        if status == "EXPECTED" and identity is not None:
+            print(identity)
+            return 0
+        print(status)
+        return 3 if status == "DEAD" else 4
     if args.command == "cleanup-start":
         status = cleanup_started_process(args.pid, args.start_identity, args.file)
         print(status)

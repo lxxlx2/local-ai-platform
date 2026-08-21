@@ -28,7 +28,7 @@ class Round2ReviewRepositoryMixin:
                                 spec: ReviewTaskSpec, review_work_unit_id: str | None = None) -> ReviewerWorkUnit:
         job = self.get_job_for_owner(job_id, owner_id)
         round_number = int(review_round)
-        if not 1 <= round_number <= job.max_review_rounds + 1:
+        if not 1 <= round_number <= job.max_review_rounds:
             raise ValueError("review work unit round outside safe range")
         validated = spec.validate()
         identifier = review_work_unit_id or str(uuid.uuid4())
@@ -155,6 +155,10 @@ class Round2ReviewRepositoryMixin:
                 "INSERT INTO supervisor_review_results VALUES(?,?,?,?,?,?,?,?)",
                 (review_work_unit_id, job_id, str(owner_id), int(review_round), encoded, digest, created, "SUBMITTED"),
             )
+            self.db.execute(
+                "UPDATE supervisor_review_work_units SET status='RESULT_SUBMITTED' WHERE review_work_unit_id=?",
+                (review_work_unit_id,),
+            )
             job = self.get_job(job_id)
             if (job.owner_id == str(owner_id) and job.current_stage is WorkflowStage.REVIEW
                     and job.status is JobStatus.WAITING and job.resume_state == "REVIEW_RESULT_PENDING"):
@@ -181,6 +185,43 @@ class Round2ReviewRepositoryMixin:
                          for item in payload["findings"])
         _, result = self._normalized_result(ReviewResult(payload["status"], findings), unit.repo_root)
         return result
+
+    def mark_review_result_consumed(self, job_id: str, owner_id: str, review_round: int,
+                                    review_work_unit_id: str) -> None:
+        self.get_review_work_unit(review_work_unit_id, job_id, owner_id, review_round)
+        token = getattr(self, "active_lease_token", None)
+        if getattr(self, "lease_failed", False):
+            from .supervisor_contracts import LeaseLostError
+            raise LeaseLostError("lease keeper failed; review result consumption denied")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            if token is not None and not self._lease_row_owned(token):
+                from .supervisor_contracts import LeaseLostError
+                self.db.rollback()
+                raise LeaseLostError("lease ownership required for review result consumption")
+            row = self.db.execute(
+                "SELECT status FROM supervisor_review_results WHERE review_work_unit_id=?",
+                (review_work_unit_id,),
+            ).fetchone()
+            if not row:
+                self.db.rollback()
+                raise KeyError("durable review result not submitted")
+            if row["status"] not in {"SUBMITTED", "CONSUMED"}:
+                self.db.rollback()
+                raise ValueError("invalid durable review result status")
+            self.db.execute(
+                "UPDATE supervisor_review_results SET status='CONSUMED' WHERE review_work_unit_id=?",
+                (review_work_unit_id,),
+            )
+            self.db.execute(
+                "UPDATE supervisor_review_work_units SET status='CONSUMED' WHERE review_work_unit_id=?",
+                (review_work_unit_id,),
+            )
+            self.db.commit()
+        except Exception:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
 
     def has_submitted_review_result(self, job_id: str, owner_id: str, review_round: int) -> bool:
         unit = self.review_work_unit_for_round(job_id, owner_id, review_round)
