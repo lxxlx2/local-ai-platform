@@ -9,3 +9,5 @@ Telegram → Bot ingress → Identity router → Authorization → deterministic
 ```
 
 Qwen3.6 is the fast/default local text model. Default chat context is 8K; complex owner tasks and research may use 32K; 64K remains a special long-context mode. Qwen3.6 is not a coding-agent replacement.
+
+Private Learning is a separate Owner-only offline plane: explicit feedback passes through the Secret Firewall and privacy redaction into a bounded content store, then versioned datasets, Golden evaluation, and an adapter registry. Memory is not training data. Public Training is OFF. No learning component can automatically modify base weights, restart oMLX, or switch the active model.

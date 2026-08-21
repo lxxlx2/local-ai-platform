@@ -20,6 +20,7 @@ NAVIGATION_ROUTES = {
     "menu:media": NavigationRoute("menu:media", "home", "home", "owner_media_menu"),
     "menu:public_media": NavigationRoute("menu:public_media", "home", "home", "public_media_menu"),
     "menu:system": NavigationRoute("menu:system", "home", "home", "owner_system_menu"),
+    "menu:learning": NavigationRoute("menu:learning", "owner:settings", "home", "learning_menu"),
     "owner:file": NavigationRoute("owner:file", "menu:media", "home", "owner_capability"),
     "owner:image": NavigationRoute("owner:image", "menu:media", "home", "owner_capability"),
     "owner:video": NavigationRoute("owner:video", "menu:media", "home", "owner_capability"),
@@ -68,6 +69,23 @@ def media_menu(owner=False):
 
 def system_menu():
     return inline([[("模型", "owner:model"), ("系统状态", "owner:system")], [("功能管理", "owner:features"), ("报告", "owner:reports")], [("公共视角预览", "public:preview")], [("返回", "home")]])
+
+
+def settings_menu():
+    return inline([[("学习与训练", "menu:learning"), ("隐私说明", "owner:learning_privacy")], [("返回", "home")]])
+
+
+def learning_menu():
+    return inline([[("训练候选", "learning:candidates"), ("我的反馈", "learning:feedback")],
+                   [("数据集", "learning:datasets"), ("评估", "learning:evals")],
+                   [("Adapter", "learning:adapters"), ("隐私设置", "learning:privacy")],
+                   [("返回", "owner:settings")]])
+
+
+def learning_feedback(message_id: str):
+    return inline([[("加入训练候选", f"learning:good:{message_id}"),
+                    ("不满意", f"learning:bad:{message_id}")],
+                   [("跳过", f"learning:skip:{message_id}")]])
 
 
 BACK = back_for("home")

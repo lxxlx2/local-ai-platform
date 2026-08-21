@@ -1,0 +1,25 @@
+{
+  "adapter_promotion": {
+    "catastrophic_dimension_drop": 0.2,
+    "minimum_overall_improvement": 0.02,
+    "require_bound_passing_eval": true
+  },
+  "content_store": {
+    "max_bytes": 100000000,
+    "max_item_bytes": 256000,
+    "provider": "bounded_local",
+    "retention_days": 30
+  },
+  "dataset": {
+    "fixed_seed": 20260821,
+    "public_training_enabled": false,
+    "synthetic_requires_validation": true
+  },
+  "training": {
+    "batch_size": 1,
+    "enabled": false,
+    "iterations": 3,
+    "learning_rate": 0.00001,
+    "lora_rank": 8
+  }
+}

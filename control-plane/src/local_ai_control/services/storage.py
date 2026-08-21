@@ -58,6 +58,23 @@ class ScopedSQLiteRepository:
         self.db.commit()
         return message_id
 
+    def message_pair_for_feedback(self, identity, assistant_message_id):
+        assistant = self.db.execute(
+            "SELECT * FROM messages WHERE id=? AND role='assistant' AND deleted_at IS NULL",
+            (assistant_message_id,),
+        ).fetchone()
+        if not assistant:
+            raise KeyError("assistant message not found")
+        ensure_owned(identity, assistant["owner_id"])
+        prompt = self.db.execute(
+            """SELECT * FROM messages WHERE session_id=? AND owner_id=? AND role='user'
+               AND deleted_at IS NULL AND created_at<=? ORDER BY created_at DESC LIMIT 1""",
+            (assistant["session_id"], assistant["owner_id"], assistant["created_at"]),
+        ).fetchone()
+        if not prompt:
+            raise KeyError("source prompt not found")
+        return prompt, assistant
+
     def recent_messages(self, identity, session_id, limit=12):
         self._session(identity, session_id)
         rows = self.db.execute("SELECT * FROM messages WHERE session_id=? AND owner_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?", (session_id, identity.internal_user_id, limit)).fetchall()
