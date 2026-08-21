@@ -1,4 +1,9 @@
-from local_ai_control.bot.app import home_for
+import asyncio
+
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardRemove
+
+from local_ai_control.bot.app import home_for, send_rendered_output, send_start_dashboard
+from local_ai_control.bot.ui import NAVIGATION_ROUTES, back_for, parent_route
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.capabilities import MODEL_NAME, capability_intro, model_identity
 from local_ai_control.services.code_quality import check_python_block
@@ -10,6 +15,10 @@ from local_ai_control.services.models import model_center_text
 
 def labels(markup):
     return [button.text for row in markup.inline_keyboard for button in row]
+
+
+def callback_values(markup):
+    return [button.callback_data for row in markup.inline_keyboard for button in row]
 
 
 def test_bug_ux_001_dashboard_is_inline_compact_and_professional():
@@ -27,6 +36,87 @@ def test_public_dashboard_is_scoped_and_compact():
     values = labels(markup)
     assert len(values) == 6
     assert not {"私人项目", "待审批", "系统管理"}.intersection(values)
+
+
+def test_bug_ux_003_back_navigation_uses_parent_route_registry():
+    expected = {
+        "owner:file": "menu:media",
+        "owner:image": "menu:media",
+        "owner:video": "menu:media",
+        "public:file": "menu:public_media",
+        "public:image": "menu:public_media",
+        "public:video": "menu:public_media",
+        "owner:model": "menu:system",
+        "owner:system": "menu:system",
+        "owner:features": "menu:system",
+        "owner:reports": "menu:system",
+        "public:preview": "menu:system",
+    }
+    assert {route: parent_route(route) for route in expected} == expected
+    assert all(callback_values(back_for(route)) == [parent] for route, parent in expected.items())
+    assert all(NAVIGATION_ROUTES[route].render_callback for route in expected)
+
+
+def test_bug_ux_004_start_cleanup_message_is_deleted_after_dashboard():
+    class Sent:
+        def __init__(self, text, markup):
+            self.text, self.markup, self.deleted = text, markup, False
+
+        async def delete(self):
+            self.deleted = True
+
+    class Target:
+        def __init__(self):
+            self.sent = []
+
+        async def answer(self, text, reply_markup=None):
+            message = Sent(text, reply_markup)
+            self.sent.append(message)
+            return message
+
+    target = Target()
+    dashboard_markup = home_for(identity_from_telegram(1, "1"))[1]
+    dashboard = asyncio.run(send_start_dashboard(target, "Dashboard", dashboard_markup))
+    assert len(target.sent) == 2
+    assert isinstance(target.sent[0].markup, ReplyKeyboardRemove) and target.sent[0].deleted
+    assert dashboard is target.sent[1] and dashboard.text == "Dashboard"
+    assert isinstance(dashboard.markup, InlineKeyboardMarkup)
+    assert [message.text for message in target.sent if not message.deleted] == ["Dashboard"]
+
+
+def test_start_dashboard_delete_failure_does_not_hide_dashboard():
+    class Cleanup:
+        async def delete(self):
+            raise RuntimeError("synthetic delete failure")
+
+    class Dashboard:
+        pass
+
+    class Target:
+        def __init__(self):
+            self.calls = 0
+
+        async def answer(self, _text, reply_markup=None):
+            self.calls += 1
+            return Cleanup() if self.calls == 1 else Dashboard()
+
+    target = Target()
+    result = asyncio.run(send_start_dashboard(target, "Dashboard", home_for(identity_from_telegram(1, "1"))[1]))
+    assert isinstance(result, Dashboard) and target.calls == 2
+
+
+def test_production_sender_uses_html_parse_mode_and_native_code_payload():
+    class Message:
+        def __init__(self):
+            self.calls = []
+
+        async def answer(self, text, parse_mode=None):
+            self.calls.append((text, parse_mode))
+
+    message = Message()
+    rendered = asyncio.run(send_rendered_output(message, TelegramOutputRenderer(), "使用 `@require_admin`。"))
+    assert message.calls == [(rendered.chunks[0], "HTML")]
+    assert "<code>@require_admin</code>" in message.calls[0][0]
 
 
 def test_bug_chat_001_capability_intro_is_product_aware_and_scoped():
@@ -58,7 +148,8 @@ def test_bug_tg_003_code_fences_are_not_telegram_visible():
     package = TelegramOutputRenderer().package(raw)
     rendered = package.canonical_text
     assert "```" not in rendered and "###" not in rendered
-    assert "代码（python）：" in rendered
+    assert package.parse_mode == "HTML"
+    assert "<pre><code>" in "".join(package.chunks)
     assert "@functools.wraps(func)" in rendered and "**kwargs" in rendered
     assert not TelegramOutputRenderer().has_visible_markdown_artifacts(rendered, package.protected_ranges)
 

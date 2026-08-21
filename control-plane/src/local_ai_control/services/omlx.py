@@ -45,8 +45,8 @@ def extract_text(response):
     if isinstance(response, dict):
         if isinstance(response.get("output_text"), str):
             return response["output_text"]
-        for item in response.get("output", []):
-            for content in item.get("content", []) if isinstance(item, dict) else []:
-                if content.get("type") in {"output_text", "text"} and isinstance(content.get("text"), str):
+        for item in response.get("output") or []:
+            for content in (item.get("content") or []) if isinstance(item, dict) else []:
+                if isinstance(content, dict) and content.get("type") in {"output_text", "text"} and isinstance(content.get("text"), str):
                     return content["text"]
     return ""

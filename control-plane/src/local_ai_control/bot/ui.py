@@ -1,8 +1,46 @@
+from dataclasses import dataclass
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def inline(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=data) for label, data in row] for row in rows])
+
+
+@dataclass(frozen=True)
+class NavigationRoute:
+    route_id: str
+    parent_route: str | None
+    home_route: str
+    render_callback: str
+
+
+NAVIGATION_ROUTES = {
+    "home": NavigationRoute("home", None, "home", "home"),
+    "menu:media": NavigationRoute("menu:media", "home", "home", "owner_media_menu"),
+    "menu:public_media": NavigationRoute("menu:public_media", "home", "home", "public_media_menu"),
+    "menu:system": NavigationRoute("menu:system", "home", "home", "owner_system_menu"),
+    "owner:file": NavigationRoute("owner:file", "menu:media", "home", "owner_capability"),
+    "owner:image": NavigationRoute("owner:image", "menu:media", "home", "owner_capability"),
+    "owner:video": NavigationRoute("owner:video", "menu:media", "home", "owner_capability"),
+    "public:file": NavigationRoute("public:file", "menu:public_media", "home", "public_route"),
+    "public:image": NavigationRoute("public:image", "menu:public_media", "home", "public_route"),
+    "public:video": NavigationRoute("public:video", "menu:public_media", "home", "public_route"),
+    "owner:model": NavigationRoute("owner:model", "menu:system", "home", "models"),
+    "owner:system": NavigationRoute("owner:system", "menu:system", "home", "system"),
+    "owner:features": NavigationRoute("owner:features", "menu:system", "home", "private_route"),
+    "owner:reports": NavigationRoute("owner:reports", "menu:system", "home", "private_route"),
+    "public:preview": NavigationRoute("public:preview", "menu:system", "home", "public_preview"),
+}
+
+
+def parent_route(route_id: str) -> str:
+    route = NAVIGATION_ROUTES.get(route_id)
+    return route.parent_route if route and route.parent_route else (route.home_route if route else "home")
+
+
+def back_for(route_id: str) -> InlineKeyboardMarkup:
+    return inline([[("返回", parent_route(route_id))]])
 
 
 def owner_dashboard(pending_count=0):
@@ -32,4 +70,4 @@ def system_menu():
     return inline([[("模型", "owner:model"), ("系统状态", "owner:system")], [("功能管理", "owner:features"), ("报告", "owner:reports")], [("公共视角预览", "public:preview")], [("返回", "home")]])
 
 
-BACK = inline([[("返回", "home")]])
+BACK = back_for("home")

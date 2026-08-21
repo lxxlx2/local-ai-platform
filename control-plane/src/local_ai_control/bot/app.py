@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
-from local_ai_control.bot.ui import BACK, inline, media_menu, owner_dashboard, public_dashboard, system_menu
+from local_ai_control.bot.ui import BACK, back_for, inline, media_menu, owner_dashboard, public_dashboard, system_menu
 from local_ai_control.services.capabilities import capability_intro, model_identity
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
@@ -52,6 +52,25 @@ def _health_ok():
         return False
 
 
+async def send_start_dashboard(target, title, keyboard):
+    """Remove the legacy reply keyboard without leaving a ghost message."""
+    cleanup = await target.answer("正在打开控制中心…", reply_markup=ReplyKeyboardRemove())
+    dashboard = await target.answer(title, reply_markup=keyboard)
+    try:
+        await cleanup.delete()
+    except Exception as error:
+        logging.warning("start cleanup delete failed type=%s", type(error).__name__)
+    return dashboard
+
+
+async def send_rendered_output(message, renderer, text):
+    rendered = renderer.package(text)
+    for chunk in rendered.chunks:
+        await message.answer(chunk, parse_mode=rendered.parse_mode)
+    logging.info("telegram output chars=%s chunks=%s", len(rendered.canonical_text), len(rendered.chunks))
+    return rendered
+
+
 async def run():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.load()
@@ -81,22 +100,14 @@ async def run():
 
     async def respond_home(target, ctx):
         title, keyboard = home_for(ctx)
-        # A reply keyboard is chat-scoped while an inline keyboard belongs to one
-        # message.  Remove the legacy keyboard, then attach the dashboard to that
-        # same message so /start does not add duplicate menu cards.
-        await target.answer("\u2063", reply_markup=ReplyKeyboardRemove())
-        await target.answer(title, reply_markup=keyboard)
+        await send_start_dashboard(target, title, keyboard)
 
     async def edit_page(query, text, keyboard=BACK):
         await query.message.edit_text(text, reply_markup=keyboard)
         await query.answer()
 
     async def send_chat_output(message, text):
-        rendered = renderer.package(text)
-        for chunk in rendered.chunks:
-            await message.answer(chunk, parse_mode=None)
-        logging.info("telegram output chars=%s chunks=%s", len(rendered.canonical_text), len(rendered.chunks))
-        return rendered
+        return await send_rendered_output(message, renderer, text)
 
     @dp.message(CommandStart())
     async def start(message: Message):
@@ -150,7 +161,7 @@ async def run():
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True)
             return
-        await edit_page(query, "公共视角预览\n\nPublic 用户可使用：AI 对话、受限文件入口、自己的任务与记忆。\n不包含私人项目、审批、系统状态或模型管理。", BACK)
+        await edit_page(query, "公共视角预览\n\nPublic 用户可使用：AI 对话、受限文件入口、自己的任务与记忆。\n不包含私人项目、审批、系统状态或模型管理。", back_for(query.data))
 
     @dp.callback_query(F.data == "home")
     async def home(query: CallbackQuery):
@@ -192,7 +203,7 @@ async def run():
         except Exception:
             health = "暂不可用"
         swap = safe_command(["sysctl", "-n", "vm.swapusage"])
-        await edit_page(query, f"系统状态\n\n本地 AI：{health}\nQwen3.6：已加载\noMLX：{health}\nSwap：{swap}")
+        await edit_page(query, f"系统状态\n\n本地 AI：{health}\nQwen3.6：已加载\noMLX：{health}\nSwap：{swap}", back_for(query.data))
 
     @dp.callback_query(F.data == "owner:model")
     async def models(query: CallbackQuery):
@@ -201,7 +212,7 @@ async def run():
             authorize(ctx, "owner:system")
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        await edit_page(query, model_center_text())
+        await edit_page(query, model_center_text(), back_for(query.data))
 
     @dp.callback_query(F.data == "owner:memory")
     async def owner_memory(query: CallbackQuery):
@@ -220,7 +231,7 @@ async def run():
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
         text = {"owner:image": "当前尚未安装图片理解模型。", "owner:video": "当前尚未安装 Whisper 或视频分析模型。", "owner:file": "当前仅规划 txt / md 安全文件分析；不会读取私人项目文件。"}[query.data]
-        await edit_page(query, text)
+        await edit_page(query, text, back_for(query.data))
 
     @dp.callback_query(F.data.startswith(("owner:", "private:", "guidengji:")))
     async def private_route(query: CallbackQuery):
@@ -229,13 +240,13 @@ async def run():
             authorize(ctx, query.data)
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        await edit_page(query, "此私人功能已受权限层保护。当前 V0.2 仅提供安全预览，不会执行文件、Git、发布或模型变更。")
+        await edit_page(query, "此私人功能已受权限层保护。当前 V0.2 仅提供安全预览，不会执行文件、Git、发布或模型变更。", back_for(query.data))
 
     @dp.callback_query(F.data.startswith("public:"))
     async def public_route(query: CallbackQuery):
         ctx = identity(query)
         labels = {"public:image": "当前尚未安装图片理解模型。", "public:video": "当前尚未安装 Whisper 或视频分析模型。", "public:file": "当前仅规划 txt / md 安全文件入口；不接受压缩包或可执行文件。", "public:tasks": "当前没有可显示的任务。", "public:memory": "长期记忆默认未启用。启用后只会保存你的记忆；当前可用功能仍在本地开发模式。", "public:usage": "公共额度处于保守本地开发配置。", "public:help": "请不要发送助记词、私钥、密码或 API Token。链接不会自动下载。"}
-        await edit_page(query, labels.get(query.data, "该功能暂不可用。"))
+        await edit_page(query, labels.get(query.data, "该功能暂不可用。"), back_for(query.data))
 
     @dp.callback_query()
     async def invalid_callback(query: CallbackQuery):

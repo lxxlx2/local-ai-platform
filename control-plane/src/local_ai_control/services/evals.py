@@ -9,7 +9,11 @@ class EvalResult:
 
 def run_golden(path: Path, evaluator) -> tuple[EvalResult, ...]:
     data = json.loads(path.read_text())
-    return tuple(EvalResult(case["id"], bool(evaluator(case)), "matched" if evaluator(case) else "expectation failed") for case in data["core_cases"])
+    results = []
+    for case in data["core_cases"]:
+        passed = bool(evaluator(case))
+        results.append(EvalResult(case["id"], passed, "matched" if passed else "expectation failed"))
+    return tuple(results)
 
 def promotion_allowed(results):
     return bool(results) and all(result.passed for result in results)

@@ -11,9 +11,9 @@ from pathlib import Path
 
 from local_ai_control.domain.identity import identity_from_telegram
 from local_ai_control.services.chat import ChatService
-from local_ai_control.services.code_quality import check_python_block, python_blocks
+from local_ai_control.services.code_quality import GOLDEN_CODE_002_SOURCE, CodeValidationLevel, GoldenFixtureSandboxedCodeValidator, check_python_block, python_blocks
 from local_ai_control.services.omlx import OmlxProvider
-from local_ai_control.services.output import CaptureTelegramTransport, TelegramOutputRenderer
+from local_ai_control.services.output import CaptureTelegramTransport, TelegramOutputRenderer, is_safe_telegram_html
 from local_ai_control.services.storage import ScopedSQLiteRepository
 
 
@@ -35,10 +35,11 @@ def run_case(name, repo, identity, prompt, checks):
     package = renderer.package(result.text)
     capture = CaptureTelegramTransport()
     for index, chunk in enumerate(package.chunks, 1):
-        capture.send(chunk, index, len(package.chunks), parse_mode=None)
+        capture.send(chunk, index, len(package.chunks), parse_mode=package.parse_mode)
     reconstructed = capture.reconstructed()
     artifact_free = not renderer.has_visible_markdown_artifacts(package.canonical_text, package.protected_ranges)
-    status = result.complete and reconstructed == package.canonical_text and all(item["parse_mode"] is None for item in capture.messages)
+    html_safe = all(is_safe_telegram_html(item["text"]) for item in capture.messages)
+    status = result.complete and reconstructed == package.canonical_text and all(item["parse_mode"] == "HTML" for item in capture.messages) and html_safe
     status = status and artifact_free and all(check(package.canonical_text) for check in checks)
     return {
         "test_name": name,
@@ -50,6 +51,9 @@ def run_case(name, repo, identity, prompt, checks):
         "requested_max_output_tokens": result.requested_max_output_tokens,
         "chunk_count": len(package.chunks),
         "reconstructed_char_count": len(reconstructed),
+        "content_loss": len(package.canonical_text) - len(reconstructed),
+        "telegram_parse_mode": package.parse_mode,
+        "html_safe": html_safe,
         "artifact_check": "PASS" if artifact_free else "FAIL",
         "protected_range_count": len(package.protected_ranges),
         "error_category": None if status else "acceptance_assertion",
@@ -65,9 +69,10 @@ def run_python_case(repo, identity):
     package = renderer.package(result.text)
     capture = CaptureTelegramTransport()
     for index, chunk in enumerate(package.chunks, 1):
-        capture.send(chunk, index, len(package.chunks), parse_mode=None)
+        capture.send(chunk, index, len(package.chunks), parse_mode=package.parse_mode)
     reconstructed = capture.reconstructed()
     artifact_free = not renderer.has_visible_markdown_artifacts(package.canonical_text, package.protected_ranges)
+    html_safe = all(is_safe_telegram_html(message["text"]) for message in capture.messages)
     raw = repo.recent_messages(identity, session)[-1]["content"] if result.complete else ""
     checks = [check_python_block(block) for block in python_blocks(raw)]
     valid = (
@@ -76,7 +81,8 @@ def run_python_case(repo, identity):
         and all(check.syntax_valid and check.standalone_claim_ok for check in checks)
         and artifact_free
         and reconstructed == package.canonical_text
-        and all(message["parse_mode"] is None for message in capture.messages)
+        and all(message["parse_mode"] == "HTML" for message in capture.messages)
+        and html_safe
     )
     return {
         "test_name": "REAL_QWEN_PYTHON_COMPLETE",
@@ -91,7 +97,22 @@ def run_python_case(repo, identity):
         "artifact_check": "PASS" if artifact_free else "FAIL",
         "reconstructed_char_count": len(reconstructed),
         "content_loss": len(package.canonical_text) - len(reconstructed),
+        "telegram_parse_mode": package.parse_mode,
+        "html_safe": html_safe,
         "error_category": None if valid else "python_static_validation",
+    }
+
+
+def run_golden_code_case():
+    started = time.monotonic()
+    result = GoldenFixtureSandboxedCodeValidator().validate_python(GOLDEN_CODE_002_SOURCE, "GOLDEN-CODE-002")
+    return {
+        "test_name": "GOLDEN-CODE-002",
+        "status": "PASS" if result.level is CodeValidationLevel.SANDBOX_EXECUTION_VALIDATED and result.stdout_marker_seen else "FAIL",
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "validation_level": result.level.value,
+        "peak_rss_kib": result.peak_rss_kib,
+        "error_category": result.issue,
     }
 
 
@@ -107,6 +128,7 @@ def main():
             run_case("REAL_QWEN_TEST_C", repo, identity, '解释下面代码中的星号是什么意思，并在回答中原样保留该代码：\n\nresult = "**test**"', [lambda text: 'result = "**test**"' in text, lambda text: "〔代码：" not in text and "‹" not in text]),
         ]
         records.append(run_python_case(repo, identity))
+        records.append(run_golden_code_case())
         session = repo.create_session(identity, "REAL_QWEN_TEST_D")
         first = ChatService(repo, OmlxProvider()).reply(identity, session, "你好，简单介绍一下你现在能帮我做什么。")
         second = ChatService(repo, OmlxProvider()).reply(identity, session, "我刚才问了你什么？")
@@ -127,7 +149,11 @@ def main():
     REPORT.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     print("overall=" + payload["overall"])
     for record in records:
-        print(f"{record['test_name']}={record['status']} chars={record['char_count']} tokens={record['output_tokens']} chunks={record['chunk_count']} finish={record['finish_reason']}")
+        print(
+            f"{record['test_name']}={record['status']} chars={record.get('char_count')} "
+            f"tokens={record.get('output_tokens')} chunks={record.get('chunk_count')} "
+            f"finish={record.get('finish_reason')} validation={record.get('validation_level')}"
+        )
 
 
 if __name__ == "__main__":

@@ -60,6 +60,10 @@ def test_remote_classification_and_golden_runner_are_enforced():
     results = run_golden(Path(__file__).parents[2] / "evals/golden-set.json", lambda case: case["id"] != "json-001")
     assert not promotion_allowed(results)
     assert promotion_allowed(run_golden(Path(__file__).parents[2] / "evals/golden-set.json", lambda _: True))
+    golden = run_golden(Path(__file__).parents[2] / "evals/golden-set.json", lambda _: True)
+    required = {"GOLDEN-NAV-001", "GOLDEN-NAV-002", "GOLDEN-UX-001", "GOLDEN-TG-002", "GOLDEN-TG-003", "GOLDEN-CODE-002"}
+    assert required.issubset({result.case_id for result in golden})
+    assert len(golden) == 10 and promotion_allowed(golden)
 
 
 def test_capability_matrix_is_single_source_of_truth_and_review_completion_reconciles():
