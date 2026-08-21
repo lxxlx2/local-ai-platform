@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import subprocess
 
@@ -6,7 +7,10 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
-from local_ai_control.bot.ui import BACK, back_for, inline, media_menu, owner_dashboard, public_dashboard, system_menu
+from local_ai_control.bot.ui import (
+    BACK, back_for, inline, media_menu, owner_dashboard, owner_task_menu,
+    public_dashboard, system_menu, workflow_controls, workflow_menu,
+)
 from local_ai_control.services.capabilities import capability_intro, model_identity
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
@@ -20,9 +24,11 @@ from local_ai_control.services.output import TelegramOutputRenderer
 from local_ai_control.services.rate_limit import PublicRateLimiter
 from local_ai_control.services.security import SECRET_BLOCK_MESSAGE, SecretFirewall
 from local_ai_control.services.storage import ScopedSQLiteRepository
+from local_ai_control.services.supervisor import JobStatus, SupervisorRepository, WorkflowSupervisor, default_demo_runners
 
 OWNER_HOME = "本地 AI 控制中心\n\n请选择一个功能："
 PUBLIC_HOME = "AI 助手\n\n你好！可以直接发送问题，或选择一个功能："
+SUPERVISOR_CONTROL_ACTIONS = {"pause", "resume", "cancel", "retry"}
 
 
 def owner_keyboard():
@@ -81,6 +87,8 @@ async def run():
     private_repo = ScopedSQLiteRepository(settings.private_memory_db_path, "private")
     public_repo = ScopedSQLiteRepository(settings.public_db_path, "public")
     private_repo.migrate(); public_repo.migrate()
+    supervisor_repo = SupervisorRepository(); supervisor_repo.migrate()
+    workflow_supervisor = WorkflowSupervisor(supervisor_repo, default_demo_runners(real_validation=True))
     firewall = SecretFirewall()
     renderer = TelegramOutputRenderer()
     rate_limiter = PublicRateLimiter(settings.public_messages_per_minute, settings.public_messages_per_hour, settings.public_messages_per_day)
@@ -190,6 +198,80 @@ async def run():
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
         await edit_page(query, "系统管理\n\n请选择一个功能：", system_menu())
 
+    def owner_workflow(query):
+        ctx = identity(query)
+        authorize(ctx, "owner:tasks")
+        return ctx
+
+    def workflow_summary(owner_id):
+        jobs = workflow_supervisor.list_jobs(owner_id, 20)
+        running = sum(job.status is JobStatus.RUNNING for job in jobs)
+        queued = sum(job.status is JobStatus.QUEUED for job in jobs)
+        blocked = sum(job.status in {JobStatus.BLOCKED, JobStatus.FAILED} for job in jobs)
+        completed = next((job for job in jobs if job.status is JobStatus.COMPLETED), None)
+        return (
+            f"自动工作流\n\n运行中：{running}\n排队中：{queued}\n失败或阻塞：{blocked}"
+            f"\n最近完成：{completed.title if completed else '无'}",
+            jobs,
+        )
+
+    @dp.callback_query(F.data == "owner:tasks")
+    async def owner_tasks(query: CallbackQuery):
+        try:
+            owner_workflow(query)
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True); return
+        await edit_page(query, "私人任务\n\n选择任务预览或程序级自动工作流：", owner_task_menu())
+
+    @dp.callback_query(F.data == "menu:workflows")
+    @dp.callback_query(F.data == "supervisor:status")
+    async def workflow_status(query: CallbackQuery):
+        try:
+            ctx = owner_workflow(query)
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True); return
+        text, jobs = workflow_summary(ctx.internal_user_id)
+        keyboard = workflow_menu()
+        if jobs:
+            latest = jobs[0]
+            text += (f"\n\n最近任务：{latest.title}\n状态：{latest.status.value}"
+                     f"\n阶段：{latest.current_stage.value}\nReview Round：{latest.review_round}"
+                     f"\n最近活动：{latest.updated_at}")
+            if latest.last_error:
+                text += f"\n错误：{latest.last_error[:200]}"
+            keyboard = workflow_controls(latest.job_id, latest.status.value)
+        await edit_page(query, text, keyboard)
+
+    @dp.callback_query(F.data == "supervisor:demo")
+    async def workflow_demo(query: CallbackQuery):
+        try:
+            ctx = owner_workflow(query)
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True); return
+        demo_key = hashlib.sha256(query.id.encode()).hexdigest()[:32]
+        job = workflow_supervisor.create_demo(ctx.internal_user_id, job_id=f"telegram-demo:{demo_key}")
+        await edit_page(query, f"已创建安全演示工作流。\n\n状态：{job.status.value}\n阶段：{job.current_stage.value}",
+                        workflow_controls(job.job_id, job.status.value))
+
+    @dp.callback_query(F.data.startswith("supervisor:"))
+    async def workflow_control(query: CallbackQuery):
+        try:
+            ctx = owner_workflow(query)
+            _, action, job_id = query.data.split(":", 2)
+            if action == "view":
+                job = workflow_supervisor.status(job_id, ctx.internal_user_id)
+            elif action in SUPERVISOR_CONTROL_ACTIONS:
+                job = getattr(workflow_supervisor, action)(job_id, ctx.internal_user_id)
+            else:
+                raise ValueError("unsupported supervisor action")
+        except (AuthorizationDenied, PermissionError):
+            await query.answer("当前账号没有此操作权限。", show_alert=True); return
+        except (KeyError, ValueError, AttributeError):
+            await query.answer("任务不存在或操作无效。", show_alert=True); return
+        await edit_page(query, f"工作流任务\n\n任务：{job.title}\n状态：{job.status.value}"
+                        f"\n阶段：{job.current_stage.value}\nReview Round：{job.review_round}",
+                        workflow_controls(job.job_id, job.status.value))
+
     @dp.callback_query(F.data == "owner:system")
     async def system(query: CallbackQuery):
         ctx = identity(query)
@@ -255,7 +337,7 @@ async def run():
     try:
         await dp.start_polling(bot)
     finally:
-        private_control.close(); private_repo.close(); public_repo.close(); await bot.session.close()
+        private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); await bot.session.close()
 
 
 if __name__ == "__main__":

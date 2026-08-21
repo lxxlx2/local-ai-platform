@@ -1,9 +1,13 @@
 import asyncio
 
+import pytest
 from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardRemove
 
-from local_ai_control.bot.app import home_for, send_rendered_output, send_start_dashboard
-from local_ai_control.bot.ui import NAVIGATION_ROUTES, back_for, parent_route
+from local_ai_control.bot.app import SUPERVISOR_CONTROL_ACTIONS, home_for, send_rendered_output, send_start_dashboard
+from local_ai_control.bot.ui import (
+    NAVIGATION_ROUTES, back_for, owner_task_menu, parent_route, workflow_controls, workflow_menu,
+)
+from local_ai_control.services.authorization import AuthorizationDenied, authorize
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.capabilities import MODEL_NAME, capability_intro, model_identity
 from local_ai_control.services.code_quality import check_python_block
@@ -36,6 +40,28 @@ def test_public_dashboard_is_scoped_and_compact():
     values = labels(markup)
     assert len(values) == 6
     assert not {"私人项目", "待审批", "系统管理"}.intersection(values)
+
+
+def test_supervisor_navigation_is_owner_only_and_not_on_main_dashboard():
+    owner = identity_from_telegram(1, "1")
+    public = identity_from_telegram(2, "1")
+    _, home = home_for(owner)
+    assert "自动工作流" not in labels(home)
+    assert labels(owner_task_menu()) == ["任务预览", "自动工作流", "返回"]
+    assert labels(workflow_menu()) == ["刷新状态", "创建安全演示", "返回"]
+    authorize(owner, "owner:tasks")
+    with pytest.raises(AuthorizationDenied):
+        authorize(public, "owner:tasks")
+
+
+def test_supervisor_control_callbacks_are_bounded_and_structured():
+    job_id = "12345678-1234-1234-1234-123456789012"
+    for status in ("QUEUED", "RUNNING", "WAITING", "FAILED", "BLOCKED", "COMPLETED"):
+        markup = workflow_controls(job_id, status)
+        callbacks = callback_values(markup)
+        assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
+        assert callbacks[-1] == "menu:workflows"
+    assert SUPERVISOR_CONTROL_ACTIONS == {"pause", "resume", "cancel", "retry"}
 
 
 def test_bug_ux_003_back_navigation_uses_parent_route_registry():

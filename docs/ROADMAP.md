@@ -7,7 +7,7 @@
 | 3 Structured tools | PARTIAL — API tool calling validated; autonomous coding agent failed and is frozen |
 | 4A Owner control plane V0.1 | DONE |
 | 4B Owner device basic UI | PARTIAL — running baseline |
-| 4C Unified public/private gateway | CURRENT — V0.2 chat-output self-acceptance complete; final UX restart pending |
+| 4C Unified public/private gateway | CURRENT — stable 4C.1E baseline; Workflow Supervisor V0.1 experimental/review-pending on feature branch |
 | 4D Remote memory/storage provider integration | NEXT |
 | 4E Public real-user test | NEXT |
 | 4F Telegram Mini App | LATER |

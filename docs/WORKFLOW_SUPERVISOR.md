@@ -1,0 +1,68 @@
+# Workflow Supervisor V0.1
+
+Status: **EXPERIMENTAL / REVIEW_PENDING** on `feat/workflow-supervisor-v01`. It is not deployed and must not be merged to `main` before a fresh independent review.
+
+## Why it exists
+
+`HOST_TURN_AUTO_RESUME=UNRELIABLE`. Prompt instructions cannot guarantee that a Codex host turn survives detached review or other asynchronous lifecycles. The Workflow Supervisor moves continuation, recovery, retry limits, and review-result consumption into a local durable program.
+
+## Deterministic lifecycle
+
+```text
+INTAKE → PRODUCER → VALIDATION → SELF_ACCEPTANCE → REVIEW
+                                                   ├─ FAIL → REVISION → VALIDATION
+                                                   └─ PASS → SECURITY → GIT_GATE → DONE
+```
+
+The language model never chooses the next state. Each stage has a bounded attempt count, every review has a bounded round count, and a global transition ceiling prevents loops. V0.1 processes one job at a time (`MAX_ACTIVE_JOBS=1`) under a leased SQLite singleton lock.
+
+## Durable private storage
+
+Runtime state lives in `/Users/jerson/AI/runtime/supervisor/supervisor.db` and is excluded from Git. The database contains jobs, stage runs, audit events, artifact metadata, and locks. WAL mode, busy timeout, idempotency keys, duplicate-event keys, bounded summaries, 5,000 events per job, 500 retained terminal jobs, metadata-only artifacts, and rotating 1 MB logs limit local growth. Prompts and sensitive metadata are persisted only as hashes or redacted values.
+
+This database belongs exclusively to the Owner private plane. Public identities are never allowed to list, view, create, or control Supervisor jobs.
+
+## Crash recovery
+
+On startup the consumer marks unfinished stage runs `INTERRUPTED`. Read-only/deterministic stages may be safely retried within their attempt limit. Potentially mutating `PRODUCER` and `REVISION` stages are blocked with `BLOCKED_REQUIRES_RECONCILIATION`; V0.1 never assumes they succeeded. Git Gate is read-only and never commits, pushes, or merges.
+
+## Runners and security
+
+- `LocalValidationRunner` accepts only argv-form `/Users/jerson/AI/runtime/control-plane-venv/bin/python -m pytest`; it uses `shell=False`, a bounded timeout, sanitized environment, and bounded output.
+- `SecurityRunner` reuses the existing Secret Firewall, checks both tracked-runtime policy and changed/untracked candidate files, and runs the existing Public/Private isolation regression files through the same allowlisted pytest executor. A failure cannot advance to Git Gate.
+- `GitGateRunner` is read-only, rejects `main`, and records that independent review remains pending.
+- `CodexTaskSpec` fixes `repo_root` at `/Users/jerson/AI`, validates allowed paths, hashes prompts, and applies the Secret Firewall.
+- `RealCodexRunner` is an interface boundary only. The local version/help probe reports the official non-interactive and App Server surface as available, but safe existing-auth task execution is not proven. Therefore `REAL_CODEX_RUNNER=PARTIAL`, auth reuse is `PARTIAL`, and real nested Codex execution is blocked pending independent review.
+
+The capability probe runs only `codex --version` and `codex --help`. It does not inspect auth files, print credentials, change `~/.codex`, request an API key, or start a task.
+
+## Operations
+
+The scripts use an exact PID file and verify that the process command contains `local_ai_control.supervisor.app daemon`. They never use `pkill`, `killall`, or broad process matching.
+
+```text
+/Users/jerson/AI/control-plane/scripts/start-supervisor.sh
+/Users/jerson/AI/control-plane/scripts/status-supervisor.sh
+/Users/jerson/AI/control-plane/scripts/stop-supervisor.sh
+```
+
+Status reports RUNNING/STOPPED, exact PID, active/queued counts, current stage, DB reachability, lock state, last completion, and last error. V0.1 intentionally does not install launchd.
+
+## Safe demo
+
+`SUPERVISOR_DEMO` uses a mock producer, real local pytest validation, deterministic self-acceptance, a mock reviewer that fails once, mock revision, validation again, review pass, Security Runner, and read-only Git Gate. It neither modifies a business repository nor commits/pushes. The demo verifies automatic revision, persistence, idempotency, and no user-supplied “continue” message.
+
+## Telegram surface
+
+The Owner private-task submenu includes an “自动工作流” page. It can show status, create only the safe demo, and pause/resume/cancel/retry existing Owner jobs. It does not accept natural-language-to-Codex execution. Public identities are denied server-side. These changes are not active until a later reviewed deployment and Bot restart.
+
+## Known limitations
+
+- No real Codex work unit is launched in V0.1.
+- Existing ChatGPT/Codex auth reuse is not fully confirmed.
+- No general side-effect reconciliation or commit/push runner is enabled.
+- The process is a simple daemon, not a launchd service.
+- Telegram integration is code-complete but not deployed in this phase.
+- Independent review is pending.
+
+Next required action: fresh read-only independent review after Codex quota refresh, then an explicit merge/deploy decision.

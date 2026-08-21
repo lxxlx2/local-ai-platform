@@ -20,6 +20,8 @@ NAVIGATION_ROUTES = {
     "menu:media": NavigationRoute("menu:media", "home", "home", "owner_media_menu"),
     "menu:public_media": NavigationRoute("menu:public_media", "home", "home", "public_media_menu"),
     "menu:system": NavigationRoute("menu:system", "home", "home", "owner_system_menu"),
+    "menu:owner_tasks": NavigationRoute("menu:owner_tasks", "home", "home", "owner_task_menu"),
+    "menu:workflows": NavigationRoute("menu:workflows", "menu:owner_tasks", "home", "workflow_menu"),
     "owner:file": NavigationRoute("owner:file", "menu:media", "home", "owner_capability"),
     "owner:image": NavigationRoute("owner:image", "menu:media", "home", "owner_capability"),
     "owner:video": NavigationRoute("owner:video", "menu:media", "home", "owner_capability"),
@@ -68,6 +70,26 @@ def media_menu(owner=False):
 
 def system_menu():
     return inline([[("模型", "owner:model"), ("系统状态", "owner:system")], [("功能管理", "owner:features"), ("报告", "owner:reports")], [("公共视角预览", "public:preview")], [("返回", "home")]])
+
+
+def owner_task_menu():
+    return inline([[("任务预览", "owner:task_previews"), ("自动工作流", "menu:workflows")], [("返回", "home")]])
+
+
+def workflow_menu():
+    return inline([[("刷新状态", "supervisor:status"), ("创建安全演示", "supervisor:demo")], [("返回", "menu:owner_tasks")]])
+
+
+def workflow_controls(job_id: str, status: str):
+    rows = []
+    if status in {"QUEUED", "RUNNING"}:
+        rows.append([("暂停", f"supervisor:pause:{job_id}"), ("取消", f"supervisor:cancel:{job_id}")])
+    elif status == "WAITING":
+        rows.append([("继续", f"supervisor:resume:{job_id}"), ("取消", f"supervisor:cancel:{job_id}")])
+    elif status in {"FAILED", "BLOCKED"}:
+        rows.append([("重试", f"supervisor:retry:{job_id}")])
+    rows.extend([[("刷新", f"supervisor:view:{job_id}")], [("返回", "menu:workflows")]])
+    return inline(rows)
 
 
 BACK = back_for("home")
