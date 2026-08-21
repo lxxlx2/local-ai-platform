@@ -5,6 +5,10 @@ MODEL_NAME = "Qwen3.6-35B-A3B-4bit"
 BACKEND_NAME = "本机 oMLX"
 
 
+def model_identity(healthy=True) -> str:
+    return f"当前对话模型：{MODEL_NAME}\n运行方式：{BACKEND_NAME}\n状态：{'已加载且健康' if healthy else '暂时不可用'}"
+
+
 def capability_intro(role: Role, healthy=True) -> str:
     status = "已加载且健康" if healthy else "暂时不可用"
     model = f"当前对话模型：{MODEL_NAME}\n运行：{BACKEND_NAME}（{status}）"

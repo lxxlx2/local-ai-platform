@@ -37,8 +37,9 @@ def run_case(name, repo, identity, prompt, checks):
     for index, chunk in enumerate(package.chunks, 1):
         capture.send(chunk, index, len(package.chunks), parse_mode=None)
     reconstructed = capture.reconstructed()
+    artifact_free = not renderer.has_visible_markdown_artifacts(package.canonical_text, package.protected_ranges)
     status = result.complete and reconstructed == package.canonical_text and all(item["parse_mode"] is None for item in capture.messages)
-    status = status and all(check(package.canonical_text) for check in checks)
+    status = status and artifact_free and all(check(package.canonical_text) for check in checks)
     return {
         "test_name": name,
         "status": "PASS" if status else "FAIL",
@@ -49,6 +50,8 @@ def run_case(name, repo, identity, prompt, checks):
         "requested_max_output_tokens": result.requested_max_output_tokens,
         "chunk_count": len(package.chunks),
         "reconstructed_char_count": len(reconstructed),
+        "artifact_check": "PASS" if artifact_free else "FAIL",
+        "protected_range_count": len(package.protected_ranges),
         "error_category": None if status else "acceptance_assertion",
     }
 
@@ -60,9 +63,21 @@ def run_python_case(repo, identity):
     result = ChatService(repo, OmlxProvider()).reply(identity, session, prompt)
     renderer = TelegramOutputRenderer()
     package = renderer.package(result.text)
+    capture = CaptureTelegramTransport()
+    for index, chunk in enumerate(package.chunks, 1):
+        capture.send(chunk, index, len(package.chunks), parse_mode=None)
+    reconstructed = capture.reconstructed()
+    artifact_free = not renderer.has_visible_markdown_artifacts(package.canonical_text, package.protected_ranges)
     raw = repo.recent_messages(identity, session)[-1]["content"] if result.complete else ""
     checks = [check_python_block(block) for block in python_blocks(raw)]
-    valid = result.complete and len(checks) >= 2 and all(check.syntax_valid and check.standalone_claim_ok for check in checks)
+    valid = (
+        result.complete
+        and len(checks) >= 2
+        and all(check.syntax_valid and check.standalone_claim_ok for check in checks)
+        and artifact_free
+        and reconstructed == package.canonical_text
+        and all(message["parse_mode"] is None for message in capture.messages)
+    )
     return {
         "test_name": "REAL_QWEN_PYTHON_COMPLETE",
         "status": "PASS" if valid else "FAIL",
@@ -73,6 +88,9 @@ def run_python_case(repo, identity):
         "requested_max_output_tokens": result.requested_max_output_tokens,
         "chunk_count": len(package.chunks),
         "python_block_count": len(checks),
+        "artifact_check": "PASS" if artifact_free else "FAIL",
+        "reconstructed_char_count": len(reconstructed),
+        "content_loss": len(package.canonical_text) - len(reconstructed),
         "error_category": None if valid else "python_static_validation",
     }
 
@@ -83,11 +101,10 @@ def main():
         repo.migrate()
         identity = identity_from_telegram(900001, "1")
         renderer = TelegramOutputRenderer()
-        no_markdown = lambda text: not renderer.has_visible_markdown_artifacts(text)
         records = [
-            run_case("REAL_QWEN_TEST_A", repo, identity, "你好，简单介绍一下你现在能帮我做什么。", [no_markdown, lambda text: len(text) <= 1600]),
-            run_case("REAL_QWEN_TEST_B", repo, identity, "请详细解释Python中的装饰器，并给出示例。", [no_markdown]),
-            run_case("REAL_QWEN_TEST_C", repo, identity, '解释下面代码中的星号是什么意思，并在回答中原样保留该代码：\n\nresult = "**test**"', [lambda text: 'result = "**test**"' in text, no_markdown]),
+            run_case("REAL_QWEN_TEST_A", repo, identity, "你好，简单介绍一下你现在能帮我做什么。", [lambda text: len(text) <= 1600]),
+            run_case("REAL_QWEN_TEST_B", repo, identity, "请详细解释Python中的装饰器，并给出示例。", [lambda text: "```" not in text and "〔代码：" not in text and "‹" not in text]),
+            run_case("REAL_QWEN_TEST_C", repo, identity, '解释下面代码中的星号是什么意思，并在回答中原样保留该代码：\n\nresult = "**test**"', [lambda text: 'result = "**test**"' in text, lambda text: "〔代码：" not in text and "‹" not in text]),
         ]
         records.append(run_python_case(repo, identity))
         session = repo.create_session(identity, "REAL_QWEN_TEST_D")

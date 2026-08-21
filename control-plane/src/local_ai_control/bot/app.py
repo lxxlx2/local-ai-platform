@@ -7,7 +7,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from local_ai_control.bot.ui import BACK, inline, media_menu, owner_dashboard, public_dashboard, system_menu
-from local_ai_control.services.capabilities import capability_intro
+from local_ai_control.services.capabilities import capability_intro, model_identity
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.authorization import AuthorizationDenied, authorize
@@ -84,8 +84,8 @@ async def run():
         # A reply keyboard is chat-scoped while an inline keyboard belongs to one
         # message.  Remove the legacy keyboard, then attach the dashboard to that
         # same message so /start does not add duplicate menu cards.
-        dashboard = await target.answer(title, reply_markup=ReplyKeyboardRemove())
-        await dashboard.edit_reply_markup(reply_markup=keyboard)
+        await target.answer("\u2063", reply_markup=ReplyKeyboardRemove())
+        await target.answer(title, reply_markup=keyboard)
 
     async def edit_page(query, text, keyboard=BACK):
         await query.message.edit_text(text, reply_markup=keyboard)
@@ -114,6 +114,9 @@ async def run():
             await message.answer("请求过于频繁，请稍后再试。")
             return
         intent = classify_owner_text(ctx.role, message.text)
+        if intent.kind == "MODEL_IDENTITY_INTENT":
+            await send_chat_output(message, model_identity(healthy=_health_ok()))
+            return
         if intent.kind == "CAPABILITY_INTENT":
             await send_chat_output(message, capability_intro(ctx.role, healthy=_health_ok()))
             return
