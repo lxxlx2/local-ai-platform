@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import subprocess
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -57,11 +59,7 @@ def process_snapshot(pid: int) -> ProcessIdentity | None:
 
 def expected_snapshot(pid: int) -> ProcessIdentity | None:
     snapshot = process_snapshot(pid)
-    if snapshot is None:
-        return None
-    if snapshot.argv != EXPECTED_ARGV:
-        return None
-    if snapshot.executable != str(CONTROL_PLANE_PYTHON):
+    if snapshot is None or snapshot.argv != EXPECTED_ARGV or snapshot.executable != str(CONTROL_PLANE_PYTHON):
         return None
     return snapshot
 
@@ -96,13 +94,11 @@ def read_identity(path: Path) -> ProcessIdentity:
     data = json.loads(target.read_text(encoding="utf-8"))
     if set(data) != {"pid", "executable", "argv", "start_identity"}:
         raise ValueError("invalid process identity schema")
-    pid = int(data["pid"])
-    executable = str(data["executable"])
-    argv = tuple(str(item) for item in data["argv"])
-    start_identity = str(data["start_identity"])
-    if pid <= 0 or not start_identity or argv != EXPECTED_ARGV or executable != str(CONTROL_PLANE_PYTHON):
+    identity = ProcessIdentity(int(data["pid"]), str(data["executable"]),
+                               tuple(str(item) for item in data["argv"]), str(data["start_identity"]))
+    if identity.pid <= 0 or not identity.start_identity or identity.argv != EXPECTED_ARGV or identity.executable != str(CONTROL_PLANE_PYTHON):
         raise ValueError("process identity does not match supervisor signature")
-    return ProcessIdentity(pid, executable, argv, start_identity)
+    return identity
 
 
 def identity_status(path: Path) -> tuple[str, int | None]:
@@ -129,12 +125,53 @@ def capture(pid: int, path: Path) -> ProcessIdentity:
     return snapshot
 
 
+def start_identity(pid: int) -> str:
+    snapshot = expected_snapshot(pid)
+    if snapshot is None:
+        raise RuntimeError("process does not match exact supervisor argv/executable identity")
+    return snapshot.start_identity
+
+
+def cleanup_started_process(pid: int, expected_start_identity: str, path: Path, wait_seconds: float = 5.0) -> str:
+    current = process_snapshot(pid)
+    if current is None:
+        Path(path).unlink(missing_ok=True)
+        return "ALREADY_DEAD"
+    if (current.argv != EXPECTED_ARGV or current.executable != str(CONTROL_PLANE_PYTHON)
+            or current.start_identity != expected_start_identity):
+        return "ORPHAN_RECONCILIATION_REQUIRED"
+    try:
+        saved = read_identity(path) if Path(path).exists() else None
+    except Exception:
+        saved = None
+    if saved is not None and saved != current:
+        return "ORPHAN_RECONCILIATION_REQUIRED"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        Path(path).unlink(missing_ok=True)
+        return "ALREADY_DEAD"
+    deadline = time.monotonic() + max(0.1, wait_seconds)
+    while time.monotonic() < deadline:
+        if process_snapshot(pid) is None:
+            Path(path).unlink(missing_ok=True)
+            return "TERMINATED"
+        time.sleep(0.05)
+    return "ORPHAN_RECONCILIATION_REQUIRED"
+
+
 def cli() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     capture_parser = sub.add_parser("capture")
     capture_parser.add_argument("--pid", type=int, required=True)
     capture_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
+    start_parser = sub.add_parser("start-identity")
+    start_parser.add_argument("--pid", type=int, required=True)
+    cleanup_parser = sub.add_parser("cleanup-start")
+    cleanup_parser.add_argument("--pid", type=int, required=True)
+    cleanup_parser.add_argument("--start-identity", required=True)
+    cleanup_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
     check_parser = sub.add_parser("check")
     check_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
     pid_parser = sub.add_parser("pid")
@@ -143,6 +180,13 @@ def cli() -> int:
     if args.command == "capture":
         capture(args.pid, args.file)
         return 0
+    if args.command == "start-identity":
+        print(start_identity(args.pid))
+        return 0
+    if args.command == "cleanup-start":
+        status = cleanup_started_process(args.pid, args.start_identity, args.file)
+        print(status)
+        return 0 if status in {"TERMINATED", "ALREADY_DEAD"} else 4
     status, pid = identity_status(args.file)
     if args.command == "pid":
         if pid is not None:

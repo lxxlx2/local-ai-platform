@@ -25,8 +25,24 @@ fi
 nohup "$PYTHON" -m local_ai_control.supervisor.app daemon </dev/null >/dev/null 2>&1 &
 PID=$!
 sleep 1
+set +e
+START_ID=$("$PYTHON" -m local_ai_control.supervisor.process_identity start-identity --pid "$PID" 2>/dev/null)
+START_RC=$?
+set -e
+if [[ $START_RC -ne 0 || -z "$START_ID" ]]; then
+  echo "ORPHAN_RECONCILIATION_REQUIRED PID=$PID"
+  exit 1
+fi
 if ! "$PYTHON" -m local_ai_control.supervisor.process_identity capture --pid "$PID" --file "$IDENTITY"; then
-  echo "Supervisor failed exact identity verification after start"
+  set +e
+  CLEANUP=$("$PYTHON" -m local_ai_control.supervisor.process_identity cleanup-start --pid "$PID" --start-identity "$START_ID" --file "$IDENTITY" 2>/dev/null)
+  CLEANUP_RC=$?
+  set -e
+  if [[ $CLEANUP_RC -ne 0 ]]; then
+    echo "ORPHAN_RECONCILIATION_REQUIRED PID=$PID"
+    exit 1
+  fi
+  echo "Supervisor failed identity capture; child cleanup=$CLEANUP"
   exit 1
 fi
 echo "Supervisor started (PID $PID)"
