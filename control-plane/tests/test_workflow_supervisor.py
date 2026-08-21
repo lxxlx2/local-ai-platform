@@ -182,7 +182,10 @@ def test_interrupted_mutating_stage_requires_reconciliation(tmp_path):
 
 class AlwaysFailReview:
     def run(self, context):
-        return StageResult.failed("still failing", metrics={"findings_count": 1})
+        return ReviewResult("FAIL", (ReviewFinding(
+            "HIGH", "control-plane/tests/test_workflow_supervisor.py",
+            "synthetic repeated review failure", "synthetic revision required",
+        ),)).to_stage_result()
 
 
 def test_review_round_limit_blocks_instead_of_looping(tmp_path):
@@ -356,8 +359,9 @@ def test_supervisor_status_cli_and_exact_pid_scripts(tmp_path):
     for script in scripts:
         source = script.read_text()
         assert os.access(script, os.X_OK)
-        assert "local_ai_control.supervisor.app daemon" in source
+        assert "process_identity" in source
         assert "pkill" not in source and "killall" not in source and "kill -9" not in source
+        assert '== *"$EXPECTED"*' not in source
     environment = {
         "PATH": os.defpath,
         "PYTHONPATH": str(CONTROL_PLANE_ROOT / "src"),

@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Sequence
 
 from .supervisor_contracts import (
-    AI_ROOT, MAX_FINDINGS_PER_JOB, MAX_FINDINGS_PER_REVIEW, CodexTaskSpec, PersistedReviewFinding,
-    ReviewFinding, WorkUnitSpec, WorkflowStage, _json_exact, _normalize_relative_path, _safe_review_text,
-    _safe_text, utc_now,
+    AI_ROOT, MAX_FINDINGS_PER_JOB, MAX_FINDINGS_PER_REVIEW, CodexTaskSpec,
+    PersistedReviewFinding, ReviewFinding, WorkUnitSpec, WorkflowStage,
+    _json_exact, _normalize_relative_path, _safe_review_text, _safe_text, utc_now,
 )
 
 
@@ -32,7 +32,11 @@ class DurablePayloadMixin:
             raise ValueError("invalid work_unit_id")
         existing = self.db.execute("SELECT * FROM supervisor_work_units WHERE work_unit_id=?", (identifier,)).fetchone()
         if existing:
-            return self._work_unit_from_row_checked(existing, job_id, owner_id)
+            existing_unit = self._work_unit_from_row_checked(existing, job_id, owner_id)
+            if (existing_unit.stage is not stage or existing_unit.review_round != round_number
+                    or existing_unit.prompt_sha256 != validated["task_prompt_sha256"]):
+                raise ValueError("work unit id conflicts with existing durable payload")
+            return existing_unit
         content_ref, prompt_sha = self.content_store.put(identifier, spec.task_prompt)
         created = utc_now()
         try:
@@ -90,7 +94,7 @@ class DurablePayloadMixin:
         unit = self.work_unit_for_stage(job_id, owner_id, stage, review_round)
         prompt = self.load_work_unit_prompt(unit.work_unit_id, job_id, owner_id)
         spec = CodexTaskSpec(unit.repo_root, unit.allowed_paths, prompt, unit.risk_level,
-                            unit.timeout_seconds, unit.model_role, unit.expected_output_schema)
+                             unit.timeout_seconds, unit.model_role, unit.expected_output_schema)
         persisted = spec.validate()
         if persisted["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("work unit prompt hash mismatch")
@@ -107,6 +111,8 @@ class DurablePayloadMixin:
         job = self.get_job_for_owner(job_id, owner_id)
         if not 1 <= int(review_round) <= job.max_review_rounds:
             raise ValueError("review round outside safe range")
+        if not findings:
+            return []
         if len(findings) > MAX_FINDINGS_PER_REVIEW:
             raise ValueError("review finding count exceeds per-round bound")
         existing_count = self.db.execute(
@@ -145,9 +151,7 @@ class DurablePayloadMixin:
             raise ValueError("review finding history exceeds per-job bound")
         with self.db:
             for row in prepared:
-                self.db.execute(
-                    "INSERT OR IGNORE INTO supervisor_review_findings VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", row
-                )
+                self.db.execute("INSERT OR IGNORE INTO supervisor_review_findings VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", row)
         return self.review_findings(job_id, owner_id, int(review_round))
 
     def _finding_integrity(self, row) -> str:

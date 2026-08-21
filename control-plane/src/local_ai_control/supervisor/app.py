@@ -10,15 +10,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from local_ai_control.services.supervisor import (
-    SUPERVISOR_DB,
-    SUPERVISOR_RUNTIME,
-    JobStatus,
-    LeaseLostError,
-    SupervisorRepository,
-    WorkflowSupervisor,
-    default_demo_runners,
-    ensure_private_directory,
-    ensure_private_file,
+    SUPERVISOR_DB, SUPERVISOR_RUNTIME, JobStatus, LeaseLostError,
+    SupervisorRepository, WorkflowSupervisor, default_demo_runners,
+    ensure_private_directory, ensure_private_file,
 )
 
 LOG_FILE = SUPERVISOR_RUNTIME / "supervisor.log"
@@ -31,16 +25,7 @@ def database_path() -> Path:
 
 def configure_logging() -> None:
     ensure_private_directory(SUPERVISOR_RUNTIME)
-    previous_umask = os.umask(0o077)
-    try:
-        handler = RotatingFileHandler(
-            LOG_FILE,
-            maxBytes=1_000_000,
-            backupCount=3,
-            encoding="utf-8",
-        )
-    finally:
-        os.umask(previous_umask)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     ensure_private_file(LOG_FILE)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logging.getLogger().handlers[:] = [handler]
@@ -56,12 +41,9 @@ def open_repository() -> SupervisorRepository:
 def daemon() -> int:
     configure_logging()
     repository = open_repository()
-    supervisor = WorkflowSupervisor(
-        repository,
-        default_demo_runners(real_validation=True),
-        retry_backoff_seconds=2,
-    )
+    supervisor = WorkflowSupervisor(repository, default_demo_runners(real_validation=True), retry_backoff_seconds=2)
     stopping = False
+    lease_lost = False
 
     def stop(_signum, _frame):
         nonlocal stopping
@@ -75,47 +57,31 @@ def daemon() -> int:
         return 2
     recovered = supervisor.recover_interrupted()
     pruned = repository.prune_terminal_jobs()
-    logging.info(
-        "supervisor started pid=%s recovered=%s pruned=%s",
-        os.getpid(),
-        recovered,
-        pruned,
-    )
-    exit_code = 0
+    logging.info("supervisor started pid=%s recovered=%s pruned=%s", os.getpid(), recovered, pruned)
     try:
         while not stopping:
             try:
                 job = supervisor.run_once()
             except LeaseLostError:
-                logging.error("supervisor lease lost; consumer exiting fail-closed")
-                exit_code = 3
+                lease_lost = True
+                logging.error("supervisor lease lost; exiting without reacquire")
                 break
             if job is None:
                 time.sleep(1)
             else:
-                logging.info(
-                    "job=%s status=%s stage=%s",
-                    job.job_id,
-                    job.status.value,
-                    job.current_stage.value,
-                )
+                logging.info("job=%s status=%s stage=%s", job.job_id, job.status.value, job.current_stage.value)
     finally:
         supervisor.release_singleton()
         repository.close()
         logging.info("supervisor stopped")
-    return exit_code
+    return 3 if lease_lost else 0
 
 
 def status_payload(repository: SupervisorRepository) -> dict:
     health = repository.health_snapshot()
     jobs = repository.list_jobs(limit=20)
     current = next(
-        (
-            job
-            for job in jobs
-            if job.status in {JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.WAITING}
-        ),
-        None,
+        (job for job in jobs if job.status in {JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.WAITING}), None,
     )
     return health | {
         "current_job_id": current.job_id if current else None,
@@ -148,16 +114,8 @@ def cli() -> int:
             print(json.dumps({"job_id": job.job_id, "status": job.status.value}, sort_keys=True))
         else:
             job = getattr(supervisor, args.action)(args.job_id, args.owner_id)
-            print(
-                json.dumps(
-                    {
-                        "job_id": job.job_id,
-                        "status": job.status.value,
-                        "stage": job.current_stage.value,
-                    },
-                    sort_keys=True,
-                )
-            )
+            print(json.dumps({"job_id": job.job_id, "status": job.status.value,
+                              "stage": job.current_stage.value}, sort_keys=True))
     finally:
         repository.close()
     return 0

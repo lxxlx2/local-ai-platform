@@ -1,27 +1,25 @@
 #!/bin/zsh
 set -eu
-umask 077
 ROOT=/Users/jerson/AI
 PYTHON="$ROOT/runtime/control-plane-venv/bin/python"
-PIDFILE="$ROOT/runtime/supervisor/supervisor.pid"
-EXPECTED="local_ai_control.supervisor.app daemon"
-
-[[ -f "$PIDFILE" ]] || { echo "Supervisor stopped"; exit 0; }
+IDENTITY="$ROOT/runtime/supervisor/supervisor.identity.json"
+export PYTHONPATH="$ROOT/control-plane/src"
+[[ -f "$IDENTITY" ]] || { echo "Supervisor stopped"; exit 0; }
 set +e
-PYTHONPATH="$ROOT/control-plane/src" "$PYTHON" -m local_ai_control.supervisor.process_identity verify >/dev/null 2>&1
-VERIFY_RC=$?
+STATUS=$("$PYTHON" -m local_ai_control.supervisor.process_identity check --file "$IDENTITY" 2>/dev/null)
+RC=$?
 set -e
-if [[ $VERIFY_RC -eq 2 ]]; then
-  PYTHONPATH="$ROOT/control-plane/src" "$PYTHON" -m local_ai_control.supervisor.process_identity cleanup >/dev/null 2>&1 || true
+if [[ $RC -eq 3 ]]; then
+  rm -f "$IDENTITY"
   echo "Supervisor stopped"
   exit 0
 fi
-if [[ $VERIFY_RC -ne 0 ]]; then
-  PID=$(<"$PIDFILE")
-  echo "Refusing to stop PID $PID: exact identity mismatch"
+if [[ $RC -ne 0 ]]; then
+  PID=$("$PYTHON" -m local_ai_control.supervisor.process_identity pid --file "$IDENTITY" 2>/dev/null || true)
+  echo "Refusing to stop PID ${PID:-unknown}: exact identity mismatch ($STATUS)"
   exit 1
 fi
-PID=$(<"$PIDFILE")
+PID=$("$PYTHON" -m local_ai_control.supervisor.process_identity pid --file "$IDENTITY")
 kill -TERM "$PID"
 for _ in {1..20}; do
   kill -0 "$PID" 2>/dev/null || break
@@ -31,5 +29,5 @@ if kill -0 "$PID" 2>/dev/null; then
   echo "Supervisor did not stop within timeout"
   exit 1
 fi
-PYTHONPATH="$ROOT/control-plane/src" "$PYTHON" -m local_ai_control.supervisor.process_identity cleanup >/dev/null 2>&1 || true
+rm -f "$IDENTITY"
 echo "Supervisor stopped"

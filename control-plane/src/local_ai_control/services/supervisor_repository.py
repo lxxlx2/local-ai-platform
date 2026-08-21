@@ -5,8 +5,8 @@ import re
 import sqlite3
 import time
 import uuid
-from pathlib import Path
 from enum import Enum
+from pathlib import Path
 from typing import Mapping
 
 from local_ai_control.services.security import SecretFirewall
@@ -20,6 +20,7 @@ from .supervisor_payloads import DurablePayloadMixin
 
 class SupervisorRepository(DurablePayloadMixin):
     """Owner-private durable state and executable payloads for the workflow supervisor."""
+
     def __init__(self, path: Path = SUPERVISOR_DB):
         self.path = Path(path)
         ensure_private_directory(self.path.parent)

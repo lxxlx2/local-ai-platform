@@ -9,20 +9,16 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from local_ai_control.services.supervisor import (
-    CONTROL_PLANE_PYTHON,
-    SUPERVISOR_RUNTIME,
-    ensure_private_directory,
-    ensure_private_file,
+    CONTROL_PLANE_PYTHON, SUPERVISOR_RUNTIME, ensure_private_directory, ensure_private_file,
 )
 
-PIDFILE = SUPERVISOR_RUNTIME / "supervisor.pid"
-IDENTITYFILE = SUPERVISOR_RUNTIME / "supervisor.identity.json"
 EXPECTED_ARGV = (
     str(CONTROL_PLANE_PYTHON),
     "-m",
     "local_ai_control.supervisor.app",
     "daemon",
 )
+IDENTITY_FILE = SUPERVISOR_RUNTIME / "supervisor.identity.json"
 
 
 @dataclass(frozen=True)
@@ -33,23 +29,21 @@ class ProcessIdentity:
     start_identity: str
 
 
-def _ps_value(pid: int, field: str) -> str:
-    completed = subprocess.run(
-        ["ps", "-p", str(pid), "-o", f"{field}="],
-        capture_output=True,
-        text=True,
-        shell=False,
-        timeout=3,
-        check=False,
-    )
-    if completed.returncode != 0:
-        return ""
-    return completed.stdout.strip()
+def _ps(pid: int, field: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", f"{field}="],
+            capture_output=True, text=True, shell=False, timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
 
 
-def current_identity(pid: int) -> ProcessIdentity | None:
-    command = _ps_value(pid, "command")
-    start = _ps_value(pid, "lstart")
+def process_snapshot(pid: int) -> ProcessIdentity | None:
+    command = _ps(pid, "command")
+    start = _ps(pid, "lstart")
     if not command or not start:
         return None
     try:
@@ -58,127 +52,105 @@ def current_identity(pid: int) -> ProcessIdentity | None:
         return None
     if not argv:
         return None
-    executable = os.path.realpath(argv[0])
-    return ProcessIdentity(int(pid), executable, argv, start)
+    return ProcessIdentity(int(pid), argv[0], argv, start)
 
 
-def expected_identity(pid: int) -> ProcessIdentity | None:
-    current = current_identity(pid)
-    if current is None:
+def expected_snapshot(pid: int) -> ProcessIdentity | None:
+    snapshot = process_snapshot(pid)
+    if snapshot is None:
         return None
-    expected_executable = os.path.realpath(str(CONTROL_PLANE_PYTHON))
-    if current.executable != expected_executable or current.argv != EXPECTED_ARGV:
+    if snapshot.argv != EXPECTED_ARGV:
         return None
-    return current
+    if snapshot.executable != str(CONTROL_PLANE_PYTHON):
+        return None
+    return snapshot
 
 
-def identities_match(saved: ProcessIdentity, current: ProcessIdentity | None) -> bool:
-    if current is None:
-        return False
-    return (
-        saved.pid == current.pid
-        and saved.executable == current.executable
-        and saved.argv == current.argv
-        and saved.start_identity == current.start_identity
-    )
-
-
-def _write_private(path: Path, text: str) -> None:
-    ensure_private_directory(path.parent)
-    temp = path.with_name(path.name + f".tmp.{os.getpid()}")
-    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+def write_identity(path: Path, identity: ProcessIdentity) -> None:
+    target = Path(path)
+    ensure_private_directory(target.parent)
+    tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
+    payload = asdict(identity)
+    payload["argv"] = list(identity.argv)
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
-        ensure_private_file(path)
+        ensure_private_file(tmp)
+        os.replace(tmp, target)
+        ensure_private_file(target)
     except Exception:
         try:
-            temp.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
         except OSError:
             pass
         raise
 
 
-def write_identity(pid: int, pidfile: Path = PIDFILE, identityfile: Path = IDENTITYFILE) -> ProcessIdentity:
-    identity = expected_identity(pid)
-    if identity is None:
-        raise RuntimeError("process does not match exact supervisor identity")
-    _write_private(identityfile, json.dumps(asdict(identity), sort_keys=True, separators=(",", ":")))
-    _write_private(pidfile, f"{pid}\n")
-    return identity
+def read_identity(path: Path) -> ProcessIdentity:
+    target = Path(path)
+    ensure_private_file(target)
+    data = json.loads(target.read_text(encoding="utf-8"))
+    if set(data) != {"pid", "executable", "argv", "start_identity"}:
+        raise ValueError("invalid process identity schema")
+    pid = int(data["pid"])
+    executable = str(data["executable"])
+    argv = tuple(str(item) for item in data["argv"])
+    start_identity = str(data["start_identity"])
+    if pid <= 0 or not start_identity or argv != EXPECTED_ARGV or executable != str(CONTROL_PLANE_PYTHON):
+        raise ValueError("process identity does not match supervisor signature")
+    return ProcessIdentity(pid, executable, argv, start_identity)
 
 
-def _load_saved(pidfile: Path, identityfile: Path) -> tuple[int | None, ProcessIdentity | None]:
-    if not pidfile.exists():
-        return None, None
+def identity_status(path: Path) -> tuple[str, int | None]:
+    target = Path(path)
+    if not target.exists():
+        return "MISSING", None
     try:
-        pid = int(pidfile.read_text().strip())
-    except (OSError, ValueError):
-        return None, None
-    if not identityfile.exists():
-        return pid, None
-    try:
-        data = json.loads(identityfile.read_text())
-        saved = ProcessIdentity(
-            int(data["pid"]),
-            str(data["executable"]),
-            tuple(str(value) for value in data["argv"]),
-            str(data["start_identity"]),
-        )
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return pid, None
-    return pid, saved
-
-
-def verify_identity(pidfile: Path = PIDFILE, identityfile: Path = IDENTITYFILE) -> tuple[bool, str]:
-    pid, saved = _load_saved(pidfile, identityfile)
-    if pid is None:
-        return False, "MISSING"
-    current = current_identity(pid)
+        saved = read_identity(target)
+    except (OSError, ValueError, json.JSONDecodeError, PermissionError):
+        return "INVALID", None
+    current = process_snapshot(saved.pid)
     if current is None:
-        return False, "DEAD"
-    if saved is None:
-        return False, "IDENTITY_MISSING"
-    if saved.pid != pid:
-        return False, "PID_MISMATCH"
-    if not identities_match(saved, current):
-        return False, "IDENTITY_MISMATCH"
-    if current.executable != os.path.realpath(str(CONTROL_PLANE_PYTHON)) or current.argv != EXPECTED_ARGV:
-        return False, "ARGV_MISMATCH"
-    return True, "OK"
+        return "DEAD", saved.pid
+    if current == saved:
+        return "MATCH", saved.pid
+    return "MISMATCH", saved.pid
 
 
-def cleanup_identity(pidfile: Path = PIDFILE, identityfile: Path = IDENTITYFILE) -> None:
-    pidfile.unlink(missing_ok=True)
-    identityfile.unlink(missing_ok=True)
+def capture(pid: int, path: Path) -> ProcessIdentity:
+    snapshot = expected_snapshot(pid)
+    if snapshot is None:
+        raise RuntimeError("process does not match exact supervisor argv/executable identity")
+    write_identity(path, snapshot)
+    return snapshot
 
 
 def cli() -> int:
-    parser = argparse.ArgumentParser(description="Exact Workflow Supervisor process identity")
+    parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    write = sub.add_parser("write")
-    write.add_argument("--pid", required=True, type=int)
-    sub.add_parser("verify")
-    sub.add_parser("cleanup")
+    capture_parser = sub.add_parser("capture")
+    capture_parser.add_argument("--pid", type=int, required=True)
+    capture_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
+    check_parser = sub.add_parser("check")
+    check_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
+    pid_parser = sub.add_parser("pid")
+    pid_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
     args = parser.parse_args()
-    if args.command == "write":
-        try:
-            write_identity(args.pid)
-        except Exception:
-            return 3
+    if args.command == "capture":
+        capture(args.pid, args.file)
         return 0
-    if args.command == "cleanup":
-        cleanup_identity()
-        return 0
-    valid, reason = verify_identity()
-    if valid:
-        print("IDENTITY=OK")
-        return 0
-    print(f"IDENTITY={reason}")
-    return 2 if reason in {"MISSING", "DEAD"} else 3
+    status, pid = identity_status(args.file)
+    if args.command == "pid":
+        if pid is not None:
+            print(pid)
+            return 0
+        return 3
+    print(status)
+    return {"MATCH": 0, "MISSING": 3, "DEAD": 3, "INVALID": 4, "MISMATCH": 4}[status]
 
 
 if __name__ == "__main__":

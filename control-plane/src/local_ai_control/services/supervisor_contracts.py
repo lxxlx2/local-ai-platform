@@ -4,17 +4,12 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import sqlite3
 import stat
-import subprocess
-import time
-import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+from typing import Mapping, Protocol
 
 from local_ai_control.services.security import SecretFirewall
 
@@ -97,7 +92,7 @@ class StageResultStatus(str, Enum):
 
 
 class LeaseLostError(RuntimeError):
-    pass
+    """Raised when the process no longer owns the singleton lease."""
 
 
 @dataclass(frozen=True)
@@ -121,59 +116,6 @@ class PersistedReviewFinding:
     integrity_hash: str
     status: str
     consumed_by_revision: str | None
-
-
-@dataclass(frozen=True)
-class ReviewResult:
-    status: str
-    findings: tuple[ReviewFinding, ...] = ()
-
-    def to_stage_result(self, repo_root: Path = AI_ROOT) -> "StageResult":
-        if self.status not in {"PASS", "FAIL"}:
-            raise ValueError("review status must be PASS or FAIL")
-        if self.status == "PASS" and self.findings:
-            raise ValueError("PASS review cannot contain findings")
-        normalized = []
-        root = Path(repo_root).resolve()
-        for finding in self.findings:
-            if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
-                raise ValueError("invalid review severity")
-            _normalize_relative_path(finding.file, root, "review finding")
-            normalized.append({
-                "severity": finding.severity,
-                "file": finding.file,
-                "evidence_sha256": hashlib.sha256(finding.evidence.encode()).hexdigest(),
-                "recommended_fix_sha256": hashlib.sha256(finding.recommended_fix.encode()).hexdigest(),
-            })
-        digest = hashlib.sha256(_json_exact(normalized, 64_000).encode()).hexdigest()
-        metrics = {
-            "findings_count": len(normalized),
-            "blocking_findings": sum(item["severity"] == "BLOCKING" for item in normalized),
-        }
-        artifact = ({"kind": "review_metadata", "reference": f"review:{digest}", "size_bytes": 0},)
-        if self.status == "PASS":
-            return StageResult.passed("Independent review contract returned PASS", metrics=metrics, artifacts=artifact)
-        return StageResult.failed(
-            "Independent review contract returned FAIL", metrics=metrics, artifacts=artifact,
-            review_findings=self.findings,
-        )
-
-
-TERMINAL_JOB_STATUSES = {JobStatus.FAILED, JobStatus.CANCELED, JobStatus.COMPLETED}
-SAFE_RECOVERY_STAGES = {
-    WorkflowStage.INTAKE, WorkflowStage.VALIDATION, WorkflowStage.SELF_ACCEPTANCE,
-    WorkflowStage.REVIEW, WorkflowStage.SECURITY,
-}
-NEXT_STAGE = {
-    WorkflowStage.INTAKE: WorkflowStage.PRODUCER,
-    WorkflowStage.PRODUCER: WorkflowStage.VALIDATION,
-    WorkflowStage.VALIDATION: WorkflowStage.SELF_ACCEPTANCE,
-    WorkflowStage.SELF_ACCEPTANCE: WorkflowStage.REVIEW,
-    WorkflowStage.REVISION: WorkflowStage.VALIDATION,
-    WorkflowStage.REVIEW: WorkflowStage.SECURITY,
-    WorkflowStage.SECURITY: WorkflowStage.GIT_GATE,
-    WorkflowStage.GIT_GATE: WorkflowStage.DONE,
-}
 
 
 @dataclass(frozen=True)
@@ -210,9 +152,7 @@ class StageContext:
     def current_review_findings(self) -> tuple[PersistedReviewFinding, ...]:
         if self.job.review_round <= 0:
             return ()
-        return tuple(self.repository.review_findings(
-            self.job.job_id, self.job.owner_id, self.job.review_round,
-        ))
+        return tuple(self.repository.review_findings(self.job.job_id, self.job.owner_id, self.job.review_round))
 
 
 @dataclass(frozen=True)
@@ -282,8 +222,7 @@ def _safe_metadata(metadata: Mapping | None) -> dict:
             value = str(clean.pop(key))
             clean[f"{key}_sha256"] = hashlib.sha256(value.encode()).hexdigest()
     clean = _safe_audit_value(clean)
-    encoded = _safe_json(clean, 16_000)
-    return json.loads(encoded)
+    return json.loads(_safe_json(clean, 16_000))
 
 
 def _normalize_relative_path(value: str, root: Path, label: str) -> str:
@@ -300,6 +239,64 @@ def _safe_review_text(value: str) -> str:
     if SecretFirewall().inspect(value).action == "BLOCK":
         return "[REDACTED_BY_SECRET_FIREWALL]"
     return _bounded(value, MAX_SUMMARY_CHARS) or ""
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    status: str
+    findings: tuple[ReviewFinding, ...] = ()
+
+    def to_stage_result(self, repo_root: Path = AI_ROOT) -> StageResult:
+        if self.status not in {"PASS", "FAIL"}:
+            raise ValueError("review status must be PASS or FAIL")
+        if self.status == "PASS" and self.findings:
+            raise ValueError("PASS review cannot contain findings")
+        normalized = []
+        root = Path(repo_root).resolve()
+        for finding in self.findings:
+            if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
+                raise ValueError("invalid review severity")
+            path = _normalize_relative_path(finding.file, root, "review finding")
+            normalized.append({
+                "severity": finding.severity,
+                "file": path,
+                "evidence_sha256": hashlib.sha256(finding.evidence.encode()).hexdigest(),
+                "recommended_fix_sha256": hashlib.sha256(finding.recommended_fix.encode()).hexdigest(),
+            })
+        digest = hashlib.sha256(_json_exact(normalized, 64_000).encode()).hexdigest()
+        metrics = {
+            "findings_count": len(normalized),
+            "blocking_findings": sum(item["severity"] == "BLOCKING" for item in normalized),
+        }
+        artifact = ({"kind": "review_metadata", "reference": f"review:{digest}", "size_bytes": 0},)
+        if self.status == "PASS":
+            return StageResult.passed("Independent review contract returned PASS", metrics=metrics, artifacts=artifact)
+        return StageResult.failed(
+            "Independent review contract returned FAIL",
+            metrics=metrics,
+            artifacts=artifact,
+            review_findings=self.findings,
+        )
+
+
+TERMINAL_JOB_STATUSES = {JobStatus.FAILED, JobStatus.CANCELED, JobStatus.COMPLETED}
+SAFE_RECOVERY_STAGES = {
+    WorkflowStage.INTAKE,
+    WorkflowStage.VALIDATION,
+    WorkflowStage.SELF_ACCEPTANCE,
+    WorkflowStage.REVIEW,
+    WorkflowStage.SECURITY,
+}
+NEXT_STAGE = {
+    WorkflowStage.INTAKE: WorkflowStage.PRODUCER,
+    WorkflowStage.PRODUCER: WorkflowStage.VALIDATION,
+    WorkflowStage.VALIDATION: WorkflowStage.SELF_ACCEPTANCE,
+    WorkflowStage.SELF_ACCEPTANCE: WorkflowStage.REVIEW,
+    WorkflowStage.REVISION: WorkflowStage.VALIDATION,
+    WorkflowStage.REVIEW: WorkflowStage.SECURITY,
+    WorkflowStage.SECURITY: WorkflowStage.GIT_GATE,
+    WorkflowStage.GIT_GATE: WorkflowStage.DONE,
+}
 
 
 @dataclass(frozen=True)
@@ -331,10 +328,13 @@ class CodexTaskSpec:
         schema = _safe_audit_value(self.expected_output_schema)
         _json_exact(schema, 16_000)
         return {
-            "repo_root": str(root), "allowed_paths": allowed,
+            "repo_root": str(root),
+            "allowed_paths": allowed,
             "task_prompt_sha256": hashlib.sha256(self.task_prompt.encode()).hexdigest(),
-            "risk_level": self.risk_level, "timeout_seconds": float(self.timeout_seconds),
-            "model_role": self.model_role, "expected_output_schema": schema,
+            "risk_level": self.risk_level,
+            "timeout_seconds": float(self.timeout_seconds),
+            "model_role": self.model_role,
+            "expected_output_schema": schema,
         }
 
 
