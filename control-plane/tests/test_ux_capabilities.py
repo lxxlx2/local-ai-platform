@@ -5,6 +5,7 @@ from local_ai_control.services.code_quality import check_python_block
 from local_ai_control.services.chat import needs_standalone_decorator_examples
 from local_ai_control.services.intent import classify_owner_text
 from local_ai_control.services.output import TelegramOutputRenderer
+from local_ai_control.services.models import model_center_text
 
 
 def labels(markup):
@@ -54,3 +55,8 @@ def test_bug_code_001_complete_examples_are_syntax_checked_and_self_contained():
     assert check_python_block(valid).standalone_claim_ok
     assert check_python_block(missing_import).issue == "functools import missing"
     assert needs_standalone_decorator_examples("请给出两个完整装饰器示例", "```python\n" + missing_import + "```")
+
+
+def test_model_center_is_owner_controlled_and_does_not_claim_coding_ready():
+    text = model_center_text()
+    assert MODEL_NAME in text and "CODING：未通过" in text and "不会自动下载模型" not in text

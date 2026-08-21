@@ -122,6 +122,12 @@ def test_public_rate_limit_does_not_limit_owner(identities):
     assert limiter.allow(owner)
 
 
+def test_public_capability_messages_are_rate_limited(identities):
+    _, public, _ = identities
+    limiter = PublicRateLimiter(per_minute=2, per_hour=5, per_day=10)
+    assert limiter.allow(public) and limiter.allow(public) and not limiter.allow(public)
+
+
 def test_object_storage_and_remote_not_configured(tmp_path):
     local = LocalObjectStorage(tmp_path / "objects")
     local.put("x", b"ok")

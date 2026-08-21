@@ -14,6 +14,7 @@ from local_ai_control.services.authorization import AuthorizationDenied, authori
 from local_ai_control.services.chat import ChatService
 from local_ai_control.services.control import ControlPlane
 from local_ai_control.services.intent import classify_owner_text, preview_text
+from local_ai_control.services.models import model_center_text
 from local_ai_control.services.omlx import OmlxProvider
 from local_ai_control.services.output import TelegramOutputRenderer
 from local_ai_control.services.rate_limit import PublicRateLimiter
@@ -80,8 +81,11 @@ async def run():
 
     async def respond_home(target, ctx):
         title, keyboard = home_for(ctx)
-        await target.answer(title, reply_markup=ReplyKeyboardRemove())
-        await target.answer(title, reply_markup=keyboard)
+        # A reply keyboard is chat-scoped while an inline keyboard belongs to one
+        # message.  Remove the legacy keyboard, then attach the dashboard to that
+        # same message so /start does not add duplicate menu cards.
+        dashboard = await target.answer(title, reply_markup=ReplyKeyboardRemove())
+        await dashboard.edit_reply_markup(reply_markup=keyboard)
 
     async def edit_page(query, text, keyboard=BACK):
         await query.message.edit_text(text, reply_markup=keyboard)
@@ -106,15 +110,15 @@ async def run():
             logging.warning("security blocked type=%s user=%s", decision.category, ctx.internal_user_id)
             await message.answer(SECRET_BLOCK_MESSAGE)
             return
+        if not rate_limiter.allow(ctx):
+            await message.answer("请求过于频繁，请稍后再试。")
+            return
         intent = classify_owner_text(ctx.role, message.text)
         if intent.kind == "CAPABILITY_INTENT":
             await send_chat_output(message, capability_intro(ctx.role, healthy=_health_ok()))
             return
         if intent.kind == "CONTROL_INTENT":
             await message.answer(preview_text(intent), reply_markup=inline([[("⬅️ 返回首页", "home")]]))
-            return
-        if not rate_limiter.allow(ctx):
-            await message.answer("请求过于频繁，请稍后再试。")
             return
         session_id = await chat_session(ctx)
         try:
@@ -194,7 +198,7 @@ async def run():
             authorize(ctx, "owner:system")
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        await edit_page(query, "模型\n\nQwen3.6：已加载｜TEXT：可用｜CODING_AGENT：不可用\nVision / Audio / Embedding / Image Generation：未安装。\n不会自动下载模型。")
+        await edit_page(query, model_center_text())
 
     @dp.callback_query(F.data == "owner:memory")
     async def owner_memory(query: CallbackQuery):

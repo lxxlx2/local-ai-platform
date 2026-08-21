@@ -1,5 +1,9 @@
 # Engineering acceptance
 
+## Quality governance
+
+The lifecycle is now Producer → deterministic validation → self acceptance → independent review → security gate → acceptance ready → user UX acceptance. The producer cannot self-approve; see `INDEPENDENT_REVIEW.md` and `QUALITY_GATES.md`.
+
 ## Self-Acceptance First
 
 `pytest PASS` does not equal product acceptance. Each change must follow this order:

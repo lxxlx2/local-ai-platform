@@ -45,6 +45,12 @@ def test_unfenced_assignment_keeps_literal_asterisks():
     assert rendered == 'result = "**test**"'
 
 
+def test_multiline_json_and_shell_literals_are_preserved():
+    raw = '{\n  "pattern": "**keep**",\n  "under": "__keep__"\n}\n\ncurl -H "X-Test: **keep**" https://example.invalid | cat\nexport VALUE="__keep__"'
+    rendered = TelegramOutputRenderer().render(raw)
+    assert rendered == raw
+
+
 def test_chunking_reconstructs_without_loss_or_duplication():
     text = ("第一段。\n\n" * 900) + "结尾。"
     chunks = chunk_text(text)
@@ -106,3 +112,16 @@ def test_user_supplied_assignment_is_preserved_in_code_explanation(public_repo, 
     session = public_repo.create_session(user)
     result = ChatService(public_repo, CompleteProvider()).reply(user, session, '解释下面代码：\nresult = "**test**"')
     assert 'result = "**test**"' in result.text
+
+
+class InvalidDecoratorProvider:
+    def generate(self, prompt, max_output_tokens=1024):
+        return ModelReply("```python\n@functools.wraps(func)\ndef wrapped():\n    return requests.get('x')\n```", "completed", None, 10, max_output_tokens)
+
+
+def test_invalid_standalone_decorator_blocks_are_replaced(public_repo, identities):
+    _, user = identities
+    session = public_repo.create_session(user)
+    result = ChatService(public_repo, InvalidDecoratorProvider()).reply(user, session, "请给出两个完整装饰器示例")
+    assert "requests.get" not in result.text
+    assert result.text.count("import functools") == 2

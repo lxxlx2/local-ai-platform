@@ -58,6 +58,7 @@ class TelegramOutputRenderer:
 
         text = re.sub(r"```([^\n`]*)\n([\s\S]*?)```", code_block, text)
         text = re.sub(r"`([^`\n]+)`", lambda match: hold("〔代码：" + match.group(1) + "〕"), text)
+        text = self._protect_json_values(text, hold)
         preserved = []
         for line in text.splitlines(keepends=True):
             stripped = line.strip()
@@ -70,11 +71,34 @@ class TelegramOutputRenderer:
                     continue
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
-            if re.match(r"\s*(?:\$\s+|echo\b|cd\b|ls\b|python\b|git\b|grep\b|[A-Za-z_][\w.\[\]]*\s*=)", line):
+            if re.match(r"\s*(?:\$\s+|(?:curl|wget|export|echo|cd|ls|python(?:3)?|git|grep|rg|sed|awk|cat|printf|chmod|find)\b|[A-Za-z_][\w.\[\]]*\s*=)", line) or re.search(r"(?:\||>>?|<<)\s*\S", line):
                 preserved.append(hold(line))
             else:
                 preserved.append(line)
         return "".join(preserved), values
+
+    @staticmethod
+    def _protect_json_values(text, hold):
+        """Hold complete JSON objects/arrays before line-oriented prose cleanup."""
+        decoder = json.JSONDecoder()
+        result, cursor = [], 0
+        while cursor < len(text):
+            match = re.search(r"(?m)^\s*(?=[{\[])", text[cursor:])
+            if not match:
+                result.append(text[cursor:])
+                break
+            start = cursor + match.start()
+            value_start = cursor + match.end()
+            try:
+                _, end = decoder.raw_decode(text[value_start:])
+            except json.JSONDecodeError:
+                result.append(text[cursor:value_start])
+                cursor = value_start
+                continue
+            result.append(text[cursor:start])
+            result.append(hold(text[start:value_start + end]))
+            cursor = value_start + end
+        return "".join(result)
 
     @staticmethod
     def _restore(text, values):

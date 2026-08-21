@@ -75,6 +75,12 @@ def needs_standalone_decorator_examples(message: str, answer: str) -> bool:
     return len(blocks) < 2 or not all(check_python_block(block).syntax_valid and check_python_block(block).standalone_claim_ok for block in blocks)
 
 
+def replace_invalid_decorator_examples(answer: str) -> str:
+    """Do not leave a runnable-looking invalid example beside the safe fallback."""
+    without_python = re.sub(r"```python\s*\n[\s\S]*?```", "", answer, flags=re.I).rstrip()
+    return without_python + DECORATOR_EXAMPLES
+
+
 class ChatService:
     """Chat has no filesystem, shell, Git, or control capabilities."""
     def __init__(self, repository, provider, firewall=None, assembler=None):
@@ -106,7 +112,7 @@ class ChatService:
             return ChatResult("回答尚未完整，为避免发送半句话，请重新提问或缩小问题范围。", False, reply.incomplete_reason or reply.status, reply.output_tokens, reply.requested_max_output_tokens)
         answer = reply.text
         if needs_standalone_decorator_examples(message, answer):
-            answer += DECORATOR_EXAMPLES
+            answer = replace_invalid_decorator_examples(answer)
         for line in supplied_code_lines(message):
             if line not in answer:
                 answer += "\n\n代码：\n" + line
