@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "production_aliases": {
+    "MAIN": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"},
+    "FAST": {"profile": "local-qwen36", "status": "VALIDATED"},
+    "FALLBACK": {"profile": "local-qwen36", "status": "VALIDATED"},
+    "VISION": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"},
+    "VIDEO_UNDERSTANDING": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"}
+  },
+  "runtime_isolation": {
+    "qwen38": "/Users/jerson/AI/runtime/qwen38-venv",
+    "audio": "/Users/jerson/AI/runtime/audio-venv",
+    "image": "/Users/jerson/AI/runtime/image-venv",
+    "video": "/Users/jerson/AI/runtime/video-venv",
+    "rag": "/Users/jerson/AI/runtime/rag-venv"
+  },
+  "policy": {"one_heavy_model_resident": true, "registered_is_not_ready": true, "raw_owner_only": true, "public_privilege_expansion": false}
+}
