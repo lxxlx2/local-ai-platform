@@ -12,7 +12,7 @@ from .supervisor_round2 import (
     DurableReviewRunner, LeaseKeepingRunner, PersistedReviewSubmission,
     ReviewTaskSpec, ReviewerWorkUnit, Round2SecurityRunner,
     Round2SupervisorRepository, Round2WorkflowSupervisor,
-    recursive_private_sanitize,
+    TaskObjective, recursive_private_sanitize,
 )
 
 SupervisorRepository = Round2SupervisorRepository

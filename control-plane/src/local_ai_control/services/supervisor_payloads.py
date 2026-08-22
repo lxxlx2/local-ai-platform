@@ -138,26 +138,36 @@ class DurablePayloadMixin:
         for finding in findings:
             if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
                 raise ValueError("invalid review severity")
-            path = policy.validate_candidate_path(
-                finding.file, unit.allowed_paths, deleted=finding.file in deleted_scope,
-            )
-            if path not in candidate_scope:
-                raise PermissionError("review finding is outside immutable candidate manifest")
+            scope = finding.scope or "FILE"
+            if scope == "FILE":
+                if not finding.file:
+                    raise ValueError("FILE review finding requires a file")
+                path = policy.validate_candidate_path(
+                    finding.file, unit.allowed_paths, deleted=finding.file in deleted_scope,
+                )
+                if path not in candidate_scope:
+                    raise PermissionError("review finding is outside immutable candidate manifest")
+            elif scope == "WORKFLOW":
+                if finding.file:
+                    raise ValueError("WORKFLOW review finding cannot reference a repository path")
+                path = ""
+            else:
+                raise ValueError("invalid review finding scope")
             evidence = _safe_review_text(finding.evidence)
             recommended = _safe_review_text(finding.recommended_fix)
             basis = _json_exact({
                 "job_id": job_id, "review_round": int(review_round), "severity": finding.severity,
-                "file": path, "evidence": evidence, "recommended_fix": recommended,
+                "scope": scope, "file": path, "evidence": evidence, "recommended_fix": recommended,
             }, 16_000)
             finding_id = hashlib.sha256(basis.encode()).hexdigest()[:40]
             created = utc_now()
             integrity = hashlib.sha256(_json_exact({
                 "finding_id": finding_id, "job_id": job_id, "review_round": int(review_round),
-                "severity": finding.severity, "file": path, "evidence": evidence,
+                "severity": finding.severity, "scope": scope, "file": path, "evidence": evidence,
                 "recommended_fix": recommended, "created_at": created,
             }, 20_000).encode()).hexdigest()
             prepared.append((finding_id, job_id, str(owner_id), int(review_round), finding.severity,
-                             path, evidence, recommended, created, integrity, "NEW", None))
+                             path, evidence, recommended, created, integrity, "NEW", None, scope))
         unique_new = {item[0] for item in prepared}
         already = 0
         if unique_new:
@@ -170,10 +180,24 @@ class DurablePayloadMixin:
             raise ValueError("review finding history exceeds per-job bound")
         with self.db:
             for row in prepared:
-                self.db.execute("INSERT OR IGNORE INTO supervisor_review_findings VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                self.db.execute(
+                    "INSERT OR IGNORE INTO supervisor_review_findings"
+                    "(finding_id,job_id,owner_id,review_round,severity,file_path,evidence_summary,"
+                    "recommended_fix,created_at,integrity_hash,status,consumed_by_revision,finding_scope) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", row,
+                )
         return self.review_findings(job_id, owner_id, int(review_round))
 
     def _finding_integrity(self, row) -> str:
+        return hashlib.sha256(_json_exact({
+            "finding_id": row["finding_id"], "job_id": row["job_id"],
+            "review_round": int(row["review_round"]), "severity": row["severity"],
+            "scope": row["finding_scope"] if "finding_scope" in row.keys() else "FILE",
+            "file": row["file_path"], "evidence": row["evidence_summary"],
+            "recommended_fix": row["recommended_fix"], "created_at": row["created_at"],
+        }, 20_000).encode()).hexdigest()
+
+    def _legacy_finding_integrity(self, row) -> str:
         return hashlib.sha256(_json_exact({
             "finding_id": row["finding_id"], "job_id": row["job_id"],
             "review_round": int(row["review_round"]), "severity": row["severity"],
@@ -189,12 +213,19 @@ class DurablePayloadMixin:
         ).fetchall()
         results = []
         for row in rows:
-            if self._finding_integrity(row) != row["integrity_hash"]:
+            scope = row["finding_scope"] if "finding_scope" in row.keys() else "FILE"
+            valid = self._finding_integrity(row) == row["integrity_hash"]
+            if not valid and scope == "FILE":
+                valid = self._legacy_finding_integrity(row) == row["integrity_hash"]
+            if not valid:
                 raise ValueError("review finding integrity mismatch")
             results.append(PersistedReviewFinding(
                 row["finding_id"], row["job_id"], int(row["review_round"]), row["severity"],
-                row["file_path"], row["evidence_summary"], row["recommended_fix"], row["created_at"],
+                (None if scope == "WORKFLOW"
+                 else row["file_path"]),
+                row["evidence_summary"], row["recommended_fix"], row["created_at"],
                 row["integrity_hash"], row["status"], row["consumed_by_revision"],
+                scope,
             ))
         return results
 

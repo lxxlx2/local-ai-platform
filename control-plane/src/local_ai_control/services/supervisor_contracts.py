@@ -615,9 +615,10 @@ class LeaseLostError(RuntimeError):
 @dataclass(frozen=True)
 class ReviewFinding:
     severity: str
-    file: str
+    file: str | None
     evidence: str
     recommended_fix: str
+    scope: str = "FILE"
 
 
 @dataclass(frozen=True)
@@ -626,13 +627,14 @@ class PersistedReviewFinding:
     job_id: str
     review_round: int
     severity: str
-    file: str
+    file: str | None
     evidence: str
     recommended_fix: str
     created_at: str
     integrity_hash: str
     status: str
     consumed_by_revision: str | None
+    scope: str = "FILE"
 
 
 @dataclass(frozen=True)
@@ -787,8 +789,19 @@ class ReviewResult:
         for finding in self.findings:
             if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
                 raise ValueError("invalid review severity")
-            path = _normalize_relative_path(finding.file, root, "review finding")
+            scope = finding.scope or "FILE"
+            if scope == "FILE":
+                if not finding.file:
+                    raise ValueError("FILE review finding requires a file")
+                path = _normalize_relative_path(finding.file, root, "review finding")
+            elif scope == "WORKFLOW":
+                if finding.file:
+                    raise ValueError("WORKFLOW review finding cannot reference a path")
+                path = None
+            else:
+                raise ValueError("invalid review finding scope")
             normalized.append({
+                "scope": scope,
                 "severity": finding.severity,
                 "file": path,
                 "evidence_sha256": hashlib.sha256(finding.evidence.encode()).hexdigest(),

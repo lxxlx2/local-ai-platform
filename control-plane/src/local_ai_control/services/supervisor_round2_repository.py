@@ -48,6 +48,7 @@ class Round2RepositoryCoreMixin:
               candidate_identity_json TEXT NOT NULL,
               safe_file_manifest_json TEXT,
               patch_content_ref TEXT, patch_sha256 TEXT, candidate_identity_sha256 TEXT,
+              objective_content_ref TEXT, objective_sha256 TEXT, objective_manifest_hash TEXT,
               created_at TEXT NOT NULL, status TEXT NOT NULL,
               FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id),
               UNIQUE(job_id, review_round)
@@ -71,6 +72,10 @@ class Round2RepositoryCoreMixin:
             with self.db:
                 self.db.execute("ALTER TABLE supervisor_review_work_units ADD COLUMN safe_file_manifest_json TEXT")
         for column in ("patch_content_ref", "patch_sha256", "candidate_identity_sha256"):
+            if column not in review_columns:
+                with self.db:
+                    self.db.execute(f"ALTER TABLE supervisor_review_work_units ADD COLUMN {column} TEXT")
+        for column in ("objective_content_ref", "objective_sha256", "objective_manifest_hash"):
             if column not in review_columns:
                 with self.db:
                     self.db.execute(f"ALTER TABLE supervisor_review_work_units ADD COLUMN {column} TEXT")

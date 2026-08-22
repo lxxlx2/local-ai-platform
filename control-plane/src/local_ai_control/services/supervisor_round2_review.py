@@ -12,7 +12,9 @@ from .supervisor_contracts import (
     RepoAccessPolicy, ReviewFinding, ReviewResult, WorkflowStage, _json_exact,
     _safe_review_text, utc_now,
 )
-from .supervisor_round2_common import PersistedReviewSubmission, ReviewTaskSpec, ReviewerWorkUnit, _canonical_digest
+from .supervisor_round2_common import (
+    PersistedReviewSubmission, ReviewTaskSpec, ReviewerWorkUnit, TaskObjective, _canonical_digest,
+)
 
 class Round2ReviewRepositoryMixin:
     @staticmethod
@@ -29,12 +31,44 @@ class Round2ReviewRepositoryMixin:
             "safe_file_manifest": validated["safe_file_manifest"],
             "patch_sha256": patch_sha256,
             "candidate_identity_sha256": candidate_identity_sha256,
+            "objective_sha256": validated["objective_sha256"],
+            "objective_manifest_hash": validated["objective_manifest_hash"],
         }
+
+    def _objective_for_review(self, job_id: str, owner_id: str) -> tuple[TaskObjective, str, str]:
+        job = self.get_job_for_owner(job_id, owner_id)
+        producer = self.db.execute(
+            "SELECT * FROM supervisor_work_units WHERE job_id=? AND owner_id=? AND stage=? AND review_round=0",
+            (job_id, str(owner_id), WorkflowStage.PRODUCER.value),
+        ).fetchone()
+        if producer:
+            goal = self.content_store.get(producer["prompt_content_ref"], producer["prompt_sha256"])
+            schema = json.loads(producer["expected_output_schema_json"])
+            source_id = producer["work_unit_id"]
+            acceptance = ("Satisfy the immutable Producer objective.",
+                          f"Expected output schema: {_json_exact(schema, 16_000)}")
+        else:
+            goal = f"Complete workflow job: {job.title}"
+            source_id = None
+            acceptance = (f"Complete the requested project scope: {job.project_scope}",)
+        objective = TaskObjective(
+            goal, acceptance,
+            ("Respect the immutable candidate, security, and Owner-private boundaries.",),
+            (), source_id,
+        )
+        encoded = _json_exact(objective.to_mapping(), 256_000)
+        objective_sha = hashlib.sha256(encoded.encode()).hexdigest()
+        manifest_hash = _canonical_digest({
+            "job_id": job_id, "owner_id": str(owner_id),
+            "source_work_unit_id": source_id, "objective_sha256": objective_sha,
+        })
+        return objective, objective_sha, manifest_hash
 
     def _backfill_review_manifests(self) -> None:
         rows = self.db.execute(
             "SELECT * FROM supervisor_review_work_units WHERE safe_file_manifest_json IS NULL "
-            "OR safe_file_manifest_json=''"
+            "OR safe_file_manifest_json='' OR objective_content_ref IS NULL OR objective_content_ref='' "
+            "OR objective_sha256 IS NULL OR objective_manifest_hash IS NULL"
         ).fetchall()
         with self.db:
             for row in rows:
@@ -52,6 +86,17 @@ class Round2ReviewRepositoryMixin:
                     "expected_review_schema": json.loads(row["expected_review_schema_json"]),
                     "safe_file_manifest": list(safe_manifest),
                 }
+                objective, objective_sha, objective_manifest_hash = self._objective_for_review(
+                    row["job_id"], row["owner_id"],
+                )
+                objective_ref, stored_objective_sha = self.content_store.put(
+                    f"review-{row['review_work_unit_id']}-objective",
+                    _json_exact(objective.to_mapping(), 256_000),
+                )
+                if stored_objective_sha != objective_sha:
+                    raise ValueError("review objective backfill integrity mismatch")
+                validated["objective_sha256"] = objective_sha
+                validated["objective_manifest_hash"] = objective_manifest_hash
                 candidate_identity = CandidateIdentity.from_mapping(json.loads(row["candidate_identity_json"]))
                 if not row["patch_sha256"] or not row["candidate_identity_sha256"]:
                     continue
@@ -61,9 +106,11 @@ class Round2ReviewRepositoryMixin:
                     row["candidate_identity_sha256"],
                 ))
                 self.db.execute(
-                    "UPDATE supervisor_review_work_units SET safe_file_manifest_json=?,spec_hash=? "
+                    "UPDATE supervisor_review_work_units SET safe_file_manifest_json=?,spec_hash=?,"
+                    "objective_content_ref=?,objective_sha256=?,objective_manifest_hash=? "
                     "WHERE review_work_unit_id=?",
-                    (_json_exact(list(safe_manifest), 1_000_000), digest, row["review_work_unit_id"]),
+                    (_json_exact(list(safe_manifest), 1_000_000), digest, objective_ref,
+                     objective_sha, objective_manifest_hash, row["review_work_unit_id"]),
                 )
 
     def create_review_work_unit(self, job_id: str, owner_id: str, review_round: int,
@@ -87,6 +134,9 @@ class Round2ReviewRepositoryMixin:
             candidate_identity, tuple(Path(path) for path in validated["allowed_paths"]),
         ))
         patch = self.candidate_identity_provider.build_review_patch(candidate_identity)
+        objective, objective_sha, objective_manifest_hash = self._objective_for_review(job_id, owner_id)
+        validated["objective_sha256"] = objective_sha
+        validated["objective_manifest_hash"] = objective_manifest_hash
         candidate_identity_sha256 = _canonical_digest(candidate_identity.stable_payload())
         patch_sha256 = hashlib.sha256(patch.encode()).hexdigest()
         spec_hash = _canonical_digest(self._review_manifest(
@@ -106,7 +156,13 @@ class Round2ReviewRepositoryMixin:
             self.content_store.delete(content_ref)
             raise ValueError("review prompt integrity mismatch")
         patch_ref = None
+        objective_ref = None
         try:
+            objective_ref, stored_objective_sha = self.content_store.put(
+                f"review-{identifier}-objective", _json_exact(objective.to_mapping(), 256_000),
+            )
+            if stored_objective_sha != objective_sha:
+                raise ValueError("review objective integrity mismatch")
             patch_ref, stored_patch_sha = self.content_store.put(f"review-{identifier}-patch", patch)
             if stored_patch_sha != patch_sha256:
                 raise ValueError("review patch integrity mismatch")
@@ -116,19 +172,23 @@ class Round2ReviewRepositoryMixin:
                     "(review_work_unit_id,job_id,owner_id,review_round,repo_root,allowed_paths_json,read_only,"
                     "risk_level,timeout_seconds,model_role,expected_review_schema_json,prompt_content_ref,"
                     "prompt_sha256,spec_hash,candidate_identity_json,safe_file_manifest_json,"
-                    "patch_content_ref,patch_sha256,candidate_identity_sha256,created_at,status) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "patch_content_ref,patch_sha256,candidate_identity_sha256,"
+                    "objective_content_ref,objective_sha256,objective_manifest_hash,created_at,status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier, job_id, str(owner_id), round_number, validated["repo_root"],
                      _json_exact(validated["allowed_paths"], 16_000), 1, validated["risk_level"],
                      validated["timeout_seconds"], "REVIEW", _json_exact(validated["expected_review_schema"], 16_000),
                      content_ref, prompt_sha, spec_hash, _json_exact(candidate_identity.to_mapping(), 64_000),
                      _json_exact(validated["safe_file_manifest"], 1_000_000), patch_ref, patch_sha256,
-                     candidate_identity_sha256, utc_now(), "READY"),
+                     candidate_identity_sha256, objective_ref, objective_sha, objective_manifest_hash,
+                     utc_now(), "READY"),
                 )
         except Exception:
             self.content_store.delete(content_ref)
             if patch_ref:
                 self.content_store.delete(patch_ref)
+            if objective_ref:
+                self.content_store.delete(objective_ref)
             raise
         return self.get_review_work_unit(identifier, job_id, owner_id, round_number)
 
@@ -147,6 +207,8 @@ class Round2ReviewRepositoryMixin:
             "timeout_seconds": float(row["timeout_seconds"]), "model_role": row["model_role"],
             "expected_review_schema": json.loads(row["expected_review_schema_json"]),
             "safe_file_manifest": json.loads(row["safe_file_manifest_json"] or "[]"),
+            "objective_sha256": row["objective_sha256"],
+            "objective_manifest_hash": row["objective_manifest_hash"],
         }
         if not row["candidate_identity_json"]:
             raise ValueError("review work unit candidate identity missing")
@@ -155,6 +217,20 @@ class Round2ReviewRepositoryMixin:
             raise ValueError("review patch artifact missing")
         if row["candidate_identity_sha256"] != _canonical_digest(candidate_identity.stable_payload()):
             raise ValueError("review patch candidate binding mismatch")
+        if not row["objective_content_ref"] or not row["objective_sha256"] or not row["objective_manifest_hash"]:
+            raise ValueError("review objective artifact missing")
+        objective_payload = self.content_store.get(row["objective_content_ref"], row["objective_sha256"])
+        objective = TaskObjective.from_mapping(json.loads(objective_payload))
+        objective_mapping = objective.to_mapping()
+        if hashlib.sha256(_json_exact(objective_mapping, 256_000).encode()).hexdigest() != row["objective_sha256"]:
+            raise ValueError("review objective content integrity mismatch")
+        expected_objective_manifest = _canonical_digest({
+            "job_id": job_id, "owner_id": str(owner_id),
+            "source_work_unit_id": objective.source_work_unit_id,
+            "objective_sha256": row["objective_sha256"],
+        })
+        if expected_objective_manifest != row["objective_manifest_hash"]:
+            raise ValueError("review objective manifest integrity mismatch")
         expected = _canonical_digest(self._review_manifest(
             job_id, owner_id, int(review_round), validated, row["prompt_sha256"], candidate_identity,
             row["patch_sha256"], row["candidate_identity_sha256"],
@@ -169,6 +245,7 @@ class Round2ReviewRepositoryMixin:
             row["spec_hash"], candidate_identity, row["created_at"], row["status"],
             tuple(json.loads(row["safe_file_manifest_json"] or "[]")),
             row["patch_content_ref"], row["patch_sha256"], row["candidate_identity_sha256"],
+            row["objective_content_ref"], row["objective_sha256"], row["objective_manifest_hash"],
         )
 
     def review_work_unit_for_round(self, job_id: str, owner_id: str, review_round: int) -> ReviewerWorkUnit:
@@ -184,9 +261,12 @@ class Round2ReviewRepositoryMixin:
     def reconstruct_reviewer_task(self, job_id: str, owner_id: str, review_round: int) -> ReviewTaskSpec:
         unit = self.review_work_unit_for_round(job_id, owner_id, review_round)
         prompt = self.content_store.get(unit.prompt_content_ref, unit.prompt_sha256)
+        objective_payload = self.content_store.get(unit.objective_content_ref, unit.objective_sha256)
+        objective = TaskObjective.from_mapping(json.loads(objective_payload))
         spec = ReviewTaskSpec(unit.repo_root, unit.allowed_paths, prompt, unit.read_only, unit.risk_level,
                               unit.timeout_seconds, unit.model_role, unit.expected_review_schema,
-                              unit.safe_file_manifest, unit.candidate_identity)
+                              unit.safe_file_manifest, unit.candidate_identity, objective,
+                              unit.objective_sha256, unit.objective_manifest_hash)
         validated = spec.validate()
         if validated["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("review work unit prompt hash mismatch")
@@ -221,15 +301,25 @@ class Round2ReviewRepositoryMixin:
         for finding in result.findings:
             if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
                 raise ValueError("invalid review severity")
-            deleted = finding.file in deleted_scope
-            path = policy.validate_candidate_path(finding.file, allowed_paths, deleted=deleted)
-            if path not in candidate_scope:
-                raise PermissionError("review finding is outside immutable candidate manifest")
+            scope = finding.scope or "FILE"
+            if scope == "FILE":
+                if not finding.file:
+                    raise ValueError("FILE review finding requires a file")
+                deleted = finding.file in deleted_scope
+                path = policy.validate_candidate_path(finding.file, allowed_paths, deleted=deleted)
+                if path not in candidate_scope:
+                    raise PermissionError("review finding is outside immutable candidate manifest")
+            elif scope == "WORKFLOW":
+                if finding.file:
+                    raise ValueError("WORKFLOW review finding cannot reference a repository path")
+                path = None
+            else:
+                raise ValueError("invalid review finding scope")
             evidence = _safe_review_text(finding.evidence)
             fix = _safe_review_text(finding.recommended_fix)
-            normalized_findings.append({"severity": finding.severity, "file": path,
+            normalized_findings.append({"scope": scope, "severity": finding.severity, "file": path,
                                         "evidence": evidence, "recommended_fix": fix})
-            rebuilt.append(ReviewFinding(finding.severity, path, evidence, fix))
+            rebuilt.append(ReviewFinding(finding.severity, path, evidence, fix, scope))
         return {"status": result.status, "findings": normalized_findings}, ReviewResult(result.status, tuple(rebuilt))
 
     def _require_current_candidate(self, unit: ReviewerWorkUnit) -> None:
@@ -294,7 +384,8 @@ class Round2ReviewRepositoryMixin:
         if hashlib.sha256(row["result_json"].encode()).hexdigest() != row["result_hash"]:
             raise ValueError("durable review result integrity mismatch")
         payload = json.loads(row["result_json"])
-        findings = tuple(ReviewFinding(item["severity"], item["file"], item["evidence"], item["recommended_fix"])
+        findings = tuple(ReviewFinding(item["severity"], item.get("file"), item["evidence"],
+                                       item["recommended_fix"], item.get("scope", "FILE"))
                          for item in payload["findings"])
         _, result = self._normalized_result(
             ReviewResult(payload["status"], findings), unit.repo_root,
@@ -422,13 +513,16 @@ class Round2ReviewRepositoryMixin:
         with self.db:
             for job_id in job_ids:
                 units = self.db.execute(
-                    "SELECT prompt_content_ref,patch_content_ref FROM supervisor_review_work_units WHERE job_id=?",
+                    "SELECT prompt_content_ref,patch_content_ref,objective_content_ref "
+                    "FROM supervisor_review_work_units WHERE job_id=?",
                     (job_id,)
                 ).fetchall()
                 for unit in units:
                     self.content_store.delete(unit["prompt_content_ref"])
                     if unit["patch_content_ref"]:
                         self.content_store.delete(unit["patch_content_ref"])
+                    if unit["objective_content_ref"]:
+                        self.content_store.delete(unit["objective_content_ref"])
                 self.db.execute("DELETE FROM supervisor_review_results WHERE job_id=?", (job_id,))
                 self.db.execute("DELETE FROM supervisor_review_work_units WHERE job_id=?", (job_id,))
         return super().prune_terminal_jobs(keep)

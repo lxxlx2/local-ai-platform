@@ -19,7 +19,19 @@ REVIEW_RESULT_SCHEMA = {
     "required": ["status", "findings"],
     "properties": {
         "status": {"enum": ["PASS", "FAIL"]},
-        "findings": {"type": "array", "maxItems": MAX_FINDINGS_PER_REVIEW},
+        "findings": {
+            "type": "array", "maxItems": MAX_FINDINGS_PER_REVIEW,
+            "items": {
+                "type": "object", "required": ["scope", "severity", "evidence", "recommended_fix"],
+                "properties": {
+                    "scope": {"enum": ["FILE", "WORKFLOW"]},
+                    "severity": {"enum": ["BLOCKING", "HIGH", "MEDIUM", "LOW"]},
+                    "file": {"type": ["string", "null"]},
+                    "evidence": {"type": "string"},
+                    "recommended_fix": {"type": "string"},
+                },
+            },
+        },
     },
 }
 
@@ -47,6 +59,44 @@ def recursive_private_sanitize(value):
 
 
 @dataclass(frozen=True)
+class TaskObjective:
+    goal: str
+    acceptance_criteria: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    expected_artifacts: tuple[str, ...] = ()
+    source_work_unit_id: str | None = None
+
+    def to_mapping(self) -> dict:
+        values = {
+            "goal": self.goal,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "constraints": list(self.constraints),
+            "expected_artifacts": list(self.expected_artifacts),
+            "source_work_unit_id": self.source_work_unit_id,
+        }
+        _json_exact(values, 256_000)
+        if not self.goal or SecretFirewall().inspect(self.goal).action == "BLOCK":
+            raise ValueError("task objective goal is empty or secret-bearing")
+        for collection in (self.acceptance_criteria, self.constraints, self.expected_artifacts):
+            if len(collection) > 100 or any(not item or SecretFirewall().inspect(item).action == "BLOCK"
+                                             for item in collection):
+                raise ValueError("task objective collection is invalid")
+        if self.source_work_unit_id and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", self.source_work_unit_id):
+            raise ValueError("task objective source work unit is invalid")
+        return values
+
+    @classmethod
+    def from_mapping(cls, value: Mapping) -> "TaskObjective":
+        return cls(
+            str(value.get("goal", "")),
+            tuple(str(item) for item in value.get("acceptance_criteria", ())),
+            tuple(str(item) for item in value.get("constraints", ())),
+            tuple(str(item) for item in value.get("expected_artifacts", ())),
+            str(value["source_work_unit_id"]) if value.get("source_work_unit_id") else None,
+        )
+
+
+@dataclass(frozen=True)
 class ReviewTaskSpec:
     repo_root: Path
     allowed_paths: tuple[Path, ...]
@@ -58,6 +108,9 @@ class ReviewTaskSpec:
     expected_review_schema: dict
     safe_file_manifest: tuple[dict, ...] = ()
     candidate_identity: CandidateIdentity | None = None
+    task_objective: TaskObjective | None = None
+    objective_sha256: str | None = None
+    objective_manifest_hash: str | None = None
 
     def validate(self) -> dict:
         root = self.repo_root.resolve()
@@ -83,12 +136,22 @@ class ReviewTaskSpec:
         _json_exact(schema, 16_000)
         if _canonical_digest(schema) != _canonical_digest(REVIEW_RESULT_SCHEMA):
             raise ValueError("unsupported review result schema")
+        objective_mapping = self.task_objective.to_mapping() if self.task_objective else None
+        if objective_mapping is not None:
+            objective_sha = hashlib.sha256(_json_exact(objective_mapping, 256_000).encode()).hexdigest()
+            if self.objective_sha256 != objective_sha:
+                raise ValueError("review objective content hash mismatch")
+            if not self.objective_manifest_hash or not re.fullmatch(r"[a-f0-9]{64}", self.objective_manifest_hash):
+                raise ValueError("review objective manifest hash missing")
         return {
             "repo_root": str(root), "allowed_paths": allowed, "read_only": True,
             "risk_level": self.risk_level, "timeout_seconds": float(self.timeout_seconds),
             "model_role": "REVIEW", "expected_review_schema": schema,
             "task_prompt_sha256": hashlib.sha256(self.task_prompt.encode()).hexdigest(),
             "safe_file_manifest": list(manifest),
+            "task_objective": objective_mapping,
+            "objective_sha256": self.objective_sha256,
+            "objective_manifest_hash": self.objective_manifest_hash,
         }
 
     def read_safe_file(self, value: str) -> bytes:
@@ -106,6 +169,7 @@ class ReviewTaskSpec:
             self.repo_root, file_paths, self.task_prompt, self.read_only, self.risk_level,
             self.timeout_seconds, self.model_role, self.expected_review_schema,
             tuple(validated["safe_file_manifest"]), self.candidate_identity,
+            self.task_objective, self.objective_sha256, self.objective_manifest_hash,
         )
 
 
@@ -132,6 +196,9 @@ class ReviewerWorkUnit:
     patch_content_ref: str | None = None
     patch_sha256: str | None = None
     candidate_identity_sha256: str | None = None
+    objective_content_ref: str | None = None
+    objective_sha256: str | None = None
+    objective_manifest_hash: str | None = None
 
 
 @dataclass(frozen=True)

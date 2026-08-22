@@ -102,6 +102,7 @@ class SupervisorRepository(DurablePayloadMixin):
               evidence_summary TEXT NOT NULL, recommended_fix TEXT NOT NULL,
               created_at TEXT NOT NULL, integrity_hash TEXT NOT NULL,
               status TEXT NOT NULL, consumed_by_revision TEXT,
+              finding_scope TEXT NOT NULL DEFAULT 'FILE',
               FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id)
             );
             CREATE INDEX IF NOT EXISTS supervisor_review_findings_job_idx
@@ -140,6 +141,7 @@ class SupervisorRepository(DurablePayloadMixin):
             ("supervisor_jobs", "target_execution_id", "TEXT"),
             ("supervisor_stage_runs", "review_round", "INTEGER NOT NULL DEFAULT 0"),
             ("supervisor_work_units", "safe_file_manifest_json", "TEXT"),
+            ("supervisor_review_findings", "finding_scope", "TEXT NOT NULL DEFAULT 'FILE'"),
             ("supervisor_executions", "candidate_state_sha256", "TEXT"),
             ("supervisor_executions", "candidate_tree_sha", "TEXT"),
             ("supervisor_executions", "candidate_diff_sha256", "TEXT"),
