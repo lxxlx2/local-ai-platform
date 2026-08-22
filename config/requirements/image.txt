@@ -1,0 +1,3 @@
+# FLUX.2 uses its independently qualified MLX/Swift adapter.
+# Do not install this manifest into runtime/omlx-venv.
+huggingface-hub[hf_xet]==1.28.0

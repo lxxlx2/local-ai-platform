@@ -1,0 +1,3 @@
+# LongCat MLX runtime is installed only after 48GB memory qualification.
+# Adapter source/version must be pinned when qualification begins.
+huggingface-hub[hf_xet]==1.28.0

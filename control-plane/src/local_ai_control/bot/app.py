@@ -11,7 +11,7 @@ from local_ai_control.bot.ui import (
     BACK, back_for, inline, media_menu, owner_dashboard, owner_task_menu,
     public_dashboard, system_menu, workflow_controls, workflow_menu,
 )
-from local_ai_control.services.capabilities import capability_intro, model_identity
+from local_ai_control.services.capabilities import capability_intro, model_identity, routed_capability_text
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.authorization import AuthorizationDenied, authorize
@@ -19,6 +19,7 @@ from local_ai_control.services.chat import ChatService
 from local_ai_control.services.control import ControlPlane
 from local_ai_control.services.intent import classify_owner_text, preview_text
 from local_ai_control.services.models import model_center_text
+from local_ai_control.services.multimodal import MultimodalRouter
 from local_ai_control.services.omlx import OmlxProvider
 from local_ai_control.services.output import TelegramOutputRenderer
 from local_ai_control.services.rate_limit import PublicRateLimiter
@@ -92,6 +93,7 @@ async def run():
     firewall = SecretFirewall()
     renderer = TelegramOutputRenderer()
     rate_limiter = PublicRateLimiter(settings.public_messages_per_minute, settings.public_messages_per_hour, settings.public_messages_per_day)
+    multimodal_router = MultimodalRouter()
     bot = Bot(settings.token)
     dp = Dispatcher()
 
@@ -121,6 +123,16 @@ async def run():
     async def start(message: Message):
         await respond_home(message, identity(message))
 
+    @dp.message(F.photo | F.video | F.audio | F.voice)
+    async def media_input(message: Message):
+        ctx = identity(message)
+        if ctx.role is not Role.OWNER:
+            await send_chat_output(message, "Public 媒体能力尚未开放；请使用文字提问。")
+            return
+        mime = "image/jpeg" if message.photo else ("video/mp4" if message.video else "audio/mpeg")
+        decision = multimodal_router.route(ctx.role, message.caption or "", mime)
+        await send_chat_output(message, routed_capability_text(decision))
+
     @dp.message(F.text)
     async def plain_chat(message: Message):
         ctx = identity(message)
@@ -141,6 +153,14 @@ async def run():
             return
         if intent.kind == "CONTROL_INTENT":
             await message.answer(preview_text(intent), reply_markup=inline([[("⬅️ 返回首页", "home")]]))
+            return
+        try:
+            routed = multimodal_router.route(ctx.role, message.text)
+        except PermissionError:
+            await send_chat_output(message, "该生成能力当前仅限 Owner 使用。")
+            return
+        if routed.intent.value != "CHAT":
+            await send_chat_output(message, routed_capability_text(routed))
             return
         session_id = await chat_session(ctx)
         try:
@@ -305,14 +325,23 @@ async def run():
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
         await edit_page(query, "我的记忆\n\n可用：最近记忆、长期偏好、项目记忆、搜索、删除/设置。\n当前为本地开发存储；语义向量检索仍等待 Embedding Provider。")
 
-    @dp.callback_query(F.data.in_({"owner:image", "owner:video", "owner:file"}))
+    @dp.callback_query(F.data.in_({"owner:image", "owner:video", "owner:file", "owner:audio", "owner:image_generate", "owner:video_generate", "owner:media_jobs", "owner:web"}))
     async def owner_capability(query: CallbackQuery):
         ctx = identity(query)
         try:
             authorize(ctx, query.data)
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        text = {"owner:image": "当前尚未安装图片理解模型。", "owner:video": "当前尚未安装 Whisper 或视频分析模型。", "owner:file": "当前仅规划 txt / md 安全文件分析；不会读取私人项目文件。"}[query.data]
+        text = {
+            "owner:image": "视觉理解\n\nQwen3.8 VISION 已注册，尚未完成本机 qualification。",
+            "owner:video": "视频理解\n\nQwen3.8 原生视频 adapter 与安全抽帧 fallback 已规划，尚未完成本机 qualification。",
+            "owner:file": "文件分析\n\n当前仅开放受控 txt / md 入口；不会任意读取私人项目文件。",
+            "owner:audio": "语音\n\nWhisper STT 与 Qwen3-TTS 已注册，尚未安装隔离 provider。",
+            "owner:image_generate": "图片生成\n\nFLUX.2 klein BF16 已注册，尚未完成本机 qualification。",
+            "owner:video_generate": "视频生成\n\n后台 MediaJob 路由已注册；重模型尚未完成本机 qualification。",
+            "owner:media_jobs": "任务与进度\n\nMediaJob 支持排队、进度、取消与失败状态；当前生产 Bot 尚未部署此版本。",
+            "owner:web": "联网研究\n\n安全 URL Fetch 与 Search Provider 已接入代码；当前 provider 尚未部署。",
+        }[query.data]
         await edit_page(query, text, back_for(query.data))
 
     @dp.callback_query(F.data.startswith(("owner:", "private:", "guidengji:")))

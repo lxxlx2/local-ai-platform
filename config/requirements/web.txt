@@ -1,0 +1,2 @@
+# Isolated environment: /Users/jerson/AI/runtime/web-venv
+ddgs==9.14.4

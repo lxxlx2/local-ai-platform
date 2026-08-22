@@ -25,6 +25,10 @@ NAVIGATION_ROUTES = {
     "owner:file": NavigationRoute("owner:file", "menu:media", "home", "owner_capability"),
     "owner:image": NavigationRoute("owner:image", "menu:media", "home", "owner_capability"),
     "owner:video": NavigationRoute("owner:video", "menu:media", "home", "owner_capability"),
+    "owner:audio": NavigationRoute("owner:audio", "menu:media", "home", "owner_capability"),
+    "owner:image_generate": NavigationRoute("owner:image_generate", "menu:media", "home", "owner_capability"),
+    "owner:video_generate": NavigationRoute("owner:video_generate", "menu:media", "home", "owner_capability"),
+    "owner:media_jobs": NavigationRoute("owner:media_jobs", "menu:media", "home", "owner_capability"),
     "public:file": NavigationRoute("public:file", "menu:public_media", "home", "public_route"),
     "public:image": NavigationRoute("public:image", "menu:public_media", "home", "public_route"),
     "public:video": NavigationRoute("public:video", "menu:public_media", "home", "public_route"),
@@ -32,6 +36,7 @@ NAVIGATION_ROUTES = {
     "owner:system": NavigationRoute("owner:system", "menu:system", "home", "system"),
     "owner:features": NavigationRoute("owner:features", "menu:system", "home", "private_route"),
     "owner:reports": NavigationRoute("owner:reports", "menu:system", "home", "private_route"),
+    "owner:web": NavigationRoute("owner:web", "menu:system", "home", "owner_capability"),
     "public:preview": NavigationRoute("public:preview", "menu:system", "home", "public_preview"),
 }
 
@@ -65,11 +70,18 @@ def public_dashboard():
 
 def media_menu(owner=False):
     prefix = "owner" if owner else "public"
+    if owner:
+        return inline([
+            [("文件分析", "owner:file"), ("视觉理解", "owner:image")],
+            [("语音", "owner:audio"), ("图片生成", "owner:image_generate")],
+            [("视频理解", "owner:video"), ("视频生成", "owner:video_generate")],
+            [("任务与进度", "owner:media_jobs")], [("返回", "home")],
+        ])
     return inline([[("文件分析", f"{prefix}:file"), ("图片处理", f"{prefix}:image")], [("视频处理", f"{prefix}:video")], [("返回", "home")]])
 
 
 def system_menu():
-    return inline([[("模型", "owner:model"), ("系统状态", "owner:system")], [("功能管理", "owner:features"), ("报告", "owner:reports")], [("公共视角预览", "public:preview")], [("返回", "home")]])
+    return inline([[("模型", "owner:model"), ("联网搜索", "owner:web")], [("系统状态", "owner:system"), ("功能管理", "owner:features")], [("报告", "owner:reports"), ("公共视角预览", "public:preview")], [("返回", "home")]])
 
 
 def owner_task_menu():
