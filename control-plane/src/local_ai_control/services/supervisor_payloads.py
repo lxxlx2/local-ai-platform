@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .supervisor_contracts import (
-    AI_ROOT, MAX_FINDINGS_PER_JOB, MAX_FINDINGS_PER_REVIEW, CodexTaskSpec,
+    AI_ROOT, MAX_FINDINGS_PER_JOB, MAX_FINDINGS_PER_REVIEW, CandidateIdentity, CodexTaskSpec,
     PersistedReviewFinding, RepoAccessPolicy, ReviewFinding, WorkUnitSpec, WorkflowStage,
     _json_exact, _safe_review_text, _safe_text, utc_now,
 )
@@ -67,6 +67,10 @@ class DurablePayloadMixin:
             row["prompt_content_ref"], row["prompt_sha256"], row["created_at"], row["status"],
             int(row["review_round"]),
             tuple(json.loads(row["safe_file_manifest_json"] or "[]")),
+            (CandidateIdentity.from_mapping(json.loads(row["candidate_identity_json"]))
+             if "candidate_identity_json" in row.keys() and row["candidate_identity_json"] else None),
+            (tuple(Path(value) for value in json.loads(row["write_roots_json"] or "[]"))
+             if "write_roots_json" in row.keys() else ()),
         )
 
     def get_work_unit(self, work_unit_id: str, job_id: str, owner_id: str) -> WorkUnitSpec:
@@ -99,7 +103,7 @@ class DurablePayloadMixin:
         prompt = self.load_work_unit_prompt(unit.work_unit_id, job_id, owner_id)
         spec = CodexTaskSpec(unit.repo_root, unit.allowed_paths, prompt, unit.risk_level,
                              unit.timeout_seconds, unit.model_role, unit.expected_output_schema,
-                             unit.safe_file_manifest)
+                             unit.safe_file_manifest, unit.candidate_identity, unit.write_roots)
         persisted = spec.validate()
         if persisted["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("work unit prompt hash mismatch")

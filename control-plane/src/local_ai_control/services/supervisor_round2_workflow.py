@@ -34,6 +34,16 @@ class LeaseKeepingRunner:
         self.external_execution_may_still_be_active = False
         self.durable_fence_persisted = False
 
+    @property
+    def cancellation_supported(self) -> bool:
+        return bool(getattr(self.inner, "cancellation_supported", False))
+
+    def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool:
+        method = getattr(self.inner, "cancel", None)
+        if not self.cancellation_supported or not callable(method):
+            return False
+        return bool(method(execution_id=execution_id, reason=reason))
+
     def run(self, context: StageContext) -> StageResult:
         stop = threading.Event()
         lost = threading.Event()

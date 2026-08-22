@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import time
@@ -43,15 +44,25 @@ def candidate_identity(paths=(CANDIDATE_FILE, SECOND_CANDIDATE_FILE), deleted=()
     )
 
 
+def clean_identity():
+    return CandidateIdentity(
+        "COMMIT", "a" * 40, "b" * 40, "a" * 40, "c" * 64,
+        "2026-08-22T00:00:00+00:00", (), (),
+    )
+
+
 class StaticIdentityProvider:
     def __init__(self, identity=None):
-        self.identity = identity or candidate_identity()
+        self.identity = identity or clean_identity()
 
     def snapshot(self, base_commit_sha=None):
         return self.identity
 
     def capture_baseline(self):
         return self.identity.base_commit_sha
+
+    def worktree_is_clean(self):
+        return True
 
 
 def repository(tmp_path, provider=None):
@@ -435,12 +446,8 @@ def test_durable_mutation_fence_survives_restart_and_requires_manual_reconciliat
     first.close()
 
     reopened = repository(tmp_path, provider)
-    read_only = reopened.create_job("read only", "owner", job_id="job-validation", mutation_capable=False)
-    read_only = reopened.update_job(read_only.job_id, current_stage=WorkflowStage.VALIDATION)
-    read_run, _, _ = reopened.begin_stage(read_only)
-    assert read_run
-    reopened.finish_stage(read_run, read_only.job_id, WorkflowStage.VALIDATION, StageResult.passed("read only"))
-    reopened.update_job(read_only.job_id, status=JobStatus.BLOCKED)
+    assert reopened.get_job(blocked_job.job_id).status is JobStatus.BLOCKED
+    assert reopened.list_jobs(limit=10)
     with pytest.raises(RuntimeError, match="MAX_MUTATING_JOBS_IN_SYSTEM"):
         reopened.create_job("other mutation", "owner", job_id="other-mutation")
     persisted = reopened.active_mutation_fence()
@@ -756,8 +763,8 @@ def test_round5_only_one_nonterminal_mutation_capable_job(tmp_path):
     first = repo.create_job("first", "owner", job_id="first")
     with pytest.raises(RuntimeError, match="MAX_MUTATING_JOBS_IN_SYSTEM=1"):
         repo.create_job("second", "owner", job_id="second")
-    read_only = repo.create_job("status probe", "owner", job_id="status", mutation_capable=False)
-    assert read_only.mutation_capable is False
+    with pytest.raises(ValueError, match="READ_ONLY_PROBE_IS_NOT_A_WORKFLOW_JOB"):
+        repo.create_job("status probe", "owner", job_id="status", mutation_capable=False)
     repo.update_job(first.job_id, status=JobStatus.COMPLETED)
     assert repo.create_job("second", "owner", job_id="second").mutation_capable is True
     repo.close()
@@ -843,4 +850,200 @@ def test_round5_confirmed_execution_rejects_late_cancellation(tmp_path):
         (execution_id,),
     ).fetchone()
     assert tuple(current) == ("COMPLETED_CONFIRMED", "NOT_REQUESTED")
+    repo.close()
+
+
+def test_round6_read_only_flag_cannot_create_or_enter_mutating_workflow(tmp_path):
+    repo = repository(tmp_path)
+    with pytest.raises(ValueError, match="READ_ONLY_PROBE_IS_NOT_A_WORKFLOW_JOB"):
+        repo.create_job("probe", "owner", mutation_capable=False)
+    job = repo.create_job("legacy", "owner", job_id="legacy")
+    with repo.db:
+        repo.db.execute("UPDATE supervisor_jobs SET mutation_capable=0,current_stage='PRODUCER' WHERE job_id=?",
+                        (job.job_id,))
+    legacy = repo.get_job(job.job_id)
+    with pytest.raises(PermissionError, match="read-only job"):
+        repo.begin_stage(legacy)
+    with pytest.raises(PermissionError, match="read-only job"):
+        mutating_work_unit(repo, legacy)
+    with repo.db:
+        repo.db.execute("UPDATE supervisor_jobs SET current_stage='REVISION' WHERE job_id=?",
+                        (job.job_id,))
+    legacy_revision = repo.get_job(job.job_id)
+    with pytest.raises(PermissionError, match="read-only job"):
+        repo.begin_stage(legacy_revision)
+    with pytest.raises(PermissionError, match="read-only job"):
+        mutating_work_unit(repo, legacy_revision, WorkflowStage.REVISION)
+    repo.close()
+
+
+@pytest.mark.parametrize("kind", ["tracked", "untracked"])
+def test_round6_dirty_worktree_rejects_mutating_job_without_cleanup(tmp_path, kind):
+    root, _ = identity_repo(tmp_path)
+    git(root, "restore", "control-plane/worker.py")
+    target = root / "control-plane" / ("worker.py" if kind == "tracked" else "user-note.py")
+    original = target.read_bytes() if target.exists() else None
+    if kind == "tracked":
+        target.write_text("changed = True\n")
+    else:
+        target.write_text("user_note = True\n")
+    provider = CandidateIdentityProvider(root)
+    repo = SupervisorRepository(tmp_path / f"{kind}.db", candidate_identity_provider=provider); repo.migrate()
+    with pytest.raises(RuntimeError, match="WORKTREE_NOT_CLEAN"):
+        repo.create_job("dirty", "owner", job_id=f"dirty-{kind}")
+    assert target.exists()
+    assert target.read_bytes() == (b"changed = True\n" if kind == "tracked" else b"user_note = True\n")
+    assert original != target.read_bytes() if original is not None else True
+    repo.close()
+
+
+def test_round6_clean_worktree_allows_mutating_job(tmp_path):
+    root, head = identity_repo(tmp_path)
+    git(root, "restore", "control-plane/worker.py")
+    provider = CandidateIdentityProvider(root)
+    repo = SupervisorRepository(tmp_path / "clean.db", candidate_identity_provider=provider); repo.migrate()
+    job = repo.create_job("clean", "owner", job_id="clean")
+    assert job.baseline_commit_sha == head and job.mutation_capable
+    repo.close()
+
+
+def test_round6_terminal_job_does_not_waive_dirty_worktree_ownership(tmp_path):
+    root, _ = identity_repo(tmp_path)
+    git(root, "restore", "control-plane/worker.py")
+    provider = CandidateIdentityProvider(root)
+    repo = SupervisorRepository(tmp_path / "terminal-dirty.db", candidate_identity_provider=provider); repo.migrate()
+    first = repo.create_job("first", "owner", job_id="first")
+    repo.update_job(first.job_id, status=JobStatus.CANCELED)
+    changed = root / "control-plane/worker.py"
+    changed.write_text("user_change = True\n")
+    with pytest.raises(RuntimeError, match="WORKTREE_NOT_CLEAN"):
+        repo.create_job("second", "owner", job_id="second")
+    assert changed.read_text() == "user_change = True\n"
+    repo.close()
+
+
+def test_round6_begin_stage_probe_failure_releases_transaction(tmp_path):
+    provider = StaticIdentityProvider(); repo = repository(tmp_path, provider)
+    job = repo.create_job("probe", "owner", job_id="probe")
+    job = repo.update_job(job.job_id, current_stage=WorkflowStage.PRODUCER)
+    for error in (RuntimeError("git failed"), PermissionError("unsafe path")):
+        provider.snapshot = lambda baseline=None, error=error: (_ for _ in ()).throw(error)
+        with pytest.raises(type(error)):
+            repo.begin_stage(job)
+        assert repo.db.in_transaction is False
+        repo.update_job(job.job_id, last_error="probe failed safely")
+    repo.close()
+
+
+def test_round6_supplied_manifest_extras_require_identity_and_secret_scan(tmp_path):
+    root = tmp_path / "repo"; allowed = root / "control-plane"; allowed.mkdir(parents=True); (root / "docs").mkdir()
+    git(root, "init", "-b", "main"); git(root, "config", "user.email", "fixture@example.invalid")
+    git(root, "config", "user.name", "Fixture")
+    (allowed / "base.py").write_text("base = True\n"); git(root, "add", "."); git(root, "commit", "-m", "base")
+    extra = allowed / "extra.py"; extra.write_text("clean = True\n")
+    policy = RepoAccessPolicy(root); identity = CandidateIdentityProvider(root, policy).snapshot(git(root, "rev-parse", "HEAD"))
+    manifest = policy.merge_candidate_manifest(identity, (allowed,))
+    with pytest.raises(PermissionError, match="unbound extra"):
+        policy.validate_supplied_manifest(manifest, (allowed,))
+    assert policy.validate_supplied_manifest(manifest, (allowed,), identity)
+    unrelated = allowed / "unrelated.py"; unrelated.write_text("clean = 2\n")
+    unrelated_entry = policy._safe_manifest_entry("control-plane/unrelated.py", (allowed,), scan_secrets=True)
+    with pytest.raises(PermissionError, match="outside candidate"):
+        policy.validate_supplied_manifest((*manifest, unrelated_entry), (allowed,), identity)
+    extra.write_text('credential = "hf_' + 'a' * 32 + '"\n')
+    secret_identity = CandidateIdentityProvider(root, policy).snapshot(git(root, "rev-parse", "HEAD"))
+    secret_manifest = tuple(item for item in manifest if item["path"] != "control-plane/extra.py") + (
+        {"path": "control-plane/extra.py", "sha256": hashlib.sha256(extra.read_bytes()).hexdigest(),
+         "size_bytes": len(extra.read_bytes())},
+    )
+    with pytest.raises(ValueError, match="Secret Firewall") as caught:
+        policy.validate_supplied_manifest(secret_manifest, (allowed,), secret_identity)
+    assert "hf_" not in str(caught.value)
+
+
+def test_round6_producer_write_policy_is_distinct_and_path_bounded():
+    spec = CodexTaskSpec(AI_ROOT, (CONTROL_PLANE_ROOT,), "safe producer", "LOW", 60, "CODE", {})
+    assert spec.validate_write_path(AI_ROOT / "control-plane/src/new_module.py")
+    assert spec.validate_write_path(AI_ROOT / "control-plane/tests/test_new_module.py")
+    assert spec.validate_write_path(AI_ROOT / "docs/new-note.md")
+    for denied in (AI_ROOT / "runtime/evil.py", AI_ROOT / "control-plane/.env",
+                   AI_ROOT / "control-plane/src/secret.pem", AI_ROOT / "../escape.py"):
+        with pytest.raises(PermissionError):
+            spec.validate_write_path(denied)
+    validated = spec.validate()
+    assert any("tests/test_gateway_v02.py" in item["path"] for item in validated["safe_file_manifest"])
+
+
+def test_round6_owner_cancel_propagates_exact_execution_and_fails_closed(tmp_path):
+    repo = repository(tmp_path); job = stage_job(repo, WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job); _, _, key = repo.begin_stage(job)
+    execution_id = str(uuid.uuid4())
+    repo.start_execution(execution_id, job.job_id, unit.work_unit_id,
+                         WorkflowStage.PRODUCER, key, "Provider")
+
+    class CancelRunner:
+        cancellation_supported = True
+        calls = []
+        def cancel(self, execution_id, reason):
+            self.calls.append((execution_id, reason)); return True
+
+    runner = CancelRunner(); supervisor = WorkflowSupervisor(repo, {WorkflowStage.PRODUCER: runner})
+    canceled = supervisor.cancel(job.job_id)
+    assert canceled.resume_state == "CANCEL_REQUESTED"
+    assert runner.calls == [(execution_id, "OWNER_CANCEL_REQUESTED")]
+    row = repo.db.execute("SELECT * FROM supervisor_executions WHERE execution_id=?", (execution_id,)).fetchone()
+    assert row["completion_status"] == "CANCELLATION_PENDING" and row["cancellation_status"] == "CANCELED"
+    repo.close()
+
+
+def test_round6_owner_cancel_failure_creates_reconciliation_fence(tmp_path):
+    repo = repository(tmp_path); job = stage_job(repo, WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job); _, _, key = repo.begin_stage(job)
+    execution_id = str(uuid.uuid4())
+    repo.start_execution(execution_id, job.job_id, unit.work_unit_id,
+                         WorkflowStage.PRODUCER, key, "Provider")
+
+    class Unsupported:
+        cancellation_supported = False
+        def cancel(self, execution_id, reason): return False
+
+    blocked = WorkflowSupervisor(repo, {WorkflowStage.PRODUCER: Unsupported()}).cancel(job.job_id)
+    assert blocked.status is JobStatus.BLOCKED
+    assert blocked.resume_state == "BLOCKED_REQUIRES_RECONCILIATION"
+    assert repo.has_active_mutation_fence()
+    repo.close()
+
+
+def test_round6_provider_pass_after_confirmed_cancel_is_fenced_not_cleanly_canceled(tmp_path):
+    repo = repository(tmp_path); job = stage_job(repo, WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job)
+
+    class LatePassRunner:
+        cancellation_supported = True
+
+        def run(self, context):
+            execution_id = str(uuid.uuid4())
+            context.repository.start_execution(
+                execution_id, context.job.job_id, unit.work_unit_id,
+                WorkflowStage.PRODUCER, context.idempotency_key, "LatePassProvider",
+            )
+            context.repository.update_job(context.job.job_id, resume_state="CANCEL_REQUESTED")
+            context.repository.record_execution_cancellation(execution_id, "CANCELED")
+            result = StageResult.passed("provider returned after cancellation")
+            context.repository.complete_execution(execution_id, result)
+            return result
+
+        def cancel(self, execution_id, reason):
+            return True
+
+    supervisor = WorkflowSupervisor(repo, {WorkflowStage.PRODUCER: LatePassRunner()})
+    assert supervisor.acquire_singleton()
+    try:
+        blocked = supervisor._run_selected(job)
+    finally:
+        supervisor.release_singleton()
+    assert blocked.status is JobStatus.BLOCKED
+    assert blocked.resume_state == "BLOCKED_REQUIRES_RECONCILIATION"
+    assert blocked.last_error.startswith("CANCELED_PROVIDER_RETURNED_PASS:")
+    assert repo.has_active_mutation_fence()
     repo.close()

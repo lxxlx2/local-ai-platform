@@ -176,6 +176,8 @@ class SupervisorRepository(DurablePayloadMixin):
             raise ValueError("job title rejected by Secret Firewall")
         if not 1 <= max_review_rounds <= 5 or not 1 <= max_attempts_per_stage <= 5:
             raise ValueError("round/attempt limit outside safe range")
+        if not mutation_capable:
+            raise ValueError("READ_ONLY_PROBE_IS_NOT_A_WORKFLOW_JOB")
         supplied_metadata = dict(metadata or {})
         if {"baseline_commit_sha", "candidate_base_commit_sha"} & set(supplied_metadata):
             raise ValueError("trusted baseline cannot be supplied through metadata")
@@ -191,6 +193,8 @@ class SupervisorRepository(DurablePayloadMixin):
                 return job
         baseline = self.candidate_identity_provider.capture_baseline()
         baseline_identity = self.candidate_identity_provider.snapshot(baseline)
+        if not bool(self.candidate_identity_provider.worktree_is_clean()):
+            raise RuntimeError("WORKTREE_NOT_CLEAN")
         baseline_state = hashlib.sha256(_json_exact(baseline_identity.stable_payload(), 1_000_000).encode()).hexdigest()
         metadata_json = _safe_json(_safe_metadata(supplied_metadata), 16_000)
         try:
@@ -316,21 +320,34 @@ class SupervisorRepository(DurablePayloadMixin):
         return int(row["attempts"])
 
     def begin_stage(self, job: WorkflowJob) -> tuple[str, int, str] | None:
+        first_producer_identity = None
+        if job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION} and not job.mutation_capable:
+            raise PermissionError("read-only job cannot enter mutating stage")
+        first_producer = (job.current_stage is WorkflowStage.PRODUCER
+                          and self.stage_attempts(job.job_id, job.current_stage) == 0)
+        if first_producer:
+            if not job.baseline_commit_sha or not job.baseline_candidate_state_sha256:
+                return None
+            first_producer_identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
+            if not bool(self.candidate_identity_provider.worktree_is_clean()):
+                return None
+            current_hash = hashlib.sha256(
+                _json_exact(first_producer_identity.stable_payload(), 1_000_000).encode()
+            ).hexdigest()
+            if current_hash != job.baseline_candidate_state_sha256:
+                return None
         try:
             self.db.execute("BEGIN IMMEDIATE")
+            durable = self.db.execute("SELECT * FROM supervisor_jobs WHERE job_id=?", (job.job_id,)).fetchone()
+            if (not durable or durable["current_stage"] != job.current_stage.value
+                    or (job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
+                        and not bool(durable["mutation_capable"]))):
+                self.db.rollback()
+                return None
             if (job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
                     and self.has_mutation_guard()):
                 self.db.rollback()
                 return None
-            if job.current_stage is WorkflowStage.PRODUCER and self.stage_attempts(job.job_id, job.current_stage) == 0:
-                if not job.baseline_commit_sha or not job.baseline_candidate_state_sha256:
-                    self.db.rollback()
-                    return None
-                current = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
-                current_hash = hashlib.sha256(_json_exact(current.stable_payload(), 1_000_000).encode()).hexdigest()
-                if current_hash != job.baseline_candidate_state_sha256:
-                    self.db.rollback()
-                    return None
             active = self.db.execute(
                 "SELECT COUNT(*) FROM supervisor_jobs WHERE status=? AND job_id<>?",
                 (JobStatus.RUNNING.value, job.job_id),
@@ -362,6 +379,10 @@ class SupervisorRepository(DurablePayloadMixin):
             return None
         except sqlite3.Error:
             self.db.rollback()
+            raise
+        except Exception:
+            if self.db.in_transaction:
+                self.db.rollback()
             raise
 
     def finish_stage(self, run_id: str, job_id: str, stage: WorkflowStage, result: StageResult) -> None:
@@ -409,9 +430,13 @@ class SupervisorRepository(DurablePayloadMixin):
             unit = self.db.execute(
                 "SELECT * FROM supervisor_work_units WHERE work_unit_id=?", (work_unit_id,),
             ).fetchone()
+            durable_job = self.db.execute(
+                "SELECT mutation_capable FROM supervisor_jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
             if (not run or run["job_id"] != job_id or run["stage"] != stage.value or run["status"] != "RUNNING"
                     or not unit or unit["job_id"] != job_id or unit["stage"] != stage.value
-                    or int(unit["review_round"]) != int(run["review_round"])):
+                    or int(unit["review_round"]) != int(run["review_round"])
+                    or not durable_job or not bool(durable_job["mutation_capable"])):
                 self.db.rollback()
                 raise ValueError("execution binding does not match durable run/work unit")
             existing = self.db.execute(
@@ -551,6 +576,14 @@ class SupervisorRepository(DurablePayloadMixin):
                 or current.candidate_diff_sha256 != row["candidate_diff_sha256"]):
             return None
         return dict(row)
+
+    def active_execution_for_job(self, job_id: str, stage: WorkflowStage) -> dict | None:
+        row = self.db.execute(
+            "SELECT * FROM supervisor_executions WHERE job_id=? AND stage=? "
+            "AND completion_status IN ('STARTED','CANCELLATION_PENDING') ORDER BY started_at DESC LIMIT 1",
+            (job_id, stage.value),
+        ).fetchone()
+        return dict(row) if row else None
 
     def _active_mutation_fence_row(self):
         return self.db.execute(

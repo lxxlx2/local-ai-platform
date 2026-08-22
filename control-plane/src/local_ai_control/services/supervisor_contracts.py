@@ -144,11 +144,6 @@ class RepoAccessPolicy:
                 normalized = self.validate_candidate_path(value, allowed)
             except PermissionError:
                 continue
-            # Baseline test fixtures may intentionally contain synthetic credential patterns.
-            # They are delegated only when they are part of the immutable candidate, where the
-            # same Secret Firewall gate below is mandatory.
-            if "tests" in Path(normalized).parts:
-                continue
             entry = self._safe_manifest_entry(normalized, allowed, scan_secrets=True)
             total += int(entry["size_bytes"])
             if total > MAX_CANDIDATE_IDENTITY_BYTES:
@@ -181,7 +176,8 @@ class RepoAccessPolicy:
                             key=lambda item: item["path"]))
 
     def validate_supplied_manifest(self, manifest: tuple[Mapping, ...] | list[Mapping],
-                                   allowed_paths: tuple[Path, ...] | list[Path]) -> tuple[dict, ...]:
+                                   allowed_paths: tuple[Path, ...] | list[Path],
+                                   candidate_identity: "CandidateIdentity | None" = None) -> tuple[dict, ...]:
         allowed = self.validate_allowed_paths(list(allowed_paths))
         if len(manifest) > MAX_CANDIDATE_IDENTITY_FILES:
             raise ValueError("safe manifest exceeds file bound")
@@ -191,7 +187,7 @@ class RepoAccessPolicy:
             if path in seen:
                 raise ValueError("safe manifest contains duplicate path")
             seen.add(path)
-            entry = self._safe_manifest_entry(path, allowed)
+            entry = self._safe_manifest_entry(path, allowed, scan_secrets=True)
             if entry != {"path": path, "sha256": str(raw.get("sha256", "")),
                          "size_bytes": int(raw.get("size_bytes", -1))}:
                 raise ValueError("safe manifest is stale or invalid")
@@ -203,6 +199,13 @@ class RepoAccessPolicy:
         supplied = {item["path"]: item for item in checked}
         if any(supplied.get(path) != item for path, item in tracked.items()):
             raise ValueError("safe manifest omits or changes tracked content")
+        extras = set(supplied) - set(tracked)
+        if extras:
+            if candidate_identity is None:
+                raise PermissionError("safe manifest contains unbound extra path")
+            permitted = set(candidate_identity.candidate_paths) - set(candidate_identity.deleted_paths)
+            if not extras <= permitted:
+                raise PermissionError("safe manifest extra path is outside candidate identity")
         return tuple(checked)
 
     def read_safe_file(self, value: str, allowed_paths: tuple[Path, ...] | list[Path],
@@ -223,6 +226,38 @@ class RepoAccessPolicy:
 
 
 AgentPathPolicy = RepoAccessPolicy
+
+
+@dataclass(frozen=True)
+class RepoWritePolicy:
+    """Path-level mutation policy; it is separate from immutable read manifests."""
+
+    repo_root: Path = AI_ROOT
+    write_roots: tuple[Path, ...] = ()
+    allowed_suffixes = frozenset({".py", ".md", ".json", ".toml", ".yaml", ".yml", ".txt"})
+
+    def __post_init__(self):
+        root = Path(self.repo_root).resolve()
+        object.__setattr__(self, "repo_root", root)
+        if not self.write_roots:
+            object.__setattr__(self, "write_roots", (
+                root / "control-plane/src", root / "control-plane/tests", root / "docs",
+            ))
+
+    def validate_write_path(self, value: Path | str) -> Path:
+        policy = RepoAccessPolicy(self.repo_root)
+        candidate, _ = policy._relative(Path(value), allow_missing=True)
+        roots = tuple(Path(item).resolve() for item in self.write_roots)
+        approved = (
+            self.repo_root / "control-plane/src", self.repo_root / "control-plane/tests", self.repo_root / "docs",
+        )
+        if not all(any(root == base or root.is_relative_to(base) for base in approved) for root in roots):
+            raise PermissionError("write root outside approved source/test/document roots")
+        if not any(candidate == root or candidate.is_relative_to(root) for root in roots):
+            raise PermissionError("write path outside bounded write roots")
+        if candidate.suffix.lower() not in self.allowed_suffixes:
+            raise PermissionError("write file type denied")
+        return candidate
 
 
 @dataclass(frozen=True)
@@ -312,6 +347,9 @@ class CandidateIdentityProvider:
 
     def capture_baseline(self) -> str:
         return self.validate_baseline(self._git("rev-parse", "HEAD").decode().strip())
+
+    def worktree_is_clean(self) -> bool:
+        return not bool(self._git("status", "--porcelain=v1", "-z", "--untracked-files=all"))
 
     @staticmethod
     def _parse_name_status(payload: bytes) -> list[tuple[str, str]]:
@@ -666,6 +704,8 @@ class CodexTaskSpec:
     model_role: str
     expected_output_schema: dict
     safe_file_manifest: tuple[dict, ...] = ()
+    candidate_identity: CandidateIdentity | None = None
+    write_roots: tuple[Path, ...] = ()
 
     def validate(self) -> dict:
         root = self.repo_root.resolve()
@@ -675,7 +715,12 @@ class CodexTaskSpec:
         allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
         generated_manifest = policy.build_safe_file_manifest(tuple(Path(path) for path in allowed))
         manifest = (policy.validate_supplied_manifest(self.safe_file_manifest,
-                    tuple(Path(path) for path in allowed)) if self.safe_file_manifest else generated_manifest)
+                    tuple(Path(path) for path in allowed), self.candidate_identity)
+                    if self.safe_file_manifest else generated_manifest)
+        write_policy = RepoWritePolicy(root, self.write_roots)
+        write_roots = tuple(str(path.resolve()) for path in write_policy.write_roots)
+        for path in write_roots:
+            write_policy.validate_write_path(Path(path) / "contract.py")
         if not self.task_prompt or len(self.task_prompt.encode()) > MAX_WORK_UNIT_PROMPT_BYTES:
             raise ValueError("Codex task prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":
@@ -693,6 +738,8 @@ class CodexTaskSpec:
             "model_role": self.model_role,
             "expected_output_schema": schema,
             "safe_file_manifest": list(manifest),
+            "candidate_identity": self.candidate_identity.to_mapping() if self.candidate_identity else None,
+            "write_roots": list(write_roots),
         }
 
     def read_safe_file(self, value: str) -> bytes:
@@ -709,8 +756,13 @@ class CodexTaskSpec:
         return CodexTaskSpec(
             self.repo_root, file_paths, self.task_prompt, self.risk_level,
             self.timeout_seconds, self.model_role, self.expected_output_schema,
-            tuple(validated["safe_file_manifest"]),
+            tuple(validated["safe_file_manifest"]), self.candidate_identity,
+            tuple(Path(path) for path in validated["write_roots"]),
         )
+
+    def validate_write_path(self, value: Path | str) -> Path:
+        validated = self.validate()
+        return RepoWritePolicy(self.repo_root, tuple(Path(path) for path in validated["write_roots"])).validate_write_path(value)
 
 
 @dataclass(frozen=True)
@@ -730,6 +782,8 @@ class WorkUnitSpec:
     status: str
     review_round: int
     safe_file_manifest: tuple[dict, ...] = ()
+    candidate_identity: CandidateIdentity | None = None
+    write_roots: tuple[Path, ...] = ()
 
 
 class OwnerPrivateContentStore:

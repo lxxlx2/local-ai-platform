@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .supervisor_contracts import (
-    AI_ROOT, MAX_EVENTS_PER_JOB, CandidateIdentityProvider, CodexTaskSpec, JobStatus,
+    AI_ROOT, MAX_EVENTS_PER_JOB, CandidateIdentity, CandidateIdentityProvider, CodexTaskSpec, JobStatus,
     LeaseLostError, RepoAccessPolicy, StageResult, WorkUnitSpec, WorkflowJob, WorkflowStage,
     _json_exact, _safe_json, _safe_text, utc_now,
 )
@@ -31,6 +31,12 @@ class Round2RepositoryCoreMixin:
         if "spec_hash" not in columns:
             with self.db:
                 self.db.execute("ALTER TABLE supervisor_work_units ADD COLUMN spec_hash TEXT")
+        if "candidate_identity_json" not in columns:
+            with self.db:
+                self.db.execute("ALTER TABLE supervisor_work_units ADD COLUMN candidate_identity_json TEXT")
+        if "write_roots_json" not in columns:
+            with self.db:
+                self.db.execute("ALTER TABLE supervisor_work_units ADD COLUMN write_roots_json TEXT")
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS supervisor_review_work_units(
@@ -71,6 +77,8 @@ class Round2RepositoryCoreMixin:
     @staticmethod
     def _work_manifest(job_id: str, owner_id: str, stage: WorkflowStage, review_round: int,
                        validated: Mapping, prompt_sha: str) -> dict:
+        candidate = validated.get("candidate_identity")
+        stable_candidate = CandidateIdentity.from_mapping(candidate).stable_payload() if candidate else None
         return {
             "job_id": job_id, "owner_id": str(owner_id), "stage": stage.value,
             "review_round": int(review_round), "repo_root": validated["repo_root"],
@@ -78,6 +86,8 @@ class Round2RepositoryCoreMixin:
             "timeout_seconds": float(validated["timeout_seconds"]), "model_role": validated["model_role"],
             "expected_output_schema": validated["expected_output_schema"], "prompt_sha256": prompt_sha,
             "safe_file_manifest": validated["safe_file_manifest"],
+            "candidate_identity": stable_candidate,
+            "write_roots": validated.get("write_roots", []),
         }
 
     @classmethod
@@ -87,12 +97,21 @@ class Round2RepositoryCoreMixin:
     def _backfill_work_unit_hashes(self) -> None:
         rows = self.db.execute(
             "SELECT * FROM supervisor_work_units WHERE spec_hash IS NULL OR spec_hash='' "
-            "OR safe_file_manifest_json IS NULL OR safe_file_manifest_json=''"
+            "OR safe_file_manifest_json IS NULL OR safe_file_manifest_json='' "
+            "OR candidate_identity_json IS NULL OR candidate_identity_json='' "
+            "OR write_roots_json IS NULL OR write_roots_json=''"
         ).fetchall()
         with self.db:
             for row in rows:
                 allowed_paths = tuple(Path(item) for item in json.loads(row["allowed_paths_json"]))
                 safe_manifest = RepoAccessPolicy(Path(row["repo_root"])).build_safe_file_manifest(allowed_paths)
+                job = self.db.execute(
+                    "SELECT baseline_commit_sha FROM supervisor_jobs WHERE job_id=?", (row["job_id"],),
+                ).fetchone()
+                identity = self.candidate_identity_provider.snapshot(job["baseline_commit_sha"])
+                write_roots = [str(Path(row["repo_root"]) / "control-plane/src"),
+                               str(Path(row["repo_root"]) / "control-plane/tests"),
+                               str(Path(row["repo_root"]) / "docs")]
                 validated = {
                     "repo_root": row["repo_root"],
                     "allowed_paths": json.loads(row["allowed_paths_json"]),
@@ -100,12 +119,16 @@ class Round2RepositoryCoreMixin:
                     "model_role": row["model_role"],
                     "expected_output_schema": json.loads(row["expected_output_schema_json"]),
                     "safe_file_manifest": list(safe_manifest),
+                    "candidate_identity": identity.to_mapping(), "write_roots": write_roots,
                 }
                 digest = self._work_spec_hash(row["job_id"], row["owner_id"], WorkflowStage(row["stage"]),
                                               int(row["review_round"]), validated, row["prompt_sha256"])
                 self.db.execute(
-                    "UPDATE supervisor_work_units SET spec_hash=?,safe_file_manifest_json=? WHERE work_unit_id=?",
-                    (digest, _json_exact(list(safe_manifest), 1_000_000), row["work_unit_id"]),
+                    "UPDATE supervisor_work_units SET spec_hash=?,safe_file_manifest_json=?,"
+                    "candidate_identity_json=?,write_roots_json=? WHERE work_unit_id=?",
+                    (digest, _json_exact(list(safe_manifest), 1_000_000),
+                     _json_exact(identity.to_mapping(), 64_000), _json_exact(write_roots, 16_000),
+                     row["work_unit_id"]),
                 )
 
     def create_work_unit(self, job_id: str, owner_id: str, stage: WorkflowStage,
@@ -118,10 +141,13 @@ class Round2RepositoryCoreMixin:
         round_number = 0 if stage is WorkflowStage.PRODUCER else int(job.review_round if review_round is None else review_round)
         if round_number < 0 or round_number > job.max_review_rounds:
             raise ValueError("work unit review round outside safe range")
+        if not job.mutation_capable:
+            raise PermissionError("read-only job cannot create mutating work unit")
+        if not job.baseline_commit_sha:
+            raise ValueError("trusted immutable job baseline is missing")
+        identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
+        validated["candidate_identity"] = identity.to_mapping()
         if stage is WorkflowStage.REVISION:
-            if not job.baseline_commit_sha:
-                raise ValueError("trusted immutable job baseline is missing")
-            identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
             policy = RepoAccessPolicy(Path(validated["repo_root"]))
             validated["safe_file_manifest"] = list(policy.merge_candidate_manifest(
                 identity, tuple(Path(path) for path in validated["allowed_paths"]),
@@ -147,12 +173,15 @@ class Round2RepositoryCoreMixin:
                     "INSERT INTO supervisor_work_units "
                     "(work_unit_id,job_id,owner_id,stage,review_round,repo_root,allowed_paths_json,risk_level,"
                     "timeout_seconds,model_role,expected_output_schema_json,prompt_content_ref,prompt_sha256,created_at,"
-                    "status,spec_hash,safe_file_manifest_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "status,spec_hash,safe_file_manifest_json,candidate_identity_json,write_roots_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier, job_id, str(owner_id), stage.value, round_number, validated["repo_root"],
                      _json_exact(validated["allowed_paths"], 16_000), validated["risk_level"],
                      validated["timeout_seconds"], validated["model_role"],
                      _json_exact(validated["expected_output_schema"], 16_000), content_ref, prompt_sha,
-                     utc_now(), "READY", spec_hash, _json_exact(validated["safe_file_manifest"], 1_000_000)),
+                     utc_now(), "READY", spec_hash, _json_exact(validated["safe_file_manifest"], 1_000_000),
+                     _json_exact(validated["candidate_identity"], 64_000),
+                     _json_exact(validated["write_roots"], 16_000)),
                 )
         except Exception:
             self.content_store.delete(content_ref)
@@ -167,6 +196,8 @@ class Round2RepositoryCoreMixin:
             "risk_level": unit.risk_level, "timeout_seconds": float(unit.timeout_seconds),
             "model_role": unit.model_role, "expected_output_schema": unit.expected_output_schema,
             "safe_file_manifest": list(unit.safe_file_manifest),
+            "candidate_identity": unit.candidate_identity.to_mapping() if unit.candidate_identity else None,
+            "write_roots": [str(path.resolve()) for path in unit.write_roots],
         }
         expected = self._work_spec_hash(job_id, owner_id, unit.stage, unit.review_round, validated, unit.prompt_sha256)
         if not row["spec_hash"] or row["spec_hash"] != expected:

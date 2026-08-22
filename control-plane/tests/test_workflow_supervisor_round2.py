@@ -10,11 +10,12 @@ from local_ai_control.services.supervisor import (
     StageResultStatus, StaticPassRunner, SupervisorRepository, WorkflowStage,
     WorkflowSupervisor, default_demo_runners, recursive_private_sanitize,
 )
+from supervisor_test_support import TestCandidateIdentityProvider
 import local_ai_control.services.supervisor_round2 as round2
 
 
 def make_repo(tmp_path):
-    repo = SupervisorRepository(tmp_path / "supervisor.db")
+    repo = SupervisorRepository(tmp_path / "supervisor.db", candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT))
     repo.migrate()
     return repo
 
@@ -48,7 +49,6 @@ def test_reviewer_work_unit_reopen_reconstruct_and_owner_round_binding(tmp_path)
         repo.get_review_work_unit("rw-1", "job-review", "other", 1)
     with pytest.raises(PermissionError):
         repo.get_review_work_unit("rw-1", "job-review", "owner", 2)
-    repo.create_job("other", "owner", job_id="job-other", mutation_capable=False)
     with pytest.raises(PermissionError):
         repo.get_review_work_unit("rw-1", "job-other", "owner", 1)
     repo.close()
@@ -189,7 +189,7 @@ def test_recursive_private_sanitizer_keeps_normal_metadata_readable():
 
 def test_lease_keeper_renews_beyond_original_short_ttl_and_blocks_takeover(tmp_path):
     first = make_repo(tmp_path)
-    second = SupervisorRepository(first.path); second.migrate()
+    second = SupervisorRepository(first.path, candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second.migrate()
     assert first.acquire_lock("owner-a", 101, ttl=0.04)
     started = threading.Event()
     class Slow:
@@ -224,7 +224,7 @@ def test_heartbeat_failure_attempts_cancel_and_denies_stage_commit(tmp_path, mon
 
 
 def test_old_lease_owner_cannot_transition_after_takeover(tmp_path):
-    first = make_repo(tmp_path); second = SupervisorRepository(first.path); second.migrate()
+    first = make_repo(tmp_path); second = SupervisorRepository(first.path, candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second.migrate()
     first.create_job("lease", "owner", job_id="job-takeover")
     assert first.acquire_lock("a", 1, ttl=0.01); first.set_active_lease("a")
     time.sleep(0.02); assert second.acquire_lock("b", 2, ttl=1)
@@ -234,7 +234,7 @@ def test_old_lease_owner_cannot_transition_after_takeover(tmp_path):
 
 
 def test_old_lease_owner_cannot_finish_stage_after_takeover(tmp_path):
-    first = make_repo(tmp_path); second = SupervisorRepository(first.path); second.migrate()
+    first = make_repo(tmp_path); second = SupervisorRepository(first.path, candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second.migrate()
     job = first.create_job("lease", "owner", job_id="job-finish")
     assert first.acquire_lock("a", 1, ttl=0.01); first.set_active_lease("a")
     started = first.begin_stage(job)

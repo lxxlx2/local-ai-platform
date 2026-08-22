@@ -57,6 +57,7 @@ class ReviewTaskSpec:
     model_role: str
     expected_review_schema: dict
     safe_file_manifest: tuple[dict, ...] = ()
+    candidate_identity: CandidateIdentity | None = None
 
     def validate(self) -> dict:
         root = self.repo_root.resolve()
@@ -70,7 +71,8 @@ class ReviewTaskSpec:
         allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
         generated_manifest = policy.build_safe_file_manifest(tuple(Path(path) for path in allowed))
         manifest = (policy.validate_supplied_manifest(self.safe_file_manifest,
-                    tuple(Path(path) for path in allowed)) if self.safe_file_manifest else generated_manifest)
+                    tuple(Path(path) for path in allowed), self.candidate_identity)
+                    if self.safe_file_manifest else generated_manifest)
         if not self.task_prompt or len(self.task_prompt.encode()) > 256_000:
             raise ValueError("review prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":
@@ -103,7 +105,7 @@ class ReviewTaskSpec:
         return ReviewTaskSpec(
             self.repo_root, file_paths, self.task_prompt, self.read_only, self.risk_level,
             self.timeout_seconds, self.model_role, self.expected_review_schema,
-            tuple(validated["safe_file_manifest"]),
+            tuple(validated["safe_file_manifest"]), self.candidate_identity,
         )
 
 

@@ -162,7 +162,7 @@ class Round2ReviewRepositoryMixin:
         prompt = self.content_store.get(unit.prompt_content_ref, unit.prompt_sha256)
         spec = ReviewTaskSpec(unit.repo_root, unit.allowed_paths, prompt, unit.read_only, unit.risk_level,
                               unit.timeout_seconds, unit.model_role, unit.expected_review_schema,
-                              unit.safe_file_manifest)
+                              unit.safe_file_manifest, unit.candidate_identity)
         validated = spec.validate()
         if validated["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("review work unit prompt hash mismatch")

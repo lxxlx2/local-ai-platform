@@ -11,12 +11,13 @@ from local_ai_control.services.supervisor import (
     SupervisorRepository, WorkflowStage, WorkflowSupervisor, default_demo_runners,
     ensure_private_directory,
 )
+from supervisor_test_support import TestCandidateIdentityProvider
 import local_ai_control.services.supervisor_round2 as round2
 from local_ai_control.supervisor import process_identity
 
 
 def repo(tmp_path):
-    value = SupervisorRepository(tmp_path / "runtime" / "supervisor.db")
+    value = SupervisorRepository(tmp_path / "runtime" / "supervisor.db", candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT))
     value.migrate()
     return value
 
@@ -37,16 +38,15 @@ def test_durable_work_unit_survives_reopen_and_is_owner_job_path_secret_safe(tmp
     assert unit.prompt_sha256 == hashlib.sha256(prompt.encode()).hexdigest()
     first.close()
 
-    second = SupervisorRepository(tmp_path / "runtime" / "supervisor.db"); second.migrate()
+    second = SupervisorRepository(tmp_path / "runtime" / "supervisor.db", candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second.migrate()
     restored = second.get_work_unit("wu-1", job.job_id, "owner-a")
     assert restored == unit
     assert second.load_work_unit_prompt("wu-1", job.job_id, "owner-a") == prompt
     assert second.reconstruct_codex_task(job.job_id, "owner-a", WorkflowStage.PRODUCER).task_prompt == prompt
     with pytest.raises(PermissionError):
         second.get_work_unit("wu-1", job.job_id, "owner-b")
-    other = second.create_job("other", "owner-a", mutation_capable=False)
     with pytest.raises(PermissionError):
-        second.get_work_unit("wu-1", other.job_id, "owner-a")
+        second.get_work_unit("wu-1", "other", "owner-a")
     with pytest.raises(ValueError):
         second.create_work_unit(
             job.job_id, "owner-a", WorkflowStage.REVISION,
@@ -76,7 +76,7 @@ def test_review_findings_persist_reopen_redact_round_isolate_and_revision_reads(
     assert saved[1].evidence == "[REDACTED_BY_SECRET_FIREWALL]"
     first.close()
 
-    second = SupervisorRepository(tmp_path / "runtime" / "supervisor.db"); second.migrate()
+    second = SupervisorRepository(tmp_path / "runtime" / "supervisor.db", candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second.migrate()
     round1 = second.review_findings(job.job_id, "owner", 1)
     assert len(round1) == 2 and round1[0].evidence == "plain evidence"
     second.update_job(job.job_id, review_round=1, current_stage=WorkflowStage.REVIEW)
@@ -135,7 +135,8 @@ def test_blocked_jobs_cannot_pause_resume_or_retry_around_gates(tmp_path):
         assert supervisor.pause(job.job_id).resume_state == reason
         assert supervisor.resume(job.job_id).resume_state == reason
         assert supervisor.retry(job.job_id).resume_state == reason
-    ordinary = repository.create_job("ordinary", "owner", mutation_capable=False)
+    repository.update_job(job.job_id, status=JobStatus.FAILED)
+    ordinary = repository.create_job("ordinary", "owner")
     assert supervisor.pause(ordinary.job_id).resume_state == "PAUSED"
     resumed = supervisor.resume(ordinary.job_id)
     assert resumed.status is JobStatus.QUEUED and resumed.resume_state is None
@@ -144,7 +145,7 @@ def test_blocked_jobs_cannot_pause_resume_or_retry_around_gates(tmp_path):
 
 def test_lease_loss_is_fail_closed_and_new_owner_can_consume(tmp_path):
     a_repo = repo(tmp_path)
-    b_repo = SupervisorRepository(a_repo.path); b_repo.migrate()
+    b_repo = SupervisorRepository(a_repo.path, candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); b_repo.migrate()
     a = WorkflowSupervisor(a_repo, demo_runners())
     b = WorkflowSupervisor(b_repo, demo_runners())
     assert a.acquire_singleton(pid=1001)

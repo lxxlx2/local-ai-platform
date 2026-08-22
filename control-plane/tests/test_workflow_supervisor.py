@@ -29,10 +29,11 @@ from local_ai_control.services.supervisor import (
     WorkflowStage,
     WorkflowSupervisor,
 )
+from supervisor_test_support import TestCandidateIdentityProvider
 
 
 def make_repository(tmp_path):
-    repository = SupervisorRepository(tmp_path / "supervisor.db")
+    repository = SupervisorRepository(tmp_path / "supervisor.db", candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT))
     repository.migrate()
     return repository
 
@@ -131,7 +132,7 @@ def test_pause_resume_cancel_and_owner_isolation_are_idempotent(tmp_path):
 
 def test_single_instance_lock_rejects_second_consumer_and_allows_stale_takeover(tmp_path):
     first_repo = make_repository(tmp_path)
-    second_repo = SupervisorRepository(first_repo.path); second_repo.migrate()
+    second_repo = SupervisorRepository(first_repo.path, candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second_repo.migrate()
     first = WorkflowSupervisor(first_repo, deterministic_runners())
     second = WorkflowSupervisor(second_repo, deterministic_runners())
     assert first.acquire_singleton(pid=1001)
@@ -153,7 +154,7 @@ def test_interrupted_safe_stage_recovers_without_assuming_success(tmp_path):
     first_repo.db.execute("UPDATE supervisor_locks SET expires_at=0")
     first_repo.db.commit(); first_repo.close()
 
-    second_repo = SupervisorRepository(tmp_path / "supervisor.db"); second_repo.migrate()
+    second_repo = SupervisorRepository(tmp_path / "supervisor.db", candidate_identity_provider=TestCandidateIdentityProvider(AI_ROOT)); second_repo.migrate()
     second = WorkflowSupervisor(second_repo, deterministic_runners())
     assert second.acquire_singleton(pid=2002)
     assert second.recover_interrupted() == 1

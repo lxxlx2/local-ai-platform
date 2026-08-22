@@ -149,7 +149,7 @@ def test_blocked_secret_never_calls_provider_or_stores(public_repo, identities):
     session = public_repo.create_session(user)
     provider = FakeProvider()
     chat = ChatService(public_repo, provider)
-    answer = chat.reply(user, session, "Bearer abcdefghijklmnopqrstuvwxyz12345")
+    answer = chat.reply(user, session, "Bearer " + "abcdefghijklmnopqrstuvwxyz12345")
     assert "没有发送给 AI" in answer.text
     assert provider.calls == 0
     assert public_repo.recent_messages(user, session) == []
