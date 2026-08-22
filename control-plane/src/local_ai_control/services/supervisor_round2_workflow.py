@@ -193,11 +193,12 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
             except KeyError:
                 candidate_file = next(iter(unit.candidate_identity.candidate_paths), None)
                 if not candidate_file:
-                    raise ValueError("demo review requires a bounded candidate file")
-                synthetic = (ReviewResult("FAIL", (ReviewFinding(
-                    "BLOCKING", candidate_file,
-                    "synthetic demo evidence", "synthetic demo revision",
-                ),)) if job.review_round == 0 else ReviewResult("PASS"))
+                    synthetic = ReviewResult("PASS")
+                else:
+                    synthetic = (ReviewResult("FAIL", (ReviewFinding(
+                        "BLOCKING", candidate_file,
+                        "synthetic demo evidence", "synthetic demo revision",
+                    ),)) if job.review_round == 0 else ReviewResult("PASS"))
                 self.repository.submit_review_result(job.job_id, job.owner_id, review_round,
                                                      unit.review_work_unit_id, synthetic)
         try:
@@ -214,11 +215,27 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
             return self.repository.update_job(job.job_id, status=JobStatus.QUEUED, resume_state=None)
         return job
 
+    def _prepare_review_bounded(self, job: WorkflowJob) -> WorkflowJob:
+        try:
+            return self._prepare_review(job)
+        except Exception as error:
+            category = type(error).__name__
+            blocked = self.repository.update_job(
+                job.job_id, status=JobStatus.BLOCKED,
+                resume_state="REVIEW_PREPARATION_BLOCKED", last_error=category,
+            )
+            self.repository.record_event(
+                job.job_id, "STAGE_FAILED", WorkflowStage.REVIEW,
+                {"reason": "REVIEW_PREPARATION_BLOCKED", "error_category": category},
+                f"review-prepare-blocked:{job.job_id}:{job.review_round + 1}",
+            )
+            return blocked
+
     def run_once(self) -> WorkflowJob | None:
         self._require_lease()
         job = self.repository.queued_job()
         if job and job.current_stage is WorkflowStage.REVIEW:
-            job = self._prepare_review(job)
+            job = self._prepare_review_bounded(job)
             if job.status is not JobStatus.QUEUED:
                 return job
         return self._run_selected(job) if job else None
@@ -227,7 +244,7 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
         self._require_lease()
         job = self.status(job_id)
         if job.current_stage is WorkflowStage.REVIEW and job.status in {JobStatus.QUEUED, JobStatus.WAITING}:
-            job = self._prepare_review(job)
+            job = self._prepare_review_bounded(job)
             if job.status is not JobStatus.QUEUED:
                 return job
         queued = self.repository.queued_job(job_id)

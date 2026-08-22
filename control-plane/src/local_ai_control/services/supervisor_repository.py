@@ -527,8 +527,12 @@ class SupervisorRepository(DurablePayloadMixin):
             raise ValueError("execution is not in a completable state")
         identity = None
         snapshot_failed = False
+        unaccounted_ignored_mutation = False
         if result.status is StageResultStatus.PASS and initial["cancellation_status"] == "NOT_REQUESTED":
             try:
+                if self.candidate_identity_provider.unowned_write_root_paths():
+                    unaccounted_ignored_mutation = True
+                    raise PermissionError("UNTRACKED_IGNORED_MUTATION_UNACCOUNTED")
                 identity = self.candidate_identity_provider.snapshot(initial["baseline_commit_sha"])
             except Exception:
                 snapshot_failed = True
@@ -558,9 +562,15 @@ class SupervisorRepository(DurablePayloadMixin):
         except sqlite3.Error:
             self.db.rollback()
             raise
-        return dict(self.db.execute(
+        completed = dict(self.db.execute(
             "SELECT * FROM supervisor_executions WHERE execution_id=?", (identifier,),
         ).fetchone())
+        if unaccounted_ignored_mutation:
+            self.persist_mutation_fence(
+                initial["job_id"], "UNTRACKED_IGNORED_MUTATION_UNACCOUNTED",
+                initial["work_unit_id"], identifier,
+            )
+        return completed
 
     def record_execution_cancellation(self, execution_id: str, cancellation_status: str) -> None:
         identifier = self._validate_execution_id(execution_id)
@@ -855,16 +865,35 @@ class SupervisorRepository(DurablePayloadMixin):
         except sqlite3.Error:
             return False
 
-    def reconcile_mutation_fence(self, fence_name: str, reconciliation_note: str) -> dict:
+    def _reconcile_mutation_fence_atomic(self, fence_name: str, reconciliation_note: str,
+                                         owner_id: str | None = None,
+                                         expected_job_id: str | None = None) -> dict:
         if not reconciliation_note or SecretFirewall().inspect(reconciliation_note).action == "BLOCK":
             raise ValueError("manual reconciliation note is required and must be secret-free")
         digest = hashlib.sha256(reconciliation_note.encode()).hexdigest()
-        with self.db:
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
             fence = self.db.execute(
                 "SELECT * FROM supervisor_execution_fences WHERE fence_name=? AND status='ACTIVE'", (fence_name,),
             ).fetchone()
             if not fence:
+                self.db.rollback()
                 raise ValueError("active mutation fence not found")
+            job = self.db.execute(
+                "SELECT * FROM supervisor_jobs WHERE job_id=?", (fence["job_id"],),
+            ).fetchone()
+            if (not job or (expected_job_id is not None and job["job_id"] != expected_job_id)
+                    or (owner_id is not None and job["owner_id"] != str(owner_id))):
+                self.db.rollback()
+                raise PermissionError("active manual-reconciliation fence binding not found")
+            if (job["status"] != JobStatus.BLOCKED.value
+                    or job["resume_state"] != "BLOCKED_REQUIRES_RECONCILIATION"):
+                self.db.rollback()
+                raise ValueError("job is not in the manual reconciliation state")
+            lock = self.db.execute("SELECT * FROM supervisor_locks WHERE lock_name='consumer'").fetchone()
+            if lock and float(lock["expires_at"]) > time.time():
+                self.db.rollback()
+                raise RuntimeError("SUPERVISOR_CONSUMER_STILL_ACTIVE")
             if fence["execution_id"]:
                 self.db.execute(
                     "UPDATE supervisor_executions SET completion_status='MANUALLY_RECONCILED',completed_at=COALESCE(completed_at,?) "
@@ -878,21 +907,30 @@ class SupervisorRepository(DurablePayloadMixin):
                 (utc_now(), digest, fence_name),
             )
             if cursor.rowcount != 1:
+                self.db.rollback()
                 raise ValueError("active mutation fence not found")
+            self.db.execute(
+                "UPDATE supervisor_jobs SET status=?,resume_state=NULL,last_error=?,updated_at=? "
+                "WHERE job_id=? AND status=? AND resume_state='BLOCKED_REQUIRES_RECONCILIATION'",
+                (JobStatus.FAILED.value, "MANUAL_RECONCILIATION_COMPLETED", utc_now(),
+                 job["job_id"], JobStatus.BLOCKED.value),
+            )
+            self.db.commit()
+        except sqlite3.Error:
+            self.db.rollback()
+            raise
         return dict(self.db.execute(
             "SELECT * FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
         ).fetchone())
 
+    def reconcile_mutation_fence(self, fence_name: str, reconciliation_note: str) -> dict:
+        return self._reconcile_mutation_fence_atomic(fence_name, reconciliation_note)
+
     def reconcile_mutation_fence_for_owner(self, job_id: str, owner_id: str,
                                            fence_name: str, reconciliation_note: str) -> dict:
-        job = self.get_job_for_owner(job_id, owner_id)
-        fence = self.db.execute(
-            "SELECT * FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
-        ).fetchone()
-        if (not fence or fence["job_id"] != job.job_id or fence["status"] != "ACTIVE"
-                or not bool(fence["requires_manual_reconciliation"])):
-            raise ValueError("active manual-reconciliation fence binding not found")
-        return self.reconcile_mutation_fence(fence_name, reconciliation_note)
+        return self._reconcile_mutation_fence_atomic(
+            fence_name, reconciliation_note, str(owner_id), job_id,
+        )
 
     def prune_terminal_jobs(self, keep: int = MAX_TERMINAL_JOBS) -> int:
         keep = min(max(int(keep), 1), MAX_TERMINAL_JOBS)
@@ -996,20 +1034,33 @@ class SupervisorRepository(DurablePayloadMixin):
         ).fetchone()
         lock = self.lock_snapshot()
         fence = self._active_mutation_fence_row()
-        unresolved = self.db.execute(
-            "SELECT COUNT(*) FROM supervisor_executions WHERE completion_status IN "
-            "('STARTED','CANCELLATION_PENDING','UNKNOWN')",
-        ).fetchone()[0]
+        unresolved_rows = self.db.execute(
+            "SELECT e.completion_status,e.stage,j.status AS job_status,j.current_stage "
+            "FROM supervisor_executions e JOIN supervisor_jobs j ON j.job_id=e.job_id "
+            "WHERE e.completion_status IN ('STARTED','CANCELLATION_PENDING','UNKNOWN')",
+        ).fetchall()
+        lock_live = bool(lock and float(lock["expires_at"]) > time.time())
+        orphaned = sum(
+            1 for row in unresolved_rows
+            if not (lock_live and row["completion_status"] in {"STARTED", "CANCELLATION_PENDING"}
+                    and row["job_status"] == JobStatus.RUNNING.value
+                    and row["stage"] == row["current_stage"])
+        )
         reconciliation = bool(fence and fence["requires_manual_reconciliation"])
+        recovery_required = bool(orphaned and not reconciliation)
         return {
-            "status": ("BLOCKED_RECONCILIATION_REQUIRED" if reconciliation else "HEALTHY"),
+            "status": ("BLOCKED_RECONCILIATION_REQUIRED" if reconciliation else
+                       ("RECOVERY_REQUIRED" if recovery_required else "HEALTHY")),
             "db_reachable": True,
-            "single_instance_lock": bool(lock and lock["expires_at"] > time.time()),
+            "single_instance_lock": lock_live,
+            "consumer_lock_live": lock_live,
             "active_jobs": counts["active"], "queue_depth": counts["queued"],
             "last_completed_job": dict(last) if last else None,
             "last_error": error["last_error"] if error else None,
             "requires_manual_reconciliation": reconciliation,
             "active_fence_name": fence["fence_name"] if fence else None,
             "blocked_job_id": fence["job_id"] if fence else None,
-            "unresolved_execution_count": int(unresolved),
+            "unresolved_execution_count": len(unresolved_rows),
+            "orphan_unresolved_execution_count": orphaned,
+            "recovery_required": recovery_required,
         }

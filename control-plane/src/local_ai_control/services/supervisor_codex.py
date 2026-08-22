@@ -164,7 +164,14 @@ class PersistedCodexStageRunner:
             )
         try:
             result = self.task_runner.run_task(spec.execution_view(), self.execution_id)
-            context.repository.complete_execution(self.execution_id, result)
+            completion = context.repository.complete_execution(self.execution_id, result)
+            if (result.status is StageResultStatus.PASS
+                    and completion["completion_status"] == "UNKNOWN"
+                    and context.repository.has_active_mutation_fence()):
+                return StageResult(
+                    StageResultStatus.BLOCKED, "Execution completion could not be safely confirmed",
+                    error="EXECUTION_COMPLETION_UNCONFIRMED",
+                )
             return result
         except Exception:
             context.repository.persist_mutation_fence(

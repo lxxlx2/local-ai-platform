@@ -15,6 +15,7 @@ from local_ai_control.services.supervisor import (
     CandidateIdentity,
     CandidateIdentityProvider,
     CodexTaskSpec,
+    DurableReviewRunner,
     JobStatus,
     LeaseKeepingRunner,
     LeaseLostError,
@@ -731,6 +732,8 @@ def test_round5_unresolved_execution_becomes_idempotent_global_fence(tmp_path):
     assert repo.ensure_unresolved_execution_fences() == 0
     assert repo.has_mutation_guard()
     fence = repo.active_mutation_fence()
+    repo.update_job(job.job_id, status=JobStatus.BLOCKED,
+                    resume_state="BLOCKED_REQUIRES_RECONCILIATION")
     repo.reconcile_mutation_fence(fence["fence_name"], "operator verified process termination")
     assert not repo.has_mutation_guard()
     status = repo.db.execute(
@@ -1397,6 +1400,247 @@ def test_round7_review_patch_denies_deleted_binary_from_baseline(tmp_path):
     binary.unlink(); provider = CandidateIdentityProvider(root); identity = provider.snapshot(base)
     with pytest.raises(ValueError, match="binary"):
         provider.build_review_patch(identity)
+
+
+def _round8_clean_git_repo(tmp_path):
+    root = tmp_path / "round8-repo"
+    for relative in ("control-plane/src", "control-plane/tests", "docs"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    git(root, "init", "-b", "main")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    git(root, "config", "user.name", "Fixture")
+    source = root / "control-plane/src/base.py"
+    source.write_text("value = 1\n")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "base")
+    return root, git(root, "rev-parse", "HEAD")
+
+
+def test_round8_clean_candidate_has_canonical_empty_patch_and_demo_review_is_bounded(tmp_path):
+    root, base = _round8_clean_git_repo(tmp_path)
+    provider = CandidateIdentityProvider(root)
+    identity = provider.snapshot(base)
+    assert identity.candidate_paths == ()
+    assert provider.build_review_patch(identity) == "# LOCAL_AI_SUPERVISOR_NO_CANDIDATE_CHANGES\n"
+    repo = SupervisorRepository(tmp_path / "round8-demo.db", candidate_identity_provider=provider)
+    repo.migrate()
+    job = repo.create_job("demo", "owner", metadata={"supervisor_demo": True})
+    job = repo.update_job(job.job_id, current_stage=WorkflowStage.REVIEW)
+    supervisor = WorkflowSupervisor(repo, {WorkflowStage.REVIEW: DurableReviewRunner()})
+    assert supervisor.acquire_singleton()
+    prepared = supervisor.run_job_once(job.job_id)
+    assert prepared.status is JobStatus.QUEUED and prepared.current_stage is WorkflowStage.SECURITY
+    unit = repo.review_work_unit_for_round(job.job_id, "owner", 1)
+    assert repo.submitted_review_result(job.job_id, "owner", 1, unit.review_work_unit_id).status == "PASS"
+    assert provider.worktree_is_clean()
+    supervisor.release_singleton()
+    repo.close()
+
+
+def test_round8_review_preparation_exception_blocks_without_escaping(tmp_path):
+    provider = StaticIdentityProvider()
+    provider.build_review_patch = lambda identity: (_ for _ in ()).throw(RuntimeError("fixture failure"))
+    repo = repository(tmp_path, provider)
+    job = repo.create_job("demo", "owner", metadata={"supervisor_demo": True})
+    job = repo.update_job(job.job_id, current_stage=WorkflowStage.REVIEW)
+    blocked = WorkflowSupervisor(repo, {})._prepare_review_bounded(job)
+    assert blocked.status is JobStatus.BLOCKED
+    assert blocked.resume_state == "REVIEW_PREPARATION_BLOCKED"
+    assert blocked.last_error == "RuntimeError"
+    repo.close()
+
+
+def test_round8_ignored_new_write_denied_and_completion_fenced(tmp_path):
+    root, base = _round8_clean_git_repo(tmp_path)
+    (root / ".gitignore").write_text("control-plane/src/generated.py\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore generated")
+    provider = CandidateIdentityProvider(root)
+    policy = RepoWritePolicy(root)
+    ignored = root / "control-plane/src/generated.py"
+    with pytest.raises(PermissionError, match="IGNORED_WRITE_TARGET_DENIED"):
+        policy.validate_git_ownership(ignored)
+    repo = SupervisorRepository(tmp_path / "round8-ignored.db", candidate_identity_provider=provider)
+    repo.migrate()
+    job = repo.create_job("ignored", "owner", job_id="round8-ignored")
+    job = repo.update_job(job.job_id, current_stage=WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job)
+    _, _, key = repo.begin_stage(job)
+    execution_id = str(uuid.uuid4())
+    repo.start_execution(execution_id, job.job_id, unit.work_unit_id, WorkflowStage.PRODUCER, key, "Provider")
+    ignored.write_text("unaccounted = True\n")
+    completed = repo.complete_execution(execution_id, StageResult.passed("done"))
+    assert completed["completion_status"] == "UNKNOWN"
+    fence = repo.db.execute("SELECT reason FROM supervisor_execution_fences WHERE status='ACTIVE'").fetchone()
+    assert fence["reason"] == "UNTRACKED_IGNORED_MUTATION_UNACCOUNTED"
+    assert b"generated.py" not in (tmp_path / "round8-ignored.db").read_bytes()
+    repo.close()
+
+
+def test_round8_ignored_bypass_cannot_return_stage_pass(tmp_path):
+    root, _ = _round8_clean_git_repo(tmp_path)
+    (root / ".gitignore").write_text("control-plane/src/generated.py\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore generated")
+    provider = CandidateIdentityProvider(root)
+    repo = SupervisorRepository(tmp_path / "round8-bypass.db", candidate_identity_provider=provider)
+    repo.migrate()
+    job = repo.create_job("ignored bypass", "owner")
+    job = repo.update_job(job.job_id, current_stage=WorkflowStage.PRODUCER)
+    mutating_work_unit(repo, job)
+    _, attempt, key = repo.begin_stage(job)
+    target = root / "control-plane/src/generated.py"
+
+    class BypassRunner:
+        cancellation_supported = False
+
+        def run_task(self, spec, execution_id):
+            target.write_text("unaccounted = True\n")
+            return StageResult.passed("provider claimed pass")
+
+    result = PersistedCodexStageRunner(BypassRunner()).run(
+        StageContext(repo.get_job(job.job_id), WorkflowStage.PRODUCER, attempt, key, 60, repo),
+    )
+    assert result.status is StageResultStatus.BLOCKED
+    assert result.error == "EXECUTION_COMPLETION_UNCONFIRMED"
+    assert repo.has_active_mutation_fence()
+    repo.close()
+
+
+def test_round8_tracked_target_remains_owned_after_ignore_rule(tmp_path):
+    root, _ = _round8_clean_git_repo(tmp_path)
+    tracked = root / "control-plane/src/base.py"
+    (root / ".gitignore").write_text("control-plane/src/base.py\n")
+    assert RepoWritePolicy(root).validate_git_ownership(tracked) == tracked
+
+
+def test_round8_rename_copy_identity_preserves_old_and_new_provenance(tmp_path):
+    root, base = _round8_clean_git_repo(tmp_path)
+    old = root / "control-plane/src/base.py"
+    renamed = root / "control-plane/src/renamed.py"
+    copied = root / "control-plane/src/copied.py"
+    old.rename(renamed)
+    copied.write_text(renamed.read_text())
+    git(root, "add", "-A")
+    identity = CandidateIdentityProvider(root).snapshot(base)
+    assert ("control-plane/src/base.py", "control-plane/src/renamed.py") in identity.renamed_paths
+    assert "control-plane/src/base.py" in identity.deleted_paths
+    assert {"control-plane/src/base.py", "control-plane/src/renamed.py"}.issubset(identity.candidate_paths)
+    assert any(target == "control-plane/src/copied.py" for _, target in identity.copied_paths)
+    restored = CandidateIdentity.from_mapping(identity.to_mapping())
+    assert restored.same_candidate(identity)
+    forged = identity.to_mapping()
+    forged["renamed_paths"] = [["docs/unbound.md", "control-plane/src/renamed.py"]]
+    with pytest.raises(ValueError, match="rename provenance"):
+        CandidateIdentity.from_mapping(forged)
+    patch = CandidateIdentityProvider(root).build_review_patch(identity)
+    assert "base.py" in patch and "renamed.py" in patch and "copied.py" in patch
+
+
+def test_round8_rename_to_denied_destination_fails_closed(tmp_path):
+    root, base = _round8_clean_git_repo(tmp_path)
+    destination = root / "runtime/base.py"
+    destination.parent.mkdir()
+    (root / "control-plane/src/base.py").rename(destination)
+    with pytest.raises(PermissionError):
+        CandidateIdentityProvider(root).snapshot(base)
+
+
+def test_round8_unstaged_unambiguous_rename_preserves_source_provenance(tmp_path):
+    root, base = _round8_clean_git_repo(tmp_path)
+    (root / "control-plane/src/base.py").rename(root / "control-plane/src/moved.py")
+    identity = CandidateIdentityProvider(root).snapshot(base)
+    assert identity.renamed_paths == (("control-plane/src/base.py", "control-plane/src/moved.py"),)
+    assert identity.deleted_paths == ("control-plane/src/base.py",)
+    assert set(identity.candidate_paths) == {"control-plane/src/base.py", "control-plane/src/moved.py"}
+
+
+def test_round8_reviewer_finding_can_target_renamed_away_old_path(tmp_path):
+    identity = CandidateIdentity(
+        "TREE_MANIFEST", None, "b" * 64, "a" * 40, "c" * 64,
+        "2026-08-22T00:00:00+00:00",
+        (CANDIDATE_FILE, SECOND_CANDIDATE_FILE), (CANDIDATE_FILE,),
+        ((CANDIDATE_FILE, SECOND_CANDIDATE_FILE),), (),
+    )
+    result = submit_finding(
+        tmp_path, identity,
+        ReviewFinding("HIGH", CANDIDATE_FILE, "trusted old path was renamed", "review rename semantics"),
+    )
+    assert result.status == "SUBMITTED"
+
+
+def test_round8_reconciliation_rejects_live_consumer_and_wrong_job_state(tmp_path):
+    repo = repository(tmp_path)
+    job = repo.create_job("reconcile", "owner")
+    job = repo.update_job(job.job_id, current_stage=WorkflowStage.PRODUCER)
+    fence = repo.persist_mutation_fence(job.job_id, "EXTERNAL_EXECUTION_UNCERTAIN")
+    with pytest.raises(ValueError, match="manual reconciliation state"):
+        repo.reconcile_mutation_fence_for_owner(job.job_id, "owner", fence["fence_name"], "verified stopped")
+    repo.update_job(job.job_id, status=JobStatus.BLOCKED, resume_state="BLOCKED_REQUIRES_RECONCILIATION")
+    assert repo.acquire_lock("live-consumer", 12345, ttl=30)
+    with pytest.raises(RuntimeError, match="SUPERVISOR_CONSUMER_STILL_ACTIVE"):
+        repo.reconcile_mutation_fence_for_owner(job.job_id, "owner", fence["fence_name"], "verified stopped")
+    repo.release_lock("live-consumer")
+    assert repo.reconcile_mutation_fence_for_owner(
+        job.job_id, "owner", fence["fence_name"], "verified stopped",
+    )["status"] == "CLEARED"
+    assert repo.get_job(job.job_id).status is JobStatus.FAILED
+    repo.close()
+
+
+def test_round8_health_distinguishes_live_execution_from_orphan_recovery(tmp_path):
+    repo = repository(tmp_path)
+    job = stage_job(repo, WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job)
+    _, _, key = repo.begin_stage(job)
+    execution_id = str(uuid.uuid4())
+    repo.start_execution(execution_id, job.job_id, unit.work_unit_id, WorkflowStage.PRODUCER, key, "Provider")
+    assert repo.acquire_lock("live", 12345, ttl=30)
+    healthy = repo.health_snapshot()
+    assert healthy["status"] == "HEALTHY" and healthy["orphan_unresolved_execution_count"] == 0
+    repo.release_lock("live")
+    orphaned = repo.health_snapshot()
+    assert orphaned["status"] == "RECOVERY_REQUIRED"
+    assert orphaned["recovery_required"] and orphaned["orphan_unresolved_execution_count"] == 1
+    repo.close()
+
+
+def test_round8_status_cli_reports_orphan_before_daemon_recovery(tmp_path):
+    path = tmp_path / "orphan-status.db"
+    repo = SupervisorRepository(path, candidate_identity_provider=StaticIdentityProvider()); repo.migrate()
+    job = stage_job(repo, WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job)
+    _, _, key = repo.begin_stage(job)
+    repo.start_execution(str(uuid.uuid4()), job.job_id, unit.work_unit_id,
+                         WorkflowStage.PRODUCER, key, "Provider")
+    repo.close()
+    environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
+                   "PYTHONPATH": str(AI_ROOT / "control-plane/src"),
+                   "LOCAL_AI_SUPERVISOR_DB": str(path)}
+    completed = subprocess.run(
+        ("/Users/jerson/AI/runtime/control-plane-venv/bin/python", "-m",
+         "local_ai_control.supervisor.app", "status"),
+        cwd=AI_ROOT / "control-plane", capture_output=True, text=True, shell=False,
+        timeout=10, check=False, env=environment,
+    )
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 0
+    assert payload["status"] == "RECOVERY_REQUIRED"
+    assert payload["orphan_unresolved_execution_count"] == 1
+    assert payload["consumer_lock_live"] is False
+
+
+def test_round8_completed_confirmed_execution_is_not_orphaned(tmp_path):
+    repo = repository(tmp_path)
+    job = stage_job(repo, WorkflowStage.PRODUCER)
+    unit = mutating_work_unit(repo, job)
+    _, _, key = repo.begin_stage(job)
+    execution_id = str(uuid.uuid4())
+    repo.start_execution(execution_id, job.job_id, unit.work_unit_id,
+                         WorkflowStage.PRODUCER, key, "Provider")
+    assert repo.complete_execution(execution_id, StageResult.passed("done"))["completion_status"] == "COMPLETED_CONFIRMED"
+    health = repo.health_snapshot()
+    assert health["unresolved_execution_count"] == 0
+    assert health["orphan_unresolved_execution_count"] == 0
+    repo.close()
 
 
 def test_round7_review_work_unit_persists_and_reconstructs_bound_patch(tmp_path):

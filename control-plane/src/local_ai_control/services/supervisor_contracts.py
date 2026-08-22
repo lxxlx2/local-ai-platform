@@ -34,6 +34,7 @@ MAX_CANDIDATE_IDENTITY_BYTES = 16_000_000
 MAX_SAFE_AGENT_FILE_BYTES = 1_000_000
 MAX_MUTATING_JOBS_IN_SYSTEM = 1
 MAX_REVIEW_PATCH_BYTES = 256_000
+EMPTY_REVIEW_PATCH = "# LOCAL_AI_SUPERVISOR_NO_CANDIDATE_CHANGES\n"
 
 
 @dataclass(frozen=True)
@@ -260,6 +261,27 @@ class RepoWritePolicy:
             raise PermissionError("write file type denied")
         return candidate
 
+    def validate_git_ownership(self, value: Path | str) -> Path:
+        """Allow tracked targets and non-ignored new targets; deny ignored files."""
+        candidate = self.validate_write_path(value)
+        relative = candidate.relative_to(self.repo_root).as_posix()
+        environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
+        tracked = subprocess.run(
+            ("git", "ls-files", "--error-unmatch", "--", relative), cwd=self.repo_root,
+            capture_output=True, shell=False, timeout=10, check=False, env=environment,
+        )
+        if tracked.returncode == 0:
+            return candidate
+        ignored = subprocess.run(
+            ("git", "check-ignore", "--no-index", "-q", "--", relative), cwd=self.repo_root,
+            capture_output=True, shell=False, timeout=10, check=False, env=environment,
+        )
+        if ignored.returncode == 0:
+            raise PermissionError("IGNORED_WRITE_TARGET_DENIED")
+        if ignored.returncode != 1:
+            raise PermissionError("GIT_OWNERSHIP_CHECK_FAILED")
+        return candidate
+
 
 @dataclass(frozen=True)
 class CandidateIdentity:
@@ -271,6 +293,8 @@ class CandidateIdentity:
     candidate_created_at: str
     candidate_paths: tuple[str, ...] = ()
     deleted_paths: tuple[str, ...] = ()
+    renamed_paths: tuple[tuple[str, str], ...] = ()
+    copied_paths: tuple[tuple[str, str], ...] = ()
 
     def stable_payload(self) -> dict:
         return {
@@ -281,6 +305,8 @@ class CandidateIdentity:
             "candidate_diff_sha256": self.candidate_diff_sha256,
             "candidate_paths": list(self.candidate_paths),
             "deleted_paths": list(self.deleted_paths),
+            "renamed_paths": [list(item) for item in self.renamed_paths],
+            "copied_paths": [list(item) for item in self.copied_paths],
         }
 
     def to_mapping(self) -> dict:
@@ -296,6 +322,18 @@ class CandidateIdentity:
         created = str(value.get("candidate_created_at", ""))
         paths = tuple(str(item) for item in value.get("candidate_paths", ()))
         deleted = tuple(str(item) for item in value.get("deleted_paths", ()))
+        renamed = tuple(tuple(str(part) for part in item) for item in value.get("renamed_paths", ()))
+        copied = tuple(tuple(str(part) for part in item) for item in value.get("copied_paths", ()))
+        if any(len(item) != 2 for item in (*renamed, *copied)):
+            raise ValueError("invalid candidate rename/copy provenance")
+        path_set, deleted_set = set(paths), set(deleted)
+        if len(path_set) != len(paths) or len(set(renamed)) != len(renamed) or len(set(copied)) != len(copied):
+            raise ValueError("duplicate candidate path provenance")
+        if any(old not in path_set or new not in path_set or old not in deleted_set or old == new
+               for old, new in renamed):
+            raise ValueError("rename provenance is not bound to candidate paths")
+        if any(old not in path_set or new not in path_set or old == new for old, new in copied):
+            raise ValueError("copy provenance is not bound to candidate paths")
         if ref_type not in {"COMMIT", "TREE_MANIFEST"}:
             raise ValueError("invalid candidate identity reference type")
         for digest in (base, diff, commit or "0" * 40, tree or "0" * 40):
@@ -312,7 +350,7 @@ class CandidateIdentity:
         if created_value.tzinfo is None:
             raise ValueError("candidate identity creation timestamp must be timezone-aware")
         return cls(ref_type, str(commit) if commit else None, str(tree) if tree else None,
-                   base, diff, created, paths, deleted)
+                   base, diff, created, paths, deleted, renamed, copied)
 
     def same_candidate(self, other: "CandidateIdentity") -> bool:
         return self.stable_payload() == other.stable_payload()
@@ -377,7 +415,7 @@ class CandidateIdentityProvider:
         allowed = self.policy.validate_allowed_paths(list(self.policy.default_allowed_paths))
         paths = tuple(sorted(set(identity.candidate_paths)))
         if not paths:
-            raise ValueError("review patch candidate has no changed paths")
+            return EMPTY_REVIEW_PATCH
         for value in paths:
             self.policy.validate_candidate_path(value, allowed, deleted=value in identity.deleted_paths)
             if value not in identity.deleted_paths:
@@ -412,7 +450,7 @@ class CandidateIdentityProvider:
         return text
 
     @staticmethod
-    def _parse_name_status(payload: bytes) -> list[tuple[str, str]]:
+    def _parse_name_status(payload: bytes) -> list[tuple[str, str, str | None]]:
         fields = payload.decode("utf-8", errors="strict").split("\0")
         result, index = [], 0
         while index < len(fields) and fields[index]:
@@ -420,11 +458,13 @@ class CandidateIdentityProvider:
             if index >= len(fields):
                 raise ValueError("invalid Git name-status payload")
             path = fields[index]; index += 1
+            source = None
             if status.startswith(("R", "C")):
                 if index >= len(fields):
                     raise ValueError("invalid Git rename payload")
+                source = path
                 path = fields[index]; index += 1
-            result.append((status[:1], path))
+            result.append((status[:1], path, source))
         return result
 
     def snapshot(self, base_commit_sha: str | None = None) -> CandidateIdentity:
@@ -434,9 +474,44 @@ class CandidateIdentityProvider:
         )
         if not re.fullmatch(r"[a-f0-9]{40}", head) or not re.fullmatch(r"[a-f0-9]{40}", base):
             raise ValueError("candidate identity requires full Git SHAs")
-        changes = self._parse_name_status(self._git("diff", "--name-status", "-z", "--find-renames", base, "--"))
+        changes = self._parse_name_status(self._git(
+            "diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", base, "--",
+        ))
         untracked = [value for value in self._git("ls-files", "--others", "--exclude-standard", "-z").decode().split("\0") if value]
-        by_path = {path: status for status, path in changes}
+        # Git does not include unstaged, untracked rename destinations in `git diff`.
+        # Recover an unambiguous exact-content move so the trusted old path is not lost.
+        for deleted_entry in tuple(item for item in changes if item[0] == "D"):
+            source = deleted_entry[1]
+            self.policy.validate_candidate_path(source, self.policy.default_allowed_paths, deleted=True)
+            baseline_size = int(self._git("cat-file", "-s", f"{base}:{source}").decode().strip())
+            if baseline_size > MAX_CANDIDATE_IDENTITY_BYTES:
+                continue
+            baseline_payload = self._git("show", f"{base}:{source}")
+            matches = []
+            for path in untracked:
+                try:
+                    normalized = self.policy.validate_candidate_path(
+                        path, self.policy.default_allowed_paths, deleted=False,
+                    )
+                except PermissionError:
+                    continue
+                candidate = self.repo_root / normalized
+                if (candidate.is_file() and not candidate.is_symlink()
+                        and candidate.stat().st_size <= MAX_CANDIDATE_IDENTITY_BYTES
+                        and candidate.read_bytes() == baseline_payload):
+                    matches.append(path)
+            if len(matches) == 1:
+                changes.remove(deleted_entry)
+                changes.append(("R", matches[0], source))
+                untracked.remove(matches[0])
+        by_path: dict[str, str] = {}
+        renamed: list[tuple[str, str]] = []
+        copied: list[tuple[str, str]] = []
+        for status, path, source in changes:
+            by_path[path] = status
+            if source is not None:
+                by_path[source] = "D" if status == "R" else "C"
+                (renamed if status == "R" else copied).append((source, path))
         by_path.update({path: "A" for path in untracked})
         if len(by_path) > MAX_CANDIDATE_IDENTITY_FILES:
             raise ValueError("candidate identity file count exceeds bound")
@@ -468,6 +543,7 @@ class CandidateIdentityProvider:
             "TREE_MANIFEST" if dirty else "COMMIT", None if dirty else head, tree_sha,
             base, diff_sha, utc_now(),
             tuple(item["path"] for item in manifest), tuple(deleted),
+            tuple(sorted(renamed)), tuple(sorted(copied)),
         )
 
 
@@ -822,7 +898,9 @@ class CodexTaskSpec:
 
     def validate_write_path(self, value: Path | str) -> Path:
         validated = self.validate()
-        return RepoWritePolicy(self.repo_root, tuple(Path(path) for path in validated["write_roots"])).validate_write_path(value)
+        return RepoWritePolicy(
+            self.repo_root, tuple(Path(path) for path in validated["write_roots"]),
+        ).validate_git_ownership(value)
 
 
 @dataclass(frozen=True)
