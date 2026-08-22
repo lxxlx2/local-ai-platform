@@ -20,8 +20,14 @@ REPORT=Path("/Users/jerson/AI/runtime/qualification/qwen38-v0.1.json")
 def memory():
     pressure=subprocess.check_output(["memory_pressure","-Q"],text=True)
     available=int(re.search(r"free percentage: (\d+)%",pressure).group(1))
+    page_size=int(subprocess.check_output(["sysctl","-n","hw.pagesize"],text=True))
+    vm=subprocess.check_output(["vm_stat"],text=True); pages={}
+    for line in vm.splitlines()[1:]:
+        if ":" in line:
+            key,value=line.split(":",1); pages[key]=int(value.strip().rstrip("."))
+    reclaimable=pages.get("Pages free",0)+pages.get("Pages inactive",0)+pages.get("Pages speculative",0)
     swap=subprocess.check_output(["sysctl","-n","vm.swapusage"],text=True).strip()
-    return {"available_percent":available,"swap":swap}
+    return {"available_percent":available,"available_gib":reclaimable*page_size/1024**3,"swap":swap}
 
 def require_complete():
     shards=sorted(MODEL.glob("model-*-of-00006.safetensors"))
@@ -49,7 +55,7 @@ def main():
     require_complete()
     if not port_8000_free(): raise RuntimeError("CURRENT_OMLX_IS_RUNNING_REFUSE_SECOND_HEAVY_MODEL")
     start_memory=memory()
-    if start_memory["available_percent"]<55: raise RuntimeError("MEMORY_PREFLIGHT_FAILED")
+    if start_memory["available_percent"]<55 or start_memory["available_gib"]<40: raise RuntimeError("MEMORY_PREFLIGHT_FAILED")
     from mlx_vlm import generate,load
     from mlx_vlm.prompt_utils import apply_chat_template
     from mlx_vlm.utils import load_config
@@ -72,7 +78,7 @@ def main():
     canvas=Image.new("RGB",(320,180),"white"); draw=ImageDraw.Draw(canvas); draw.rectangle((25,30,135,145),fill="blue"); draw.ellipse((180,35,290,145),fill="red"); canvas.save(image_path)
     run("VISION","描述图中两个主要形状和颜色。",image=str(image_path))
     run("CONTEXT_32K",context(processor,30000)+"\n请用一句话说明这些是何种语言的标准库源码。",max_tokens=64)
-    if args.try_64k and memory()["available_percent"]>=55:
+    if args.try_64k and memory()["available_percent"]>=55 and memory()["available_gib"]>=40:
         run("CONTEXT_64K",context(processor,60000)+"\n请用一句话说明这些是何种语言的标准库源码。",max_tokens=64)
     end_memory=memory(); del model,processor; gc.collect(); mx.clear_cache(); time.sleep(5); recovered=memory()
     REPORT.write_text(json.dumps({"model":"mlx-community/Qwen3.8-27B-8bit","revision":"815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9",
