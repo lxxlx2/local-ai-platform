@@ -9,8 +9,8 @@ from typing import Sequence
 
 from .supervisor_contracts import (
     AI_ROOT, MAX_FINDINGS_PER_JOB, MAX_FINDINGS_PER_REVIEW, CodexTaskSpec,
-    PersistedReviewFinding, ReviewFinding, WorkUnitSpec, WorkflowStage,
-    _json_exact, _normalize_relative_path, _safe_review_text, _safe_text, utc_now,
+    PersistedReviewFinding, RepoAccessPolicy, ReviewFinding, WorkUnitSpec, WorkflowStage,
+    _json_exact, _safe_review_text, _safe_text, utc_now,
 )
 
 
@@ -118,12 +118,22 @@ class DurablePayloadMixin:
         existing_count = self.db.execute(
             "SELECT COUNT(*) FROM supervisor_review_findings WHERE job_id=?", (job_id,)
         ).fetchone()[0]
-        root = Path(repo_root).resolve()
+        unit = self.review_work_unit_for_round(job_id, owner_id, int(review_round))
+        root = unit.repo_root.resolve()
+        if Path(repo_root).resolve() != root:
+            raise PermissionError("review finding repository scope mismatch")
+        policy = RepoAccessPolicy(root)
+        candidate_scope = set(unit.candidate_identity.candidate_paths)
+        deleted_scope = set(unit.candidate_identity.deleted_paths)
         prepared = []
         for finding in findings:
             if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
                 raise ValueError("invalid review severity")
-            path = _normalize_relative_path(finding.file, root, "review finding")
+            path = policy.validate_candidate_path(
+                finding.file, unit.allowed_paths, deleted=finding.file in deleted_scope,
+            )
+            if path not in candidate_scope:
+                raise PermissionError("review finding is outside immutable candidate manifest")
             evidence = _safe_review_text(finding.evidence)
             recommended = _safe_review_text(finding.recommended_fix)
             basis = _json_exact({

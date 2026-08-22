@@ -8,34 +8,44 @@ from pathlib import Path
 from typing import Mapping
 
 from .supervisor_contracts import (
-    MAX_FINDINGS_PER_REVIEW, MAX_TERMINAL_JOBS, JobStatus, ReviewFinding, ReviewResult,
-    WorkflowStage, _json_exact, _normalize_relative_path, _safe_review_text, utc_now,
+    MAX_FINDINGS_PER_REVIEW, MAX_TERMINAL_JOBS, CandidateIdentity, JobStatus,
+    RepoAccessPolicy, ReviewFinding, ReviewResult, WorkflowStage, _json_exact,
+    _safe_review_text, utc_now,
 )
 from .supervisor_round2_common import PersistedReviewSubmission, ReviewTaskSpec, ReviewerWorkUnit, _canonical_digest
 
 class Round2ReviewRepositoryMixin:
     @staticmethod
-    def _review_manifest(job_id: str, owner_id: str, review_round: int, validated: Mapping, prompt_sha: str) -> dict:
+    def _review_manifest(job_id: str, owner_id: str, review_round: int, validated: Mapping,
+                         prompt_sha: str, candidate_identity: CandidateIdentity) -> dict:
         return {
             "job_id": job_id, "owner_id": str(owner_id), "review_round": int(review_round),
             "repo_root": validated["repo_root"], "allowed_paths": sorted(validated["allowed_paths"]),
             "read_only": True, "risk_level": validated["risk_level"],
             "timeout_seconds": float(validated["timeout_seconds"]), "model_role": "REVIEW",
             "expected_review_schema": validated["expected_review_schema"], "prompt_sha256": prompt_sha,
+            "candidate_identity": candidate_identity.stable_payload(),
         }
 
     def create_review_work_unit(self, job_id: str, owner_id: str, review_round: int,
                                 spec: ReviewTaskSpec, review_work_unit_id: str | None = None) -> ReviewerWorkUnit:
         job = self.get_job_for_owner(job_id, owner_id)
         round_number = int(review_round)
-        if not 1 <= round_number <= job.max_review_rounds:
+        if job.current_stage is not WorkflowStage.REVIEW:
+            raise ValueError("review work unit requires REVIEW stage")
+        if round_number != job.review_round + 1 or not 1 <= round_number <= job.max_review_rounds:
             raise ValueError("review work unit round outside safe range")
         validated = spec.validate()
         identifier = review_work_unit_id or str(uuid.uuid4())
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", identifier):
             raise ValueError("invalid review_work_unit_id")
         prompt_sha = validated["task_prompt_sha256"]
-        spec_hash = _canonical_digest(self._review_manifest(job_id, owner_id, round_number, validated, prompt_sha))
+        candidate_identity = self.candidate_identity_provider.snapshot(
+            job.metadata.get("candidate_base_commit_sha")
+        )
+        spec_hash = _canonical_digest(self._review_manifest(
+            job_id, owner_id, round_number, validated, prompt_sha, candidate_identity,
+        ))
         existing = self.db.execute(
             "SELECT * FROM supervisor_review_work_units WHERE review_work_unit_id=?", (identifier,)
         ).fetchone()
@@ -51,11 +61,16 @@ class Round2ReviewRepositoryMixin:
         try:
             with self.db:
                 self.db.execute(
-                    "INSERT INTO supervisor_review_work_units VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO supervisor_review_work_units "
+                    "(review_work_unit_id,job_id,owner_id,review_round,repo_root,allowed_paths_json,read_only,"
+                    "risk_level,timeout_seconds,model_role,expected_review_schema_json,prompt_content_ref,"
+                    "prompt_sha256,spec_hash,candidate_identity_json,created_at,status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier, job_id, str(owner_id), round_number, validated["repo_root"],
                      _json_exact(validated["allowed_paths"], 16_000), 1, validated["risk_level"],
                      validated["timeout_seconds"], "REVIEW", _json_exact(validated["expected_review_schema"], 16_000),
-                     content_ref, prompt_sha, spec_hash, utc_now(), "READY"),
+                     content_ref, prompt_sha, spec_hash, _json_exact(candidate_identity.to_mapping(), 64_000),
+                     utc_now(), "READY"),
                 )
         except Exception:
             self.content_store.delete(content_ref)
@@ -77,7 +92,12 @@ class Round2ReviewRepositoryMixin:
             "timeout_seconds": float(row["timeout_seconds"]), "model_role": row["model_role"],
             "expected_review_schema": json.loads(row["expected_review_schema_json"]),
         }
-        expected = _canonical_digest(self._review_manifest(job_id, owner_id, int(review_round), validated, row["prompt_sha256"]))
+        if not row["candidate_identity_json"]:
+            raise ValueError("review work unit candidate identity missing")
+        candidate_identity = CandidateIdentity.from_mapping(json.loads(row["candidate_identity_json"]))
+        expected = _canonical_digest(self._review_manifest(
+            job_id, owner_id, int(review_round), validated, row["prompt_sha256"], candidate_identity,
+        ))
         if row["spec_hash"] != expected or not bool(row["read_only"]) or row["model_role"] != "REVIEW":
             raise ValueError("review work unit integrity mismatch")
         return ReviewerWorkUnit(
@@ -85,7 +105,7 @@ class Round2ReviewRepositoryMixin:
             Path(row["repo_root"]), tuple(Path(x) for x in json.loads(row["allowed_paths_json"])),
             True, row["risk_level"], float(row["timeout_seconds"]), row["model_role"],
             json.loads(row["expected_review_schema_json"]), row["prompt_content_ref"], row["prompt_sha256"],
-            row["spec_hash"], row["created_at"], row["status"],
+            row["spec_hash"], candidate_identity, row["created_at"], row["status"],
         )
 
     def review_work_unit_for_round(self, job_id: str, owner_id: str, review_round: int) -> ReviewerWorkUnit:
@@ -109,7 +129,8 @@ class Round2ReviewRepositoryMixin:
         return spec
 
     @staticmethod
-    def _normalized_result(result: ReviewResult, repo_root: Path) -> tuple[dict, ReviewResult]:
+    def _normalized_result(result: ReviewResult, repo_root: Path, allowed_paths: tuple[Path, ...],
+                           candidate_identity: CandidateIdentity) -> tuple[dict, ReviewResult]:
         if result.status not in {"PASS", "FAIL"}:
             raise ValueError("review status must be PASS or FAIL")
         if result.status == "PASS" and result.findings:
@@ -121,10 +142,16 @@ class Round2ReviewRepositoryMixin:
         normalized_findings = []
         rebuilt = []
         root = Path(repo_root).resolve()
+        policy = RepoAccessPolicy(root)
+        candidate_scope = set(candidate_identity.candidate_paths)
+        deleted_scope = set(candidate_identity.deleted_paths)
         for finding in result.findings:
             if finding.severity not in {"BLOCKING", "HIGH", "MEDIUM", "LOW"}:
                 raise ValueError("invalid review severity")
-            path = _normalize_relative_path(finding.file, root, "review finding")
+            deleted = finding.file in deleted_scope
+            path = policy.validate_candidate_path(finding.file, allowed_paths, deleted=deleted)
+            if path not in candidate_scope:
+                raise PermissionError("review finding is outside immutable candidate manifest")
             evidence = _safe_review_text(finding.evidence)
             fix = _safe_review_text(finding.recommended_fix)
             normalized_findings.append({"severity": finding.severity, "file": path,
@@ -132,10 +159,22 @@ class Round2ReviewRepositoryMixin:
             rebuilt.append(ReviewFinding(finding.severity, path, evidence, fix))
         return {"status": result.status, "findings": normalized_findings}, ReviewResult(result.status, tuple(rebuilt))
 
+    def _require_current_candidate(self, unit: ReviewerWorkUnit) -> None:
+        current = self.candidate_identity_provider.snapshot(unit.candidate_identity.base_commit_sha)
+        if not unit.candidate_identity.same_candidate(current):
+            raise ValueError("review work unit candidate identity is stale")
+
     def submit_review_result(self, job_id: str, owner_id: str, review_round: int,
                              review_work_unit_id: str, result: ReviewResult) -> PersistedReviewSubmission:
         unit = self.get_review_work_unit(review_work_unit_id, job_id, owner_id, review_round)
-        normalized, _ = self._normalized_result(result, unit.repo_root)
+        job = self.get_job_for_owner(job_id, owner_id)
+        if (job.current_stage is not WorkflowStage.REVIEW or int(review_round) != job.review_round + 1
+                or job.status not in {JobStatus.QUEUED, JobStatus.WAITING, JobStatus.RUNNING}):
+            raise ValueError("review result outside current review lifecycle")
+        self._require_current_candidate(unit)
+        normalized, _ = self._normalized_result(
+            result, unit.repo_root, unit.allowed_paths, unit.candidate_identity,
+        )
         encoded = _json_exact(normalized, 128_000)
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         existing = self.db.execute(
@@ -171,6 +210,7 @@ class Round2ReviewRepositoryMixin:
     def submitted_review_result(self, job_id: str, owner_id: str, review_round: int,
                                 review_work_unit_id: str) -> ReviewResult:
         unit = self.get_review_work_unit(review_work_unit_id, job_id, owner_id, review_round)
+        self._require_current_candidate(unit)
         row = self.db.execute(
             "SELECT * FROM supervisor_review_results WHERE review_work_unit_id=?", (review_work_unit_id,)
         ).fetchone()
@@ -183,7 +223,10 @@ class Round2ReviewRepositoryMixin:
         payload = json.loads(row["result_json"])
         findings = tuple(ReviewFinding(item["severity"], item["file"], item["evidence"], item["recommended_fix"])
                          for item in payload["findings"])
-        _, result = self._normalized_result(ReviewResult(payload["status"], findings), unit.repo_root)
+        _, result = self._normalized_result(
+            ReviewResult(payload["status"], findings), unit.repo_root,
+            unit.allowed_paths, unit.candidate_identity,
+        )
         return result
 
     def mark_review_result_consumed(self, job_id: str, owner_id: str, review_round: int,

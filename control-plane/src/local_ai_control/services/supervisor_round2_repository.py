@@ -10,17 +10,22 @@ from pathlib import Path
 from typing import Mapping
 
 from .supervisor_contracts import (
-    MAX_EVENTS_PER_JOB, CodexTaskSpec, JobStatus, LeaseLostError, StageResult, WorkUnitSpec,
-    WorkflowJob, WorkflowStage, _json_exact, _safe_json, _safe_text, utc_now,
+    AI_ROOT, MAX_EVENTS_PER_JOB, CandidateIdentityProvider, CodexTaskSpec, JobStatus,
+    LeaseLostError, StageResult, WorkUnitSpec, WorkflowJob, WorkflowStage,
+    _json_exact, _safe_json, _safe_text, utc_now,
 )
 from .supervisor_repository import SupervisorRepository as BaseSupervisorRepository
 from .supervisor_round2_common import SENSITIVE_KEY, _canonical_digest, recursive_private_sanitize
 
 class Round2RepositoryCoreMixin:
     def __init__(self, *args, **kwargs):
+        self.candidate_identity_provider = kwargs.pop("candidate_identity_provider", None)
         super().__init__(*args, **kwargs)
+        if self.candidate_identity_provider is None:
+            self.candidate_identity_provider = CandidateIdentityProvider(AI_ROOT)
         self.active_lease_token: str | None = None
         self.lease_failed = False
+        self.external_execution_may_still_be_active = False
 
     def migrate(self) -> None:
         super().migrate()
@@ -36,6 +41,7 @@ class Round2RepositoryCoreMixin:
               read_only INTEGER NOT NULL, risk_level TEXT NOT NULL, timeout_seconds REAL NOT NULL,
               model_role TEXT NOT NULL, expected_review_schema_json TEXT NOT NULL,
               prompt_content_ref TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, spec_hash TEXT NOT NULL,
+              candidate_identity_json TEXT NOT NULL,
               created_at TEXT NOT NULL, status TEXT NOT NULL,
               FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id),
               UNIQUE(job_id, review_round)
@@ -49,6 +55,12 @@ class Round2RepositoryCoreMixin:
             );
             """
         )
+        review_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(supervisor_review_work_units)").fetchall()
+        }
+        if "candidate_identity_json" not in review_columns:
+            with self.db:
+                self.db.execute("ALTER TABLE supervisor_review_work_units ADD COLUMN candidate_identity_json TEXT")
         self.db.commit()
         self._backfill_work_unit_hashes()
 
@@ -176,6 +188,8 @@ class Round2RepositoryCoreMixin:
     def set_active_lease(self, token: str | None) -> None:
         self.active_lease_token = token
         self.lease_failed = False
+        if token is None:
+            self.external_execution_may_still_be_active = False
 
     @staticmethod
     def heartbeat_external(path: Path, owner_token: str, ttl: float) -> bool:
@@ -200,7 +214,7 @@ class Round2RepositoryCoreMixin:
         if token is None:
             return super().update_job(job_id, **changes)
         allowed = {"status", "current_stage", "attempt", "review_round", "last_error",
-                   "resume_state", "next_retry_at", "metadata_json"}
+                   "resume_state", "next_retry_at"}
         if not changes or set(changes) - allowed:
             raise ValueError("invalid job update")
         values = {key: (value.value if isinstance(value, Enum) else value) for key, value in changes.items()}
@@ -212,6 +226,40 @@ class Round2RepositoryCoreMixin:
                 self.db.rollback()
                 raise LeaseLostError("lease ownership required for job transition")
             cursor = self.db.execute(f"UPDATE supervisor_jobs SET {assignments} WHERE job_id=?", (*values.values(), job_id))
+            if cursor.rowcount != 1:
+                self.db.rollback()
+                raise KeyError("job not found")
+            self.db.commit()
+        except sqlite3.Error:
+            self.db.rollback()
+            raise
+        return self.get_job(job_id)
+
+    def update_job_metadata(self, job_id: str, metadata_patch: Mapping) -> WorkflowJob:
+        if not isinstance(metadata_patch, Mapping):
+            raise TypeError("metadata patch must be a Mapping")
+        current = self.get_job(job_id)
+        merged = dict(current.metadata)
+        merged.update(dict(metadata_patch))
+        sanitized = recursive_private_sanitize(merged)
+        try:
+            encoded = json.dumps(sanitized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as error:
+            raise ValueError("metadata patch must contain JSON-compatible values") from error
+        if len(encoded.encode()) > 16_000:
+            raise ValueError("metadata patch exceeds safe persistence bound")
+        token = self.active_lease_token
+        if self.lease_failed:
+            raise LeaseLostError("lease keeper failed; metadata transition denied")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            if token is not None and not self._lease_row_owned(token):
+                self.db.rollback()
+                raise LeaseLostError("lease ownership required for metadata transition")
+            cursor = self.db.execute(
+                "UPDATE supervisor_jobs SET metadata_json=?,updated_at=? WHERE job_id=?",
+                (encoded, utc_now(), job_id),
+            )
             if cursor.rowcount != 1:
                 self.db.rollback()
                 raise KeyError("job not found")

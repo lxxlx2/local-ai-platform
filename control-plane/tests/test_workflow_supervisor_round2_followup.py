@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from local_ai_control.services.supervisor import (
-    AI_ROOT, ReviewResult, ReviewTaskSpec, SupervisorRepository,
+    AI_ROOT, ReviewResult, ReviewTaskSpec, SupervisorRepository, WorkflowStage,
 )
 import local_ai_control.services.supervisor_round2 as round2
 from local_ai_control.supervisor import process_identity
@@ -38,6 +38,7 @@ def test_round2_followup_review_result_lifecycle_and_round_bound(tmp_path):
     repository = SupervisorRepository(tmp_path / "supervisor.db")
     repository.migrate()
     job = repository.create_job("review", "owner", job_id="r2-review-followup", max_review_rounds=2)
+    repository.update_job(job.job_id, current_stage=WorkflowStage.REVIEW)
     spec = ReviewTaskSpec(
         AI_ROOT,
         (AI_ROOT / "control-plane",),

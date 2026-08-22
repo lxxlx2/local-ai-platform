@@ -26,6 +26,10 @@ def review_spec(prompt="safe durable reviewer task"):
     )
 
 
+def prepare_review(repo, job_id, review_round=0):
+    repo.update_job(job_id, current_stage=WorkflowStage.REVIEW, review_round=review_round)
+
+
 def test_default_review_runner_is_durable_and_real_execution_remains_disabled():
     assert isinstance(default_demo_runners(False)[WorkflowStage.REVIEW], DurableReviewRunner)
 
@@ -33,6 +37,7 @@ def test_default_review_runner_is_durable_and_real_execution_remains_disabled():
 def test_reviewer_work_unit_reopen_reconstruct_and_owner_round_binding(tmp_path):
     repo = make_repo(tmp_path)
     repo.create_job("review", "owner", job_id="job-review")
+    prepare_review(repo, "job-review")
     unit = repo.create_review_work_unit("job-review", "owner", 1, review_spec(), "rw-1")
     assert unit.read_only and unit.model_role == "REVIEW"
     repo.close()
@@ -58,23 +63,24 @@ def test_review_task_is_read_only_review_role_and_path_bounded():
     with pytest.raises(PermissionError):
         ReviewTaskSpec(AI_ROOT, (Path("/tmp"),), "safe", True, "LOW", 60, "REVIEW", round2.REVIEW_RESULT_SCHEMA).validate()
     with pytest.raises(ValueError):
-        ReviewTaskSpec(AI_ROOT, (AI_ROOT,), "safe", True, "LOW", 60, "REVIEW", {"type": "array"}).validate()
+        ReviewTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "safe", True, "LOW", 60, "REVIEW", {"type": "array"}).validate()
 
 
 def test_review_result_submission_idempotent_conflict_and_schema_rules(tmp_path):
     repo = make_repo(tmp_path)
     repo.create_job("review", "owner", job_id="job-result")
+    prepare_review(repo, "job-result")
     unit = repo.create_review_work_unit("job-result", "owner", 1, review_spec(), "rw-result")
-    result = ReviewResult("FAIL", (ReviewFinding("HIGH", "control-plane/a.py", "evidence", "fix"),))
+    result = ReviewResult("FAIL", (ReviewFinding("HIGH", "control-plane/src/local_ai_control/services/supervisor_contracts.py", "evidence", "fix"),))
     first = repo.submit_review_result("job-result", "owner", 1, unit.review_work_unit_id, result)
     second = repo.submit_review_result("job-result", "owner", 1, unit.review_work_unit_id, result)
     assert first.result_hash == second.result_hash
     with pytest.raises(ValueError):
         repo.submit_review_result("job-result", "owner", 1, unit.review_work_unit_id,
-                                  ReviewResult("FAIL", (ReviewFinding("LOW", "control-plane/b.py", "e2", "f2"),)))
+                                  ReviewResult("FAIL", (ReviewFinding("LOW", "control-plane/src/local_ai_control/services/supervisor_round2_review.py", "e2", "f2"),)))
     with pytest.raises(ValueError):
         repo.submit_review_result("job-result", "owner", 1, unit.review_work_unit_id,
-                                  ReviewResult("PASS", (ReviewFinding("LOW", "control-plane/a.py", "e", "f"),)))
+                                  ReviewResult("PASS", (ReviewFinding("LOW", "control-plane/src/local_ai_control/services/supervisor_contracts.py", "e", "f"),)))
     with pytest.raises(ValueError):
         repo.submit_review_result("job-result", "owner", 1, unit.review_work_unit_id, ReviewResult("FAIL"))
     repo.close()
@@ -83,6 +89,7 @@ def test_review_result_submission_idempotent_conflict_and_schema_rules(tmp_path)
 def test_submitted_review_result_survives_restart_and_integrity_check(tmp_path):
     repo = make_repo(tmp_path)
     repo.create_job("review", "owner", job_id="job-restart")
+    prepare_review(repo, "job-restart")
     unit = repo.create_review_work_unit("job-restart", "owner", 1, review_spec(), "rw-restart")
     repo.submit_review_result("job-restart", "owner", 1, unit.review_work_unit_id, ReviewResult("PASS"))
     repo.close()
@@ -127,7 +134,6 @@ def test_work_unit_immutable_manifest_exact_replay_only(tmp_path):
     repo.create_work_unit("job-work", "owner", WorkflowStage.PRODUCER, base, "wu-immutable")
     assert repo.create_work_unit("job-work", "owner", WorkflowStage.PRODUCER, base, "wu-immutable").work_unit_id == "wu-immutable"
     variants = (
-        CodexTaskSpec(AI_ROOT, (AI_ROOT,), "same prompt", "LOW", 60, "CODE", {"type": "object"}),
         CodexTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "same prompt", "LOW", 61, "CODE", {"type": "object"}),
         CodexTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "same prompt", "HIGH", 60, "CODE", {"type": "object"}),
         CodexTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "same prompt", "LOW", 60, "OTHER", {"type": "object"}),
@@ -136,6 +142,10 @@ def test_work_unit_immutable_manifest_exact_replay_only(tmp_path):
     for variant in variants:
         with pytest.raises(ValueError):
             repo.create_work_unit("job-work", "owner", WorkflowStage.PRODUCER, variant, "wu-immutable")
+    with pytest.raises(PermissionError):
+        repo.create_work_unit("job-work", "owner", WorkflowStage.PRODUCER,
+                              CodexTaskSpec(AI_ROOT, (AI_ROOT,), "same prompt", "LOW", 60, "CODE", {}),
+                              "wu-immutable")
     with pytest.raises(PermissionError):
         repo.create_work_unit("job-work", "owner", WorkflowStage.PRODUCER,
                               CodexTaskSpec(Path("/tmp"), (Path("/tmp"),), "same prompt", "LOW", 60, "CODE", {}),

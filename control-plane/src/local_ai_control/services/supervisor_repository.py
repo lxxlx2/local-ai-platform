@@ -173,7 +173,7 @@ class SupervisorRepository(DurablePayloadMixin):
 
     def update_job(self, job_id: str, **changes) -> WorkflowJob:
         allowed = {"status", "current_stage", "attempt", "review_round", "last_error",
-                   "resume_state", "next_retry_at", "metadata_json"}
+                   "resume_state", "next_retry_at"}
         if not changes or set(changes) - allowed:
             raise ValueError("invalid job update")
         values = {key: (value.value if isinstance(value, Enum) else value) for key, value in changes.items()}
@@ -181,6 +181,26 @@ class SupervisorRepository(DurablePayloadMixin):
         assignments = ",".join(f"{key}=?" for key in values)
         with self.db:
             self.db.execute(f"UPDATE supervisor_jobs SET {assignments} WHERE job_id=?", (*values.values(), job_id))
+        return self.get_job(job_id)
+
+    def update_job_metadata(self, job_id: str, metadata_patch: Mapping) -> WorkflowJob:
+        if not isinstance(metadata_patch, Mapping):
+            raise TypeError("metadata patch must be a Mapping")
+        current = self.get_job(job_id)
+        merged = dict(current.metadata)
+        merged.update(dict(metadata_patch))
+        try:
+            json.dumps(merged, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as error:
+            raise ValueError("metadata patch must contain JSON-compatible values") from error
+        encoded = json.dumps(_safe_metadata(merged), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode()) > 16_000:
+            raise ValueError("metadata patch exceeds safe persistence bound")
+        with self.db:
+            self.db.execute(
+                "UPDATE supervisor_jobs SET metadata_json=?,updated_at=? WHERE job_id=?",
+                (encoded, utc_now(), job_id),
+            )
         return self.get_job(job_id)
 
     def record_event(self, job_id: str | None, event_type: str, stage: WorkflowStage | None = None,

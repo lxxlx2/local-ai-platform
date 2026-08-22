@@ -24,7 +24,17 @@ This database belongs exclusively to the Owner private plane. Public identities 
 
 ## Crash recovery
 
-On startup the consumer marks unfinished stage runs `INTERRUPTED`. Read-only/deterministic stages may be safely retried within their attempt limit. Potentially mutating `PRODUCER` and `REVISION` stages are blocked with `BLOCKED_REQUIRES_RECONCILIATION`; V0.1 never assumes they succeeded. Git Gate is read-only and never commits, pushes, or merges.
+On startup the consumer distinguishes a failed/interrupted run from a durable `PASS` that completed before its lifecycle transition was recorded. Read-only/deterministic completed runs can finalize that missing transition without re-running the stage. A completed `PRODUCER` or `REVISION` run can do so only when its durable result contains a valid external execution ID and explicit completion provenance; otherwise the job is blocked with `BLOCKED_REQUIRES_RECONCILIATION`. Cancellation is propagated to a capable runner after lease loss. Unsupported or failed cancellation records `EXTERNAL_EXECUTION_MAY_STILL_BE_ACTIVE` and also requires reconciliation. The recovery event is idempotent, so a second startup does not advance the same result twice.
+
+This is a minimal completed-not-transitioned recovery path. It does not yet replace the Round 2 compatibility layer with one fully atomic stage-finalization transaction. Git Gate remains read-only and never commits, pushes, or merges.
+
+## Candidate and review invariants
+
+- Each review work unit binds to an immutable `CandidateIdentity`: reference type, commit/tree identity, base commit, deterministic candidate-diff hash, and the exact changed/deleted path manifest.
+- Terminal review results are accepted only for the current `REVIEW` lifecycle and exact review round. A future, stale, or transplanted result cannot advance another candidate or round.
+- Producer and reviewer specifications share one `RepoAccessPolicy`. Allowed roots are limited to `control-plane/` and `docs/`; blanket repository access and runtime, secret, cache, model, database, log, credential, symlink, traversal, and path-escape access are denied.
+- Findings must resolve to an allowed path in the bound candidate manifest. A deleted path is valid only when the immutable identity explicitly records it as deleted.
+- Job metadata can change only through `update_job_metadata(mapping)`. It preserves existing keys, sanitizes sensitive nested fields, enforces JSON-compatible values and a canonical size bound, and prevents raw `metadata_json` replacement.
 
 ## Runners and security
 

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,6 +29,211 @@ MAX_FINDINGS_PER_JOB = 500
 MAX_WORK_UNIT_PROMPT_BYTES = 256_000
 MAX_CONTENT_FILES = 2_000
 LOCK_TTL_SECONDS = 30
+MAX_CANDIDATE_IDENTITY_FILES = 2_000
+MAX_CANDIDATE_IDENTITY_BYTES = 16_000_000
+
+
+@dataclass(frozen=True)
+class RepoAccessPolicy:
+    """One path policy for Producer, Revision, Reviewer, and candidate probes."""
+
+    repo_root: Path = AI_ROOT
+    default_allowed_paths: tuple[Path, ...] = ()
+
+    denied_parts = frozenset({
+        "runtime", "models", "cache", "tmp", "logs", "secrets", "credentials",
+        "inbox", "output", "private", "content", ".git",
+    })
+    denied_suffixes = frozenset({
+        ".env", ".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx",
+    })
+
+    def __post_init__(self):
+        root = Path(self.repo_root).resolve()
+        object.__setattr__(self, "repo_root", root)
+        if not self.default_allowed_paths:
+            object.__setattr__(self, "default_allowed_paths", (root / "control-plane", root / "docs"))
+
+    def _relative(self, path: Path, *, allow_missing: bool = False) -> tuple[Path, Path]:
+        root = self.repo_root.resolve()
+        raw = Path(path)
+        if ".." in raw.parts:
+            raise PermissionError("repository path traversal denied")
+        if not raw.is_absolute():
+            raw = root / raw
+        resolved = raw.resolve(strict=not allow_missing)
+        if resolved == root or not resolved.is_relative_to(root):
+            raise PermissionError("repository root blanket/traversal access denied")
+        try:
+            lexical_relative = raw.relative_to(root)
+        except ValueError as error:
+            raise PermissionError("repository path traversal denied") from error
+        current = root
+        for part in lexical_relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise PermissionError("repository symlink access denied")
+        relative = resolved.relative_to(root)
+        if any(part.lower() in self.denied_parts for part in relative.parts):
+            raise PermissionError("runtime/secret repository path denied")
+        lowered = relative.as_posix().lower()
+        if any(lowered.endswith(suffix) for suffix in self.denied_suffixes) or Path(lowered).name.startswith(".env"):
+            raise PermissionError("credential/database repository path denied")
+        if raw.is_symlink():
+            raise PermissionError("repository symlink access denied")
+        return resolved, relative
+
+    def validate_allowed_paths(self, paths: tuple[Path, ...] | list[Path]) -> tuple[Path, ...]:
+        if not paths:
+            raise PermissionError("at least one bounded allowed path is required")
+        validated = []
+        defaults = tuple(path.resolve() for path in self.default_allowed_paths)
+        for path in paths:
+            resolved, _ = self._relative(Path(path))
+            if not any(resolved == default or resolved.is_relative_to(default) for default in defaults):
+                raise PermissionError("allowed path is outside approved source/document roots")
+            validated.append(resolved)
+        return tuple(dict.fromkeys(validated))
+
+    def validate_candidate_path(self, value: str, allowed_paths: tuple[Path, ...], *, deleted: bool = False) -> str:
+        if not value or Path(value).is_absolute() or ".." in Path(value).parts:
+            raise PermissionError("candidate path traversal denied")
+        resolved, relative = self._relative(Path(value), allow_missing=True)
+        allowed = self.validate_allowed_paths(list(allowed_paths))
+        if not any(resolved == root or resolved.is_relative_to(root) for root in allowed):
+            raise PermissionError("candidate path outside reviewer allowed paths")
+        return relative.as_posix()
+
+
+AgentPathPolicy = RepoAccessPolicy
+
+
+@dataclass(frozen=True)
+class CandidateIdentity:
+    candidate_ref_type: str
+    candidate_commit_sha: str | None
+    candidate_tree_sha: str | None
+    base_commit_sha: str
+    candidate_diff_sha256: str
+    candidate_created_at: str
+    candidate_paths: tuple[str, ...] = ()
+    deleted_paths: tuple[str, ...] = ()
+
+    def stable_payload(self) -> dict:
+        return {
+            "candidate_ref_type": self.candidate_ref_type,
+            "candidate_commit_sha": self.candidate_commit_sha,
+            "candidate_tree_sha": self.candidate_tree_sha,
+            "base_commit_sha": self.base_commit_sha,
+            "candidate_diff_sha256": self.candidate_diff_sha256,
+            "candidate_paths": list(self.candidate_paths),
+            "deleted_paths": list(self.deleted_paths),
+        }
+
+    def to_mapping(self) -> dict:
+        return self.stable_payload() | {"candidate_created_at": self.candidate_created_at}
+
+    @classmethod
+    def from_mapping(cls, value: Mapping) -> "CandidateIdentity":
+        ref_type = str(value.get("candidate_ref_type", ""))
+        commit = value.get("candidate_commit_sha")
+        tree = value.get("candidate_tree_sha")
+        base = str(value.get("base_commit_sha", ""))
+        diff = str(value.get("candidate_diff_sha256", ""))
+        created = str(value.get("candidate_created_at", ""))
+        paths = tuple(str(item) for item in value.get("candidate_paths", ()))
+        deleted = tuple(str(item) for item in value.get("deleted_paths", ()))
+        if ref_type not in {"COMMIT", "TREE_MANIFEST"}:
+            raise ValueError("invalid candidate identity reference type")
+        for digest in (base, diff, commit or "0" * 40, tree or "0" * 40):
+            if not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", digest):
+                raise ValueError("invalid candidate identity digest")
+        if ref_type == "COMMIT" and not commit:
+            raise ValueError("commit candidate identity requires commit SHA")
+        if ref_type == "TREE_MANIFEST" and not tree:
+            raise ValueError("tree candidate identity requires tree SHA")
+        return cls(ref_type, str(commit) if commit else None, str(tree) if tree else None,
+                   base, diff, created, paths, deleted)
+
+    def same_candidate(self, other: "CandidateIdentity") -> bool:
+        return self.stable_payload() == other.stable_payload()
+
+
+class CandidateIdentityProvider:
+    """Read-only, bounded, deterministic Git/worktree candidate identity probe."""
+
+    def __init__(self, repo_root: Path = AI_ROOT, policy: RepoAccessPolicy | None = None,
+                 timeout_seconds: float = 10):
+        self.repo_root = Path(repo_root).resolve()
+        self.policy = policy or RepoAccessPolicy(self.repo_root)
+        self.timeout_seconds = min(max(float(timeout_seconds), 1), 30)
+
+    def _git(self, *args: str) -> bytes:
+        completed = subprocess.run(
+            ("git", *args), cwd=self.repo_root, capture_output=True, shell=False,
+            timeout=self.timeout_seconds, check=False,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("candidate identity Git probe failed")
+        return completed.stdout
+
+    @staticmethod
+    def _parse_name_status(payload: bytes) -> list[tuple[str, str]]:
+        fields = payload.decode("utf-8", errors="strict").split("\0")
+        result, index = [], 0
+        while index < len(fields) and fields[index]:
+            status = fields[index]; index += 1
+            if index >= len(fields):
+                raise ValueError("invalid Git name-status payload")
+            path = fields[index]; index += 1
+            if status.startswith(("R", "C")):
+                if index >= len(fields):
+                    raise ValueError("invalid Git rename payload")
+                path = fields[index]; index += 1
+            result.append((status[:1], path))
+        return result
+
+    def snapshot(self, base_commit_sha: str | None = None) -> CandidateIdentity:
+        head = self._git("rev-parse", "HEAD").decode().strip()
+        base = base_commit_sha or self._git("rev-parse", "main").decode().strip()
+        if not re.fullmatch(r"[a-f0-9]{40}", head) or not re.fullmatch(r"[a-f0-9]{40}", base):
+            raise ValueError("candidate identity requires full Git SHAs")
+        changes = self._parse_name_status(self._git("diff", "--name-status", "-z", "--find-renames", base, "--"))
+        untracked = [value for value in self._git("ls-files", "--others", "--exclude-standard", "-z").decode().split("\0") if value]
+        by_path = {path: status for status, path in changes}
+        by_path.update({path: "A" for path in untracked})
+        if len(by_path) > MAX_CANDIDATE_IDENTITY_FILES:
+            raise ValueError("candidate identity file count exceeds bound")
+        manifest, total = [], 0
+        deleted = []
+        allowed = self.policy.default_allowed_paths
+        for path, status in sorted(by_path.items()):
+            is_deleted = status == "D"
+            normalized = self.policy.validate_candidate_path(path, allowed, deleted=is_deleted)
+            if is_deleted:
+                deleted.append(normalized)
+                manifest.append({"path": normalized, "status": "D", "sha256": None})
+                continue
+            candidate = (self.repo_root / normalized)
+            if candidate.is_symlink() or not candidate.is_file():
+                raise PermissionError("candidate identity refuses symlink/non-file")
+            data = candidate.read_bytes()
+            total += len(data)
+            if total > MAX_CANDIDATE_IDENTITY_BYTES:
+                raise ValueError("candidate identity content exceeds bound")
+            manifest.append({"path": normalized, "status": status, "sha256": hashlib.sha256(data).hexdigest()})
+        encoded = _json_exact({"base": base, "head": head, "manifest": manifest}, 1_000_000)
+        dirty = bool(self._git("status", "--porcelain=v1", "-z", "--untracked-files=all"))
+        head_tree = self._git("rev-parse", "HEAD^{tree}").decode().strip()
+        tree_sha = (hashlib.sha256(_json_exact({"head_tree": head_tree, "manifest": manifest}, 1_000_000).encode()).hexdigest()
+                    if dirty else head_tree)
+        diff_sha = hashlib.sha256(encoded.encode()).hexdigest()
+        return CandidateIdentity(
+            "TREE_MANIFEST" if dirty else "COMMIT", None if dirty else head, tree_sha,
+            base, diff_sha, utc_now(),
+            tuple(item["path"] for item in manifest), tuple(deleted),
+        )
 
 
 def utc_now() -> str:
@@ -216,12 +422,23 @@ def _safe_audit_value(value):
 
 
 def _safe_metadata(metadata: Mapping | None) -> dict:
-    clean = dict(metadata or {})
-    for key in list(clean):
-        if re.search(r"prompt|token|secret|password|credential|cookie|authorization", str(key), re.I):
-            value = str(clean.pop(key))
-            clean[f"{key}_sha256"] = hashlib.sha256(value.encode()).hexdigest()
-    clean = _safe_audit_value(clean)
+    def sanitize(value):
+        if isinstance(value, Mapping):
+            clean = {}
+            for key, item in value.items():
+                name = str(key)
+                if (re.search(r"prompt|token|secret|password|credential|cookie|authorization", name, re.I)
+                        and not name.endswith("_sha256")):
+                    encoded = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+                    clean[f"{name}_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
+                else:
+                    clean[name] = sanitize(item)
+            return clean
+        if isinstance(value, (list, tuple)):
+            return [sanitize(item) for item in value]
+        return _safe_audit_value(value)
+
+    clean = sanitize(dict(metadata or {}))
     return json.loads(_safe_json(clean, 16_000))
 
 
@@ -313,12 +530,8 @@ class CodexTaskSpec:
         root = self.repo_root.resolve()
         if root != AI_ROOT.resolve():
             raise PermissionError("Codex repo_root denied")
-        allowed = []
-        for path in self.allowed_paths:
-            resolved = path.resolve()
-            if not resolved.is_relative_to(root):
-                raise PermissionError("Codex allowed_path traversal denied")
-            allowed.append(str(resolved))
+        policy = RepoAccessPolicy(root)
+        allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
         if not self.task_prompt or len(self.task_prompt.encode()) > MAX_WORK_UNIT_PROMPT_BYTES:
             raise ValueError("Codex task prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":

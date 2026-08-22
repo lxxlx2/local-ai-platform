@@ -298,7 +298,9 @@ def test_codex_spec_enforces_scope_and_secret_firewall():
         CodexTaskSpec(AI_ROOT, (Path("/tmp"),), "safe", "LOW", 60, "CODE", {}).validate()
     with pytest.raises(ValueError):
         unsafe_prompt = "pass" + "word=example-sensitive-value"
-        CodexTaskSpec(AI_ROOT, (AI_ROOT,), unsafe_prompt, "LOW", 60, "CODE", {}).validate()
+        CodexTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), unsafe_prompt, "LOW", 60, "CODE", {}).validate()
+    with pytest.raises(PermissionError):
+        CodexTaskSpec(AI_ROOT, (AI_ROOT,), "safe", "LOW", 60, "CODE", {}).validate()
     blocked = RealCodexRunner().run_task(spec)
     assert blocked.status is StageResultStatus.BLOCKED
 

@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Mapping
 
 from local_ai_control.services.security import SecretFirewall
-from .supervisor_contracts import AI_ROOT, MAX_FINDINGS_PER_REVIEW, _json_exact
+from .supervisor_contracts import (
+    AI_ROOT, MAX_FINDINGS_PER_REVIEW, CandidateIdentity, RepoAccessPolicy, _json_exact,
+)
 
 SENSITIVE_KEY = re.compile(r"prompt|token|secret|password|credential|cookie|authorization", re.I)
 MAX_CANDIDATE_SCAN_BYTES = 1_000_000
@@ -32,7 +34,7 @@ def recursive_private_sanitize(value):
         clean = {}
         for key, item in value.items():
             name = str(key)
-            if SENSITIVE_KEY.search(name):
+            if SENSITIVE_KEY.search(name) and not name.endswith("_sha256"):
                 clean[f"{name}_sha256"] = _canonical_digest(item)
             else:
                 clean[name] = recursive_private_sanitize(item)
@@ -63,12 +65,7 @@ class ReviewTaskSpec:
             raise PermissionError("review task must be read-only")
         if self.model_role != "REVIEW":
             raise ValueError("review task model_role must be REVIEW")
-        allowed = []
-        for path in self.allowed_paths:
-            resolved = path.resolve()
-            if not resolved.is_relative_to(root):
-                raise PermissionError("review allowed_path traversal denied")
-            allowed.append(str(resolved))
+        allowed = [str(path) for path in RepoAccessPolicy(root).validate_allowed_paths(list(self.allowed_paths))]
         if not self.task_prompt or len(self.task_prompt.encode()) > 256_000:
             raise ValueError("review prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":
@@ -103,6 +100,7 @@ class ReviewerWorkUnit:
     prompt_content_ref: str
     prompt_sha256: str
     spec_hash: str
+    candidate_identity: CandidateIdentity
     created_at: str
     status: str
 

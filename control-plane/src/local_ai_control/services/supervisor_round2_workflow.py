@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import threading
-from .supervisor_contracts import AI_ROOT, JobStatus, LeaseLostError, ReviewFinding, ReviewResult, StageContext, StageResult, StageResultStatus, WorkflowJob, WorkflowStage
+from .supervisor_contracts import (
+    AI_ROOT, CONTROL_PLANE_ROOT, JobStatus, LeaseLostError, ReviewFinding, ReviewResult,
+    StageContext, StageResult, StageResultStatus, WorkflowJob, WorkflowStage,
+)
 from .supervisor_workflow import WorkflowSupervisor as BaseWorkflowSupervisor
 from .supervisor_round2_common import REVIEW_RESULT_SCHEMA, ReviewTaskSpec
 
@@ -27,6 +30,8 @@ class LeaseKeepingRunner:
                  heartbeat_interval: float | None = None):
         self.inner, self.repository, self.token, self.ttl = inner, repository, token, ttl
         self.heartbeat_interval = heartbeat_interval or max(0.25, min(5.0, ttl / 3.0))
+        self.cancel_succeeded = False
+        self.external_execution_may_still_be_active = False
 
     def run(self, context: StageContext) -> StageResult:
         stop = threading.Event()
@@ -38,15 +43,20 @@ class LeaseKeepingRunner:
                 if not self.repository.heartbeat_external(self.repository.path, self.token, self.ttl):
                     lost.set()
                     self.repository.lease_failed = True
-                    for name in ("cancel", "abort"):
-                        method = getattr(self.inner, name, None)
-                        if callable(method):
-                            cancel_attempted.set()
+                    method = getattr(self.inner, "cancel", None)
+                    supported = getattr(self.inner, "cancellation_supported", callable(method))
+                    if supported and callable(method):
+                        cancel_attempted.set()
+                        try:
                             try:
-                                method()
-                            except Exception:
-                                pass
-                            break
+                                self.cancel_succeeded = bool(method(reason="LEASE_LOST"))
+                            except TypeError:
+                                self.cancel_succeeded = bool(method())
+                        except Exception:
+                            self.cancel_succeeded = False
+                    if not self.cancel_succeeded:
+                        self.external_execution_may_still_be_active = True
+                        self.repository.external_execution_may_still_be_active = True
                     return
 
         thread = threading.Thread(target=keeper, name="supervisor-lease-keeper", daemon=True)
@@ -57,9 +67,11 @@ class LeaseKeepingRunner:
             stop.set()
             thread.join(timeout=max(1.0, self.heartbeat_interval * 2))
         if lost.is_set():
+            if self.cancel_succeeded:
+                raise LeaseLostError("lease lost during runner; internal cancellation propagated")
             raise LeaseLostError(
-                "lease lost during runner; cancellation attempted" if cancel_attempted.is_set()
-                else "lease lost during runner; reconciliation required"
+                "EXTERNAL_EXECUTION_MAY_STILL_BE_ACTIVE; BLOCKED_REQUIRES_RECONCILIATION; "
+                + ("cancellation failed" if cancel_attempted.is_set() else "cancellation unsupported")
             )
         return result
 
@@ -80,6 +92,13 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
 
     def _run_selected(self, job: WorkflowJob) -> WorkflowJob:
         self._require_lease()
+        if (job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
+                and getattr(self.repository, "external_execution_may_still_be_active", False)):
+            return self.repository.update_job(
+                job.job_id, status=JobStatus.BLOCKED,
+                resume_state="BLOCKED_REQUIRES_RECONCILIATION",
+                last_error="EXTERNAL_EXECUTION_MAY_STILL_BE_ACTIVE",
+            )
         original = self.runners.get(job.current_stage)
         if original is None:
             return super()._run_selected(job)
@@ -104,7 +123,7 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
             "Read only within the allowed repository paths. Return only the expected structured review schema."
         )
         return ReviewTaskSpec(
-            AI_ROOT, (AI_ROOT,), prompt, True, job.risk_level,
+            AI_ROOT, (CONTROL_PLANE_ROOT, AI_ROOT / "docs"), prompt, True, job.risk_level,
             min(float(self.timeout_seconds), 3600.0), "REVIEW", REVIEW_RESULT_SCHEMA,
         )
 

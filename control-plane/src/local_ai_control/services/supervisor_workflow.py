@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 import uuid
 from typing import Mapping
@@ -121,6 +123,60 @@ class WorkflowSupervisor:
         recovered = 0
         for job in self.repository.list_jobs(limit=200):
             if job.status is not JobStatus.RUNNING:
+                continue
+            latest = self.repository.db.execute(
+                "SELECT * FROM supervisor_stage_runs WHERE job_id=? AND stage=? "
+                "ORDER BY attempt DESC,started_at DESC LIMIT 1",
+                (job.job_id, job.current_stage.value),
+            ).fetchone()
+            if latest and latest["status"] == StageResultStatus.PASS.value and latest["completed_at"]:
+                metrics = json.loads(latest["metrics_json"] or "{}")
+                mutating = job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
+                confirmed = (
+                    metrics.get("completion_provenance_confirmed") is True
+                    and bool(re.fullmatch(r"[a-f0-9-]{36}", str(metrics.get("execution_id", ""))))
+                )
+                if mutating and not confirmed:
+                    self.repository.update_job(
+                        job.job_id, status=JobStatus.BLOCKED,
+                        resume_state="BLOCKED_REQUIRES_RECONCILIATION",
+                        last_error="COMPLETED_NOT_TRANSITIONED_UNCONFIRMED",
+                    )
+                    self.repository.record_event(
+                        job.job_id, "COMPLETED_NOT_TRANSITIONED", job.current_stage,
+                        {"policy": "MUTATING_REQUIRES_DURABLE_PROVENANCE"},
+                        f"completed-not-transitioned:block:{latest['run_id']}",
+                    )
+                    recovered += 1
+                    continue
+                if job.current_stage is WorkflowStage.REVISION:
+                    self.repository.mark_review_findings_consumed(
+                        job.job_id, job.owner_id, job.review_round, f"recovery:{latest['run_id']}",
+                    )
+                if job.current_stage is WorkflowStage.REVIEW and hasattr(self.repository, "review_work_unit_for_round"):
+                    round_number = job.review_round + 1
+                    unit = self.repository.review_work_unit_for_round(job.job_id, job.owner_id, round_number)
+                    self.repository.mark_review_result_consumed(
+                        job.job_id, job.owner_id, round_number, unit.review_work_unit_id,
+                    )
+                next_stage = NEXT_STAGE[job.current_stage]
+                if next_stage is WorkflowStage.DONE:
+                    self.repository.update_job(
+                        job.job_id, status=JobStatus.COMPLETED, current_stage=WorkflowStage.DONE,
+                        attempt=0, resume_state=None, last_error=None, next_retry_at=None,
+                    )
+                else:
+                    self.repository.update_job(
+                        job.job_id, status=JobStatus.QUEUED, current_stage=next_stage,
+                        attempt=0, resume_state="COMPLETED_NOT_TRANSITIONED_RECOVERED",
+                        last_error=None, next_retry_at=None,
+                    )
+                self.repository.record_event(
+                    job.job_id, "COMPLETED_NOT_TRANSITIONED", job.current_stage,
+                    {"policy": "FINALIZED_WITHOUT_RERUN", "mutating": mutating},
+                    f"completed-not-transitioned:finalize:{latest['run_id']}",
+                )
+                recovered += 1
                 continue
             with self.repository.db:
                 self.repository.db.execute(

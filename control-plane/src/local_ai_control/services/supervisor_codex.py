@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import re
+import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -48,7 +50,9 @@ class CodexCapabilityProbe:
 
 
 class CodexTaskRunner(Protocol):
+    cancellation_supported: bool
     def run_task(self, spec: CodexTaskSpec) -> StageResult: ...
+    def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool: ...
 
 
 class RealCodexRunner:
@@ -56,6 +60,10 @@ class RealCodexRunner:
 
     def __init__(self, capability: CodexCapability | None = None):
         self.capability = capability or CodexCapabilityProbe().probe()
+        self.cancellation_supported = False
+
+    def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool:
+        return False
 
     def run_task(self, spec: CodexTaskSpec) -> StageResult:
         spec.validate()
@@ -72,6 +80,31 @@ class PersistedCodexStageRunner:
 
     def __init__(self, task_runner: CodexTaskRunner | None = None):
         self.task_runner = task_runner or RealCodexRunner()
+        self.execution_id: str | None = None
+        self.cancellation_result: str | None = None
+
+    @property
+    def cancellation_supported(self) -> bool:
+        return bool(getattr(self.task_runner, "cancellation_supported", False))
+
+    def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool:
+        if not self.cancellation_supported:
+            self.cancellation_result = "UNSUPPORTED"
+            return False
+        active = self.execution_id
+        if execution_id is not None and active is not None and execution_id != active:
+            self.cancellation_result = "EXECUTION_ID_MISMATCH"
+            return False
+        if active is not None and not re.fullmatch(r"[a-f0-9-]{36}", active):
+            self.cancellation_result = "UNSAFE_EXECUTION_ID"
+            return False
+        try:
+            result = bool(self.task_runner.cancel(execution_id=active, reason=reason))
+        except Exception:
+            self.cancellation_result = "CANCEL_FAILED"
+            return False
+        self.cancellation_result = "CANCELED" if result else "CANCEL_FAILED"
+        return result
 
     def run(self, context: StageContext) -> StageResult:
         if context.stage not in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}:
@@ -85,4 +118,8 @@ class PersistedCodexStageRunner:
             )
         except (KeyError, ValueError, PermissionError) as error:
             return StageResult(StageResultStatus.BLOCKED, "Durable work unit unavailable or invalid", error=type(error).__name__)
-        return self.task_runner.run_task(spec)
+        self.execution_id = str(uuid.uuid4())
+        try:
+            return self.task_runner.run_task(spec)
+        finally:
+            self.execution_id = None

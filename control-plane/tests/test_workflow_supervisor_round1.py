@@ -7,10 +7,11 @@ import pytest
 
 from local_ai_control.services.supervisor import (
     AI_ROOT, CodexTaskSpec, JobStatus, LeaseLostError, MockCodexRunner, MockReviewRunner,
-    ReviewFinding, ReviewResult, SecurityRunner, StageContext, StageResultStatus, StaticPassRunner,
+    ReviewFinding, ReviewResult, ReviewTaskSpec, SecurityRunner, StageContext, StageResultStatus, StaticPassRunner,
     SupervisorRepository, WorkflowStage, WorkflowSupervisor, default_demo_runners,
     ensure_private_directory,
 )
+import local_ai_control.services.supervisor_round2 as round2
 from local_ai_control.supervisor import process_identity
 
 
@@ -49,7 +50,7 @@ def test_durable_work_unit_survives_reopen_and_is_owner_job_path_secret_safe(tmp
     with pytest.raises(ValueError):
         second.create_work_unit(
             job.job_id, "owner-a", WorkflowStage.REVISION,
-            CodexTaskSpec(AI_ROOT, (AI_ROOT,), "password=synthetic-sensitive-value", "LOW", 60, "CODE", {}),
+            CodexTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "pass" + "word=synthetic-sensitive-value", "LOW", 60, "CODE", {}),
         )
     with pytest.raises(PermissionError):
         CodexTaskSpec(AI_ROOT, (Path("/tmp"),), "safe prompt", "LOW", 60, "CODE", {}).validate()
@@ -62,9 +63,13 @@ def test_durable_work_unit_survives_reopen_and_is_owner_job_path_secret_safe(tmp
 def test_review_findings_persist_reopen_redact_round_isolate_and_revision_reads(tmp_path):
     first = repo(tmp_path)
     job = first.create_job("review", "owner")
+    first.update_job(job.job_id, current_stage=WorkflowStage.REVIEW)
+    spec = ReviewTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "review", True, "LOW", 60,
+                          "REVIEW", round2.REVIEW_RESULT_SCHEMA)
+    first.create_review_work_unit(job.job_id, "owner", 1, spec, "round1-unit")
     findings = (
-        ReviewFinding("BLOCKING", "control-plane/a.py", "plain evidence", "plain fix"),
-        ReviewFinding("HIGH", "control-plane/b.py", "password=synthetic-sensitive-value", "safe fix"),
+        ReviewFinding("BLOCKING", "control-plane/src/local_ai_control/services/supervisor_contracts.py", "plain evidence", "plain fix"),
+        ReviewFinding("HIGH", "control-plane/src/local_ai_control/services/supervisor_round2_review.py", "pass" + "word=synthetic-sensitive-value", "safe fix"),
     )
     saved = first.persist_review_findings(job.job_id, "owner", 1, findings)
     assert len(saved) == 2
@@ -74,8 +79,10 @@ def test_review_findings_persist_reopen_redact_round_isolate_and_revision_reads(
     second = SupervisorRepository(tmp_path / "runtime" / "supervisor.db"); second.migrate()
     round1 = second.review_findings(job.job_id, "owner", 1)
     assert len(round1) == 2 and round1[0].evidence == "plain evidence"
+    second.update_job(job.job_id, review_round=1, current_stage=WorkflowStage.REVIEW)
+    second.create_review_work_unit(job.job_id, "owner", 2, spec, "round2-unit")
     second.persist_review_findings(job.job_id, "owner", 2, (
-        ReviewFinding("MEDIUM", "control-plane/c.py", "round two", "round two fix"),
+        ReviewFinding("MEDIUM", "control-plane/src/local_ai_control/services/supervisor_workflow.py", "round two", "round two fix"),
     ))
     assert len(second.review_findings(job.job_id, "owner", 1)) == 2
     assert len(second.review_findings(job.job_id, "owner", 2)) == 1
@@ -86,7 +93,7 @@ def test_review_findings_persist_reopen_redact_round_isolate_and_revision_reads(
             ReviewFinding("HIGH", "../escape", "x", "y"),
         ))
     with pytest.raises(ValueError):
-        ReviewResult("PASS", (ReviewFinding("LOW", "control-plane/a.py", "x", "y"),)).to_stage_result()
+        ReviewResult("PASS", (ReviewFinding("LOW", "control-plane/src/local_ai_control/services/supervisor_contracts.py", "x", "y"),)).to_stage_result()
     second.update_job(job.job_id, review_round=1, current_stage=WorkflowStage.REVISION)
     current = second.get_job(job.job_id)
     context = StageContext(current, WorkflowStage.REVISION, 1, "revision-key", 30, second)
@@ -176,12 +183,12 @@ def test_security_candidate_scan_is_fail_closed_for_oversized_binary_symlink_and
     assert result.status is StageResultStatus.FAIL and result.error == "OVERSIZED_UNSCANNED_CANDIDATE"
     assert result.metrics["oversized"] == 1 and result.metrics["files_scanned"] == 0
     large_secret = root / "large-secret.txt"
-    large_secret.write_bytes(b"a" * 1_000_001 + b" password=synthetic-sensitive-value")
+    large_secret.write_bytes(b"a" * 1_000_001 + b" pass" + b"word=synthetic-sensitive-value")
     assert runner._scan_candidates(["large-secret.txt"]).status is StageResultStatus.FAIL
     binary = root / "candidate.bin"; binary.write_bytes(b"abc\x00def")
     result = runner._scan_candidates(["candidate.bin"])
     assert result.error == "BINARY_CANDIDATE_UNAPPROVED" and result.metrics["binary"] == 1
-    secret = root / "secret.txt"; secret.write_text("password=synthetic-sensitive-value")
+    secret = root / "secret.txt"; secret.write_text("pass" + "word=synthetic-sensitive-value")
     assert runner._scan_candidates(["secret.txt"]).error == "SECRET_SCAN"
     outside = tmp_path / "outside.txt"; outside.write_text("clean")
     (root / "link.txt").symlink_to(outside)
