@@ -97,36 +97,20 @@ class WorkflowSupervisor:
         if job.status in {JobStatus.CANCELED, JobStatus.COMPLETED}:
             return job
         if job.status is JobStatus.RUNNING:
-            job = self.repository.update_job(job_id, resume_state="CANCEL_REQUESTED")
             if job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}:
-                execution = self.repository.active_execution_for_job(job.job_id, job.current_stage)
-                runner = self.runners.get(job.current_stage)
-                canceled = False
-                if execution and runner and callable(getattr(runner, "cancel", None)):
-                    try:
-                        canceled = bool(runner.cancel(execution["execution_id"], "OWNER_CANCEL_REQUESTED"))
-                    except Exception:
-                        canceled = False
-                if canceled and execution:
-                    self.repository.record_execution_cancellation(execution["execution_id"], "CANCELED")
-                if not canceled:
-                    fence = self.repository.persist_mutation_fence(
-                        job.job_id, "EXTERNAL_EXECUTION_UNCERTAIN",
-                        execution["work_unit_id"] if execution else None,
-                        execution["execution_id"] if execution else None,
-                    )
-                    job = self.repository.update_job(
-                        job_id, status=JobStatus.BLOCKED,
-                        resume_state="BLOCKED_REQUIRES_RECONCILIATION",
-                        last_error="OWNER_CANCEL_UNCONFIRMED",
-                    )
-                    self.repository.record_event(
-                        job_id, "CANCEL_REQUIRES_RECONCILIATION", job.current_stage,
-                        {"fence_name": fence["fence_name"]}, f"cancel-fence:{job_id}:{fence['fence_name']}",
-                    )
+                self.repository.request_execution_cancellation(
+                    job.job_id, str(owner_id if owner_id is not None else job.owner_id), job.current_stage,
+                )
+                job = self.repository.get_job(job_id)
+            else:
+                job = self.repository.update_job(job_id, resume_state="CANCEL_REQUESTED")
+            self.repository.record_event(
+                job_id, "CANCEL_REQUESTED", job.current_stage, {},
+                f"cancel-requested:{job_id}:{job.current_stage.value}",
+            )
         else:
             job = self.repository.update_job(job_id, status=JobStatus.CANCELED, resume_state=None)
-        self.repository.record_event(job_id, "JOB_CANCELED", job.current_stage, {}, f"cancel:{job_id}")
+            self.repository.record_event(job_id, "JOB_CANCELED", job.current_stage, {}, f"cancel:{job_id}")
         return job
 
     def retry(self, job_id: str, owner_id: str | None = None) -> WorkflowJob:
@@ -141,6 +125,21 @@ class WorkflowSupervisor:
                                          last_error=None, next_retry_at=None)
         self.repository.record_event(job_id, "RETRY_SCHEDULED", job.current_stage,
                                      {"manual": True}, f"retry:{job_id}:{job.current_stage.value}:{job.attempt}")
+        return job
+
+    def reconcile_fence(self, job_id: str, owner_id: str, fence_name: str,
+                        reconciliation_note: str) -> WorkflowJob:
+        self.repository.reconcile_mutation_fence_for_owner(
+            job_id, owner_id, fence_name, reconciliation_note,
+        )
+        job = self.repository.update_job(
+            job_id, status=JobStatus.FAILED, resume_state=None,
+            last_error="MANUAL_RECONCILIATION_COMPLETED",
+        )
+        self.repository.record_event(
+            job_id, "MUTATION_FENCE_RECONCILED", job.current_stage,
+            {"fence_name": fence_name}, f"fence-reconciled:{job_id}:{fence_name}",
+        )
         return job
 
     def recover_interrupted(self) -> int:
@@ -281,23 +280,61 @@ class WorkflowSupervisor:
             result = StageResult.failed("Stage runner raised a bounded error", type(error).__name__)
         self.repository.finish_stage(run_id, job.job_id, job.current_stage, result)
         current = self.status(job.job_id)
+        if (current.status is JobStatus.BLOCKED
+                and current.resume_state == "BLOCKED_REQUIRES_RECONCILIATION"):
+            return current
         if current.resume_state == "CANCEL_REQUESTED":
             if job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}:
                 execution = self.repository.db.execute(
                     "SELECT * FROM supervisor_executions WHERE run_id=?", (run_id,),
                 ).fetchone()
-                if result.status is StageResultStatus.PASS:
+                if not execution:
+                    self.repository.record_event(
+                        job.job_id, "CANCEL_CONFIRMED", job.current_stage,
+                        {"execution_started": False},
+                        f"cancel-confirmed:{job.job_id}:not-started:{run_id}",
+                    )
+                    canceled_job = self.repository.update_job(
+                        job.job_id, status=JobStatus.CANCELED, resume_state=None,
+                    )
+                    self.repository.record_event(
+                        job.job_id, "JOB_CANCELED", job.current_stage, {}, f"cancel:{job.job_id}",
+                    )
+                    return canceled_job
+                canceled = bool(execution and execution["cancellation_status"] == "CANCELED")
+                if result.status is StageResultStatus.PASS or not canceled:
                     fence = self.repository.persist_mutation_fence(
                         job.job_id, "EXTERNAL_EXECUTION_UNCERTAIN",
                         execution["work_unit_id"] if execution else None,
                         execution["execution_id"] if execution else None,
                     )
-                    return self.repository.update_job(
+                    error = ("CANCELED_PROVIDER_RETURNED_PASS" if result.status is StageResultStatus.PASS
+                             else "OWNER_CANCEL_UNCONFIRMED")
+                    blocked = self.repository.update_job(
                         job.job_id, status=JobStatus.BLOCKED,
                         resume_state="BLOCKED_REQUIRES_RECONCILIATION",
-                        last_error=f"CANCELED_PROVIDER_RETURNED_PASS:{fence['fence_name']}",
+                        last_error=f"{error}:{fence['fence_name']}",
                     )
-            return self.repository.update_job(job.job_id, status=JobStatus.CANCELED, resume_state=None)
+                    self.repository.record_event(
+                        job.job_id, "CANCEL_REQUIRES_RECONCILIATION", job.current_stage,
+                        {"fence_name": fence["fence_name"]},
+                        f"cancel-reconciliation:{job.job_id}:{fence['fence_name']}",
+                    )
+                    return blocked
+                self.repository.record_event(
+                    job.job_id, "CANCEL_CONFIRMED", job.current_stage, {},
+                    f"cancel-confirmed:{job.job_id}:{execution['execution_id']}",
+                )
+            else:
+                self.repository.record_event(
+                    job.job_id, "CANCEL_CONFIRMED", job.current_stage, {},
+                    f"cancel-confirmed:{job.job_id}:{job.current_stage.value}:{run_id}",
+                )
+            canceled_job = self.repository.update_job(job.job_id, status=JobStatus.CANCELED,
+                                                      resume_state=None)
+            self.repository.record_event(job.job_id, "JOB_CANCELED", job.current_stage, {},
+                                         f"cancel:{job.job_id}")
+            return canceled_job
 
         if job.current_stage is WorkflowStage.REVIEW:
             self.repository.record_event(

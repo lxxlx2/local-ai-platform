@@ -49,7 +49,9 @@ class SupervisorRepository(DurablePayloadMixin):
               metadata_json TEXT NOT NULL, next_retry_at REAL,
               baseline_commit_sha TEXT,
               mutation_capable INTEGER NOT NULL DEFAULT 1,
-              baseline_candidate_state_sha256 TEXT
+              baseline_candidate_state_sha256 TEXT,
+              job_request_hash TEXT,
+              cancel_requested_at TEXT, cancel_requested_by TEXT, target_execution_id TEXT
             );
             CREATE INDEX IF NOT EXISTS supervisor_jobs_queue_idx
               ON supervisor_jobs(status, next_retry_at, created_at);
@@ -109,6 +111,7 @@ class SupervisorRepository(DurablePayloadMixin):
               stage TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
               started_at TEXT NOT NULL, completed_at TEXT, completion_status TEXT NOT NULL,
               result_hash TEXT, cancellation_status TEXT NOT NULL DEFAULT 'NOT_REQUESTED',
+              cancel_requested_at TEXT, cancel_requested_by TEXT, target_execution_id TEXT,
               candidate_state_sha256 TEXT, candidate_tree_sha TEXT, candidate_diff_sha256 TEXT,
               FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id),
               FOREIGN KEY(work_unit_id) REFERENCES supervisor_work_units(work_unit_id),
@@ -131,16 +134,35 @@ class SupervisorRepository(DurablePayloadMixin):
             ("supervisor_jobs", "baseline_commit_sha", "TEXT"),
             ("supervisor_jobs", "mutation_capable", "INTEGER NOT NULL DEFAULT 1"),
             ("supervisor_jobs", "baseline_candidate_state_sha256", "TEXT"),
+            ("supervisor_jobs", "job_request_hash", "TEXT"),
+            ("supervisor_jobs", "cancel_requested_at", "TEXT"),
+            ("supervisor_jobs", "cancel_requested_by", "TEXT"),
+            ("supervisor_jobs", "target_execution_id", "TEXT"),
             ("supervisor_stage_runs", "review_round", "INTEGER NOT NULL DEFAULT 0"),
             ("supervisor_work_units", "safe_file_manifest_json", "TEXT"),
             ("supervisor_executions", "candidate_state_sha256", "TEXT"),
             ("supervisor_executions", "candidate_tree_sha", "TEXT"),
             ("supervisor_executions", "candidate_diff_sha256", "TEXT"),
+            ("supervisor_executions", "cancel_requested_at", "TEXT"),
+            ("supervisor_executions", "cancel_requested_by", "TEXT"),
+            ("supervisor_executions", "target_execution_id", "TEXT"),
         )
         for table, column, definition in migrations:
             columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
             if column not in columns:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        with self.db:
+            for row in self.db.execute(
+                "SELECT * FROM supervisor_jobs WHERE job_request_hash IS NULL OR job_request_hash=''"
+            ).fetchall():
+                digest = self._job_request_hash(
+                    row["job_id"], row["owner_id"], row["title"], row["project_scope"],
+                    row["risk_level"], row["created_by"], int(row["max_review_rounds"]),
+                    int(row["max_attempts_per_stage"]), json.loads(row["metadata_json"]),
+                    bool(row["mutation_capable"]),
+                )
+                self.db.execute("UPDATE supervisor_jobs SET job_request_hash=? WHERE job_id=?",
+                                (digest, row["job_id"]))
         self.db.commit()
         for candidate in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             if candidate.exists():
@@ -164,6 +186,20 @@ class SupervisorRepository(DurablePayloadMixin):
             baseline_candidate_state_sha256=row["baseline_candidate_state_sha256"],
         )
 
+    @staticmethod
+    def _job_request_hash(job_id: str, owner_id: str, title: str, project_scope: str,
+                          risk_level: str, created_by: str, max_review_rounds: int,
+                          max_attempts_per_stage: int, metadata: Mapping,
+                          mutation_capable: bool) -> str:
+        payload = {
+            "job_id": job_id, "owner_id": str(owner_id), "title": title,
+            "project_scope": str(Path(project_scope).resolve()), "risk_level": risk_level,
+            "created_by": created_by, "max_review_rounds": int(max_review_rounds),
+            "max_attempts_per_stage": int(max_attempts_per_stage),
+            "metadata": dict(metadata), "mutation_capable": bool(mutation_capable),
+        }
+        return hashlib.sha256(_json_exact(payload, 64_000).encode()).hexdigest()
+
     def create_job(self, title: str, owner_id: str, project_scope: str = str(AI_ROOT),
                    risk_level: str = "LOW", created_by: str = "owner",
                    metadata: Mapping | None = None, max_review_rounds: int = 2,
@@ -184,19 +220,25 @@ class SupervisorRepository(DurablePayloadMixin):
         now, identifier = utc_now(), job_id or str(uuid.uuid4())
         if not re.fullmatch(r"[A-Za-z0-9._:-]{1,46}", identifier):
             raise ValueError("job_id is not callback-safe")
+        metadata_json = _safe_json(_safe_metadata(supplied_metadata), 16_000)
+        request_hash = self._job_request_hash(
+            identifier, owner_id, title, str(resolved), risk_level, created_by,
+            max_review_rounds, max_attempts_per_stage, json.loads(metadata_json), True,
+        )
         if job_id:
             existing = self.db.execute("SELECT * FROM supervisor_jobs WHERE job_id=?", (job_id,)).fetchone()
             if existing:
-                job = self._job_from_row(existing)
-                if job.owner_id != str(owner_id) or job.title != title:
-                    raise ValueError("idempotency key conflicts with existing job")
-                return job
+                if existing["job_request_hash"] != request_hash:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return self._job_from_row(existing)
         baseline = self.candidate_identity_provider.capture_baseline()
         baseline_identity = self.candidate_identity_provider.snapshot(baseline)
         if not bool(self.candidate_identity_provider.worktree_is_clean()):
             raise RuntimeError("WORKTREE_NOT_CLEAN")
+        unowned = getattr(self.candidate_identity_provider, "unowned_write_root_paths", lambda: ())()
+        if unowned:
+            raise RuntimeError("WORKTREE_WRITE_ROOT_NOT_OWNABLE")
         baseline_state = hashlib.sha256(_json_exact(baseline_identity.stable_payload(), 1_000_000).encode()).hexdigest()
-        metadata_json = _safe_json(_safe_metadata(supplied_metadata), 16_000)
         try:
             self.db.execute("BEGIN IMMEDIATE")
             if mutation_capable:
@@ -212,13 +254,13 @@ class SupervisorRepository(DurablePayloadMixin):
                 "INSERT INTO supervisor_jobs "
                 "(job_id,title,project_scope,created_at,updated_at,owner_id,risk_level,status,current_stage,attempt,"
                 "review_round,max_review_rounds,max_attempts_per_stage,last_error,resume_state,created_by,"
-                "metadata_json,next_retry_at,baseline_commit_sha,mutation_capable,baseline_candidate_state_sha256) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "metadata_json,next_retry_at,baseline_commit_sha,mutation_capable,baseline_candidate_state_sha256,"
+                "job_request_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (identifier, _bounded(title, 200), str(resolved), now, now, str(owner_id), risk_level,
                  JobStatus.QUEUED.value, WorkflowStage.INTAKE.value, 0, 0, max_review_rounds,
                  max_attempts_per_stage, None, None, created_by,
                  metadata_json, None, baseline,
-                 int(bool(mutation_capable)), baseline_state),
+                 int(bool(mutation_capable)), baseline_state, request_hash),
             )
             self.record_event(identifier, "JOB_CREATED", WorkflowStage.INTAKE,
                               {"risk_level": risk_level}, commit=False)
@@ -321,8 +363,13 @@ class SupervisorRepository(DurablePayloadMixin):
 
     def begin_stage(self, job: WorkflowJob) -> tuple[str, int, str] | None:
         first_producer_identity = None
-        if job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION} and not job.mutation_capable:
+        mutating_stage = job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
+        if mutating_stage and not job.mutation_capable:
             raise PermissionError("read-only job cannot enter mutating stage")
+        if mutating_stage:
+            unowned = getattr(self.candidate_identity_provider, "unowned_write_root_paths", lambda: ())()
+            if unowned:
+                return None
         first_producer = (job.current_stage is WorkflowStage.PRODUCER
                           and self.stage_attempts(job.job_id, job.current_stage) == 0)
         if first_producer:
@@ -431,12 +478,13 @@ class SupervisorRepository(DurablePayloadMixin):
                 "SELECT * FROM supervisor_work_units WHERE work_unit_id=?", (work_unit_id,),
             ).fetchone()
             durable_job = self.db.execute(
-                "SELECT mutation_capable FROM supervisor_jobs WHERE job_id=?", (job_id,),
+                "SELECT mutation_capable,resume_state FROM supervisor_jobs WHERE job_id=?", (job_id,),
             ).fetchone()
             if (not run or run["job_id"] != job_id or run["stage"] != stage.value or run["status"] != "RUNNING"
                     or not unit or unit["job_id"] != job_id or unit["stage"] != stage.value
                     or int(unit["review_round"]) != int(run["review_round"])
-                    or not durable_job or not bool(durable_job["mutation_capable"])):
+                    or not durable_job or not bool(durable_job["mutation_capable"])
+                    or durable_job["resume_state"] == "CANCEL_REQUESTED"):
                 self.db.rollback()
                 raise ValueError("execution binding does not match durable run/work unit")
             existing = self.db.execute(
@@ -584,6 +632,89 @@ class SupervisorRepository(DurablePayloadMixin):
             (job_id, stage.value),
         ).fetchone()
         return dict(row) if row else None
+
+    def request_execution_cancellation(self, job_id: str, owner_id: str,
+                                       stage: WorkflowStage) -> dict | None:
+        """Persist an Owner request; the daemon execution owner performs provider cancellation."""
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            job = self.db.execute("SELECT * FROM supervisor_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if not job:
+                self.db.rollback(); raise KeyError("job not found")
+            if job["owner_id"] != str(owner_id):
+                self.db.rollback(); raise PermissionError("supervisor job owner mismatch")
+            if job["current_stage"] != stage.value or job["status"] != JobStatus.RUNNING.value:
+                self.db.rollback(); raise ValueError("cancel request requires matching running stage")
+            execution = self.db.execute(
+                "SELECT * FROM supervisor_executions WHERE job_id=? AND stage=? "
+                "AND completion_status IN ('STARTED','CANCELLATION_PENDING') ORDER BY started_at DESC LIMIT 1",
+                (job_id, stage.value),
+            ).fetchone()
+            target = execution["execution_id"] if execution else None
+            existing_target = job["target_execution_id"]
+            if job["resume_state"] == "CANCEL_REQUESTED" and existing_target not in {None, target}:
+                self.db.rollback(); raise ValueError("cancel request execution binding mismatch")
+            requested_at = job["cancel_requested_at"] or utc_now()
+            self.db.execute(
+                "UPDATE supervisor_jobs SET resume_state='CANCEL_REQUESTED',cancel_requested_at=?,"
+                "cancel_requested_by=?,target_execution_id=?,updated_at=? WHERE job_id=?",
+                (requested_at, str(owner_id), target, utc_now(), job_id),
+            )
+            if execution:
+                self.db.execute(
+                    "UPDATE supervisor_executions SET cancellation_status='REQUESTED',"
+                    "completion_status=CASE WHEN completion_status='STARTED' THEN 'CANCELLATION_PENDING' "
+                    "ELSE completion_status END,cancel_requested_at=?,cancel_requested_by=?,target_execution_id=? "
+                    "WHERE execution_id=? AND job_id=? "
+                    "AND cancellation_status IN ('NOT_REQUESTED','REQUESTED')",
+                    (requested_at, str(owner_id), target, target, job_id),
+                )
+            self.db.commit()
+            return dict(execution) if execution else None
+        except sqlite3.Error:
+            self.db.rollback(); raise
+
+    @staticmethod
+    def pending_cancel_request_external(path: Path, job_id: str,
+                                        execution_id: str) -> bool:
+        try:
+            identifier = str(uuid.UUID(str(execution_id)))
+            db = sqlite3.connect(path, timeout=2)
+            row = db.execute(
+                "SELECT 1 FROM supervisor_jobs j JOIN supervisor_executions e ON e.job_id=j.job_id "
+                "WHERE j.job_id=? AND j.resume_state='CANCEL_REQUESTED' "
+                "AND j.target_execution_id=? AND e.execution_id=? AND e.target_execution_id=? "
+                "AND e.cancellation_status='REQUESTED'",
+                (job_id, identifier, identifier, identifier),
+            ).fetchone()
+            db.close()
+            return bool(row)
+        except (sqlite3.Error, ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def mark_cancel_reconciliation_external(path: Path, job_id: str,
+                                            execution_id: str) -> bool:
+        try:
+            identifier = str(uuid.UUID(str(execution_id)))
+            db = sqlite3.connect(path, timeout=2)
+            now = utc_now()
+            with db:
+                cursor = db.execute(
+                    "UPDATE supervisor_jobs SET status=?,resume_state=?,last_error=?,updated_at=? "
+                    "WHERE job_id=? AND target_execution_id=? AND resume_state='CANCEL_REQUESTED'",
+                    (JobStatus.BLOCKED.value, "BLOCKED_REQUIRES_RECONCILIATION",
+                     "OWNER_CANCEL_UNCONFIRMED", now, job_id, identifier),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO supervisor_events VALUES(?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), job_id, "CANCEL_REQUIRES_RECONCILIATION", None,
+                     now, "{}", f"cancel-reconciliation:{job_id}:{identifier}"),
+                )
+            db.close()
+            return cursor.rowcount == 1
+        except (sqlite3.Error, ValueError, AttributeError):
+            return False
 
     def _active_mutation_fence_row(self):
         return self.db.execute(
@@ -752,6 +883,17 @@ class SupervisorRepository(DurablePayloadMixin):
             "SELECT * FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
         ).fetchone())
 
+    def reconcile_mutation_fence_for_owner(self, job_id: str, owner_id: str,
+                                           fence_name: str, reconciliation_note: str) -> dict:
+        job = self.get_job_for_owner(job_id, owner_id)
+        fence = self.db.execute(
+            "SELECT * FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
+        ).fetchone()
+        if (not fence or fence["job_id"] != job.job_id or fence["status"] != "ACTIVE"
+                or not bool(fence["requires_manual_reconciliation"])):
+            raise ValueError("active manual-reconciliation fence binding not found")
+        return self.reconcile_mutation_fence(fence_name, reconciliation_note)
+
     def prune_terminal_jobs(self, keep: int = MAX_TERMINAL_JOBS) -> int:
         keep = min(max(int(keep), 1), MAX_TERMINAL_JOBS)
         rows = self.db.execute(
@@ -853,10 +995,21 @@ class SupervisorRepository(DurablePayloadMixin):
             "SELECT last_error FROM supervisor_jobs WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
         ).fetchone()
         lock = self.lock_snapshot()
+        fence = self._active_mutation_fence_row()
+        unresolved = self.db.execute(
+            "SELECT COUNT(*) FROM supervisor_executions WHERE completion_status IN "
+            "('STARTED','CANCELLATION_PENDING','UNKNOWN')",
+        ).fetchone()[0]
+        reconciliation = bool(fence and fence["requires_manual_reconciliation"])
         return {
-            "status": "HEALTHY", "db_reachable": True,
+            "status": ("BLOCKED_RECONCILIATION_REQUIRED" if reconciliation else "HEALTHY"),
+            "db_reachable": True,
             "single_instance_lock": bool(lock and lock["expires_at"] > time.time()),
             "active_jobs": counts["active"], "queue_depth": counts["queued"],
             "last_completed_job": dict(last) if last else None,
             "last_error": error["last_error"] if error else None,
+            "requires_manual_reconciliation": reconciliation,
+            "active_fence_name": fence["fence_name"] if fence else None,
+            "blocked_job_id": fence["job_id"] if fence else None,
+            "unresolved_execution_count": int(unresolved),
         }

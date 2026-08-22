@@ -29,7 +29,8 @@ class LeaseKeepingRunner:
     def __init__(self, inner, repository, token: str, ttl: float,
                  heartbeat_interval: float | None = None):
         self.inner, self.repository, self.token, self.ttl = inner, repository, token, ttl
-        self.heartbeat_interval = heartbeat_interval or max(0.25, min(5.0, ttl / 3.0))
+        # Durable Owner cancellation should not wait for a long lease-heartbeat cadence.
+        self.heartbeat_interval = heartbeat_interval or max(0.25, min(1.0, ttl / 3.0))
         self.cancel_succeeded = False
         self.external_execution_may_still_be_active = False
         self.durable_fence_persisted = False
@@ -48,9 +49,39 @@ class LeaseKeepingRunner:
         stop = threading.Event()
         lost = threading.Event()
         cancel_attempted = threading.Event()
+        owner_cancel_handled = threading.Event()
 
         def keeper():
             while not stop.wait(self.heartbeat_interval):
+                execution_id = getattr(self.inner, "execution_id", None)
+                if (execution_id and not owner_cancel_handled.is_set()
+                        and self.repository.pending_cancel_request_external(
+                            self.repository.path, context.job.job_id, execution_id)):
+                    owner_cancel_handled.set()
+                    method = getattr(self.inner, "cancel", None)
+                    supported = getattr(self.inner, "cancellation_supported", callable(method))
+                    canceled = False
+                    if supported and callable(method):
+                        try:
+                            canceled = bool(method(execution_id=execution_id,
+                                                   reason="OWNER_CANCEL_REQUESTED"))
+                        except Exception:
+                            canceled = False
+                    status = "CANCELED" if canceled else ("FAILED" if supported else "UNSUPPORTED")
+                    persisted = self.repository.record_execution_cancellation_external(
+                        self.repository.path, execution_id, status,
+                    )
+                    if not canceled or not persisted:
+                        work_unit_id = getattr(self.inner, "work_unit_id", None)
+                        self.durable_fence_persisted = bool(
+                            self.repository.persist_mutation_fence_external(
+                                self.repository.path, context.job.job_id,
+                                "EXTERNAL_EXECUTION_UNCERTAIN", work_unit_id, execution_id,
+                            )
+                        )
+                        self.repository.mark_cancel_reconciliation_external(
+                            self.repository.path, context.job.job_id, execution_id,
+                        )
                 if not self.repository.heartbeat_external(self.repository.path, self.token, self.ttl):
                     lost.set()
                     self.repository.lease_failed = True

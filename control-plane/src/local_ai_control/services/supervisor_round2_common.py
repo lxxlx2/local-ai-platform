@@ -129,6 +129,9 @@ class ReviewerWorkUnit:
     created_at: str
     status: str
     safe_file_manifest: tuple[dict, ...] = ()
+    patch_content_ref: str | None = None
+    patch_sha256: str | None = None
+    candidate_identity_sha256: str | None = None
 
 
 @dataclass(frozen=True)

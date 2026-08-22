@@ -33,6 +33,7 @@ MAX_CANDIDATE_IDENTITY_FILES = 2_000
 MAX_CANDIDATE_IDENTITY_BYTES = 16_000_000
 MAX_SAFE_AGENT_FILE_BYTES = 1_000_000
 MAX_MUTATING_JOBS_IN_SYSTEM = 1
+MAX_REVIEW_PATCH_BYTES = 256_000
 
 
 @dataclass(frozen=True)
@@ -350,6 +351,65 @@ class CandidateIdentityProvider:
 
     def worktree_is_clean(self) -> bool:
         return not bool(self._git("status", "--porcelain=v1", "-z", "--untracked-files=all"))
+
+    def unowned_write_root_paths(self, write_roots: tuple[Path, ...] = ()) -> tuple[str, ...]:
+        """Return ignored pre-existing files that the bounded producer policy could mutate."""
+        write_policy = RepoWritePolicy(self.repo_root, write_roots)
+        relative_roots = [Path(root).resolve().relative_to(self.repo_root).as_posix()
+                          for root in write_policy.write_roots]
+        payload = self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z",
+                            "--", *relative_roots)
+        paths = []
+        for value in payload.decode("utf-8", errors="strict").split("\0"):
+            if not value:
+                continue
+            try:
+                write_policy.validate_write_path(self.repo_root / value)
+            except PermissionError:
+                continue
+            paths.append(value)
+        return tuple(sorted(set(paths)))
+
+    def build_review_patch(self, identity: "CandidateIdentity") -> str:
+        """Build a bounded, text-only patch for the exact immutable candidate."""
+        if not identity.same_candidate(self.snapshot(identity.base_commit_sha)):
+            raise ValueError("review patch candidate is stale")
+        allowed = self.policy.validate_allowed_paths(list(self.policy.default_allowed_paths))
+        paths = tuple(sorted(set(identity.candidate_paths)))
+        if not paths:
+            raise ValueError("review patch candidate has no changed paths")
+        for value in paths:
+            self.policy.validate_candidate_path(value, allowed, deleted=value in identity.deleted_paths)
+            if value not in identity.deleted_paths:
+                self.policy._safe_manifest_entry(value, allowed, scan_secrets=True)
+        tracked = set(self._git("ls-files", "-z", "--", *paths).decode("utf-8", errors="strict").split("\0"))
+        tracked.discard("")
+        patch = self._git("diff", "--no-ext-diff", "--no-color", "--unified=3",
+                          identity.base_commit_sha, "--", *paths)
+        if b"\0" in patch:
+            raise ValueError("review patch binary content denied")
+        text = patch.decode("utf-8", errors="strict")
+        if "GIT binary patch" in text or re.search(r"^Binary files .* differ$", text, re.MULTILINE):
+            raise ValueError("review patch binary content denied")
+        for value in paths:
+            if value in tracked or value in identity.deleted_paths:
+                continue
+            entry = self.policy._safe_manifest_entry(value, allowed, scan_secrets=True)
+            payload = (self.repo_root / value).read_text(encoding="utf-8")
+            lines = payload.splitlines(keepends=True)
+            text += (f"diff --git a/{value} b/{value}\nnew file mode 100644\n"
+                     f"--- /dev/null\n+++ b/{value}\n@@ -0,0 +1,{len(lines)} @@\n")
+            text += "".join("+" + line for line in lines)
+            if payload and not payload.endswith("\n"):
+                text += "\n\\ No newline at end of file\n"
+            if int(entry["size_bytes"]) > MAX_SAFE_AGENT_FILE_BYTES:
+                raise ValueError("review patch file exceeds bound")
+        encoded = text.encode("utf-8")
+        if not encoded or len(encoded) > MAX_REVIEW_PATCH_BYTES:
+            raise ValueError("review patch outside safe size bound")
+        if SecretFirewall().inspect(text).action == "BLOCK":
+            raise ValueError("review patch rejected by Secret Firewall")
+        return text
 
     @staticmethod
     def _parse_name_status(payload: bytes) -> list[tuple[str, str]]:

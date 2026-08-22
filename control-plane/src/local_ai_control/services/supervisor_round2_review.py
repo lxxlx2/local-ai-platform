@@ -17,7 +17,8 @@ from .supervisor_round2_common import PersistedReviewSubmission, ReviewTaskSpec,
 class Round2ReviewRepositoryMixin:
     @staticmethod
     def _review_manifest(job_id: str, owner_id: str, review_round: int, validated: Mapping,
-                         prompt_sha: str, candidate_identity: CandidateIdentity) -> dict:
+                         prompt_sha: str, candidate_identity: CandidateIdentity,
+                         patch_sha256: str, candidate_identity_sha256: str) -> dict:
         return {
             "job_id": job_id, "owner_id": str(owner_id), "review_round": int(review_round),
             "repo_root": validated["repo_root"], "allowed_paths": sorted(validated["allowed_paths"]),
@@ -26,6 +27,8 @@ class Round2ReviewRepositoryMixin:
             "expected_review_schema": validated["expected_review_schema"], "prompt_sha256": prompt_sha,
             "candidate_identity": candidate_identity.to_mapping(),
             "safe_file_manifest": validated["safe_file_manifest"],
+            "patch_sha256": patch_sha256,
+            "candidate_identity_sha256": candidate_identity_sha256,
         }
 
     def _backfill_review_manifests(self) -> None:
@@ -50,9 +53,12 @@ class Round2ReviewRepositoryMixin:
                     "safe_file_manifest": list(safe_manifest),
                 }
                 candidate_identity = CandidateIdentity.from_mapping(json.loads(row["candidate_identity_json"]))
+                if not row["patch_sha256"] or not row["candidate_identity_sha256"]:
+                    continue
                 digest = _canonical_digest(self._review_manifest(
                     row["job_id"], row["owner_id"], int(row["review_round"]), validated,
-                    row["prompt_sha256"], candidate_identity,
+                    row["prompt_sha256"], candidate_identity, row["patch_sha256"],
+                    row["candidate_identity_sha256"],
                 ))
                 self.db.execute(
                     "UPDATE supervisor_review_work_units SET safe_file_manifest_json=?,spec_hash=? "
@@ -80,8 +86,12 @@ class Round2ReviewRepositoryMixin:
         validated["safe_file_manifest"] = list(policy.merge_candidate_manifest(
             candidate_identity, tuple(Path(path) for path in validated["allowed_paths"]),
         ))
+        patch = self.candidate_identity_provider.build_review_patch(candidate_identity)
+        candidate_identity_sha256 = _canonical_digest(candidate_identity.stable_payload())
+        patch_sha256 = hashlib.sha256(patch.encode()).hexdigest()
         spec_hash = _canonical_digest(self._review_manifest(
             job_id, owner_id, round_number, validated, prompt_sha, candidate_identity,
+            patch_sha256, candidate_identity_sha256,
         ))
         existing = self.db.execute(
             "SELECT * FROM supervisor_review_work_units WHERE review_work_unit_id=?", (identifier,)
@@ -95,22 +105,30 @@ class Round2ReviewRepositoryMixin:
         if stored_sha != prompt_sha:
             self.content_store.delete(content_ref)
             raise ValueError("review prompt integrity mismatch")
+        patch_ref = None
         try:
+            patch_ref, stored_patch_sha = self.content_store.put(f"review-{identifier}-patch", patch)
+            if stored_patch_sha != patch_sha256:
+                raise ValueError("review patch integrity mismatch")
             with self.db:
                 self.db.execute(
                     "INSERT INTO supervisor_review_work_units "
                     "(review_work_unit_id,job_id,owner_id,review_round,repo_root,allowed_paths_json,read_only,"
                     "risk_level,timeout_seconds,model_role,expected_review_schema_json,prompt_content_ref,"
-                    "prompt_sha256,spec_hash,candidate_identity_json,safe_file_manifest_json,created_at,status) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "prompt_sha256,spec_hash,candidate_identity_json,safe_file_manifest_json,"
+                    "patch_content_ref,patch_sha256,candidate_identity_sha256,created_at,status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier, job_id, str(owner_id), round_number, validated["repo_root"],
                      _json_exact(validated["allowed_paths"], 16_000), 1, validated["risk_level"],
                      validated["timeout_seconds"], "REVIEW", _json_exact(validated["expected_review_schema"], 16_000),
                      content_ref, prompt_sha, spec_hash, _json_exact(candidate_identity.to_mapping(), 64_000),
-                     _json_exact(validated["safe_file_manifest"], 1_000_000), utc_now(), "READY"),
+                     _json_exact(validated["safe_file_manifest"], 1_000_000), patch_ref, patch_sha256,
+                     candidate_identity_sha256, utc_now(), "READY"),
                 )
         except Exception:
             self.content_store.delete(content_ref)
+            if patch_ref:
+                self.content_store.delete(patch_ref)
             raise
         return self.get_review_work_unit(identifier, job_id, owner_id, round_number)
 
@@ -133,8 +151,13 @@ class Round2ReviewRepositoryMixin:
         if not row["candidate_identity_json"]:
             raise ValueError("review work unit candidate identity missing")
         candidate_identity = CandidateIdentity.from_mapping(json.loads(row["candidate_identity_json"]))
+        if not row["patch_content_ref"] or not row["patch_sha256"] or not row["candidate_identity_sha256"]:
+            raise ValueError("review patch artifact missing")
+        if row["candidate_identity_sha256"] != _canonical_digest(candidate_identity.stable_payload()):
+            raise ValueError("review patch candidate binding mismatch")
         expected = _canonical_digest(self._review_manifest(
             job_id, owner_id, int(review_round), validated, row["prompt_sha256"], candidate_identity,
+            row["patch_sha256"], row["candidate_identity_sha256"],
         ))
         if row["spec_hash"] != expected or not bool(row["read_only"]) or row["model_role"] != "REVIEW":
             raise ValueError("review work unit integrity mismatch")
@@ -145,6 +168,7 @@ class Round2ReviewRepositoryMixin:
             json.loads(row["expected_review_schema_json"]), row["prompt_content_ref"], row["prompt_sha256"],
             row["spec_hash"], candidate_identity, row["created_at"], row["status"],
             tuple(json.loads(row["safe_file_manifest_json"] or "[]")),
+            row["patch_content_ref"], row["patch_sha256"], row["candidate_identity_sha256"],
         )
 
     def review_work_unit_for_round(self, job_id: str, owner_id: str, review_round: int) -> ReviewerWorkUnit:
@@ -167,6 +191,15 @@ class Round2ReviewRepositoryMixin:
         if validated["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("review work unit prompt hash mismatch")
         return spec
+
+    def reconstruct_reviewer_patch(self, job_id: str, owner_id: str, review_round: int) -> str:
+        unit = self.review_work_unit_for_round(job_id, owner_id, review_round)
+        current = self.candidate_identity_provider.snapshot(unit.candidate_identity.base_commit_sha)
+        if not unit.candidate_identity.same_candidate(current):
+            raise ValueError("review patch candidate is stale")
+        if unit.candidate_identity_sha256 != _canonical_digest(current.stable_payload()):
+            raise ValueError("review patch candidate binding mismatch")
+        return self.content_store.get(unit.patch_content_ref, unit.patch_sha256)
 
     @staticmethod
     def _normalized_result(result: ReviewResult, repo_root: Path, allowed_paths: tuple[Path, ...],
@@ -389,10 +422,13 @@ class Round2ReviewRepositoryMixin:
         with self.db:
             for job_id in job_ids:
                 units = self.db.execute(
-                    "SELECT prompt_content_ref FROM supervisor_review_work_units WHERE job_id=?", (job_id,)
+                    "SELECT prompt_content_ref,patch_content_ref FROM supervisor_review_work_units WHERE job_id=?",
+                    (job_id,)
                 ).fetchall()
                 for unit in units:
                     self.content_store.delete(unit["prompt_content_ref"])
+                    if unit["patch_content_ref"]:
+                        self.content_store.delete(unit["patch_content_ref"])
                 self.db.execute("DELETE FROM supervisor_review_results WHERE job_id=?", (job_id,))
                 self.db.execute("DELETE FROM supervisor_review_work_units WHERE job_id=?", (job_id,))
         return super().prune_terminal_jobs(keep)

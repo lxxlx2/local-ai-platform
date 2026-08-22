@@ -81,7 +81,8 @@ def status_payload(repository: SupervisorRepository) -> dict:
     health = repository.health_snapshot()
     jobs = repository.list_jobs(limit=20)
     current = next(
-        (job for job in jobs if job.status in {JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.WAITING}), None,
+        (job for job in jobs if job.status in {JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.WAITING}
+         or job.resume_state == "BLOCKED_REQUIRES_RECONCILIATION"), None,
     )
     return health | {
         "current_job_id": current.job_id if current else None,
@@ -101,6 +102,11 @@ def cli() -> int:
     action_parser.add_argument("action", choices=("pause", "resume", "cancel", "retry"))
     action_parser.add_argument("job_id")
     action_parser.add_argument("--owner-id", required=True)
+    reconcile_parser = sub.add_parser("reconcile-fence")
+    reconcile_parser.add_argument("job_id")
+    reconcile_parser.add_argument("fence_name")
+    reconcile_parser.add_argument("--owner-id", required=True)
+    reconcile_parser.add_argument("--note", required=True)
     args = parser.parse_args()
     if args.command == "daemon":
         return daemon()
@@ -112,6 +118,12 @@ def cli() -> int:
         elif args.command == "demo":
             job = supervisor.create_demo(args.owner_id)
             print(json.dumps({"job_id": job.job_id, "status": job.status.value}, sort_keys=True))
+        elif args.command == "reconcile-fence":
+            job = supervisor.reconcile_fence(
+                args.job_id, args.owner_id, args.fence_name, args.note,
+            )
+            print(json.dumps({"job_id": job.job_id, "status": job.status.value,
+                              "stage": job.current_stage.value}, sort_keys=True))
         else:
             job = getattr(supervisor, args.action)(args.job_id, args.owner_id)
             print(json.dumps({"job_id": job.job_id, "status": job.status.value,
