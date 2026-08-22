@@ -119,6 +119,7 @@ class WorkflowSupervisor:
 
     def recover_interrupted(self) -> int:
         recovered = 0
+        self.repository.ensure_unresolved_execution_fences()
         if hasattr(self.repository, "reconcile_submitted_review_results"):
             self.repository.reconcile_submitted_review_results()
         for job in self.repository.list_jobs(limit=200):

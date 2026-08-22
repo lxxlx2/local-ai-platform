@@ -21,7 +21,7 @@ def make_repo(tmp_path):
 
 def review_spec(prompt="safe durable reviewer task"):
     return ReviewTaskSpec(
-        AI_ROOT, (AI_ROOT / "control-plane",), prompt, True, "LOW", 60, "REVIEW",
+        AI_ROOT, (AI_ROOT / "control-plane", AI_ROOT / "docs"), prompt, True, "LOW", 60, "REVIEW",
         round2.REVIEW_RESULT_SCHEMA,
     )
 
@@ -48,7 +48,7 @@ def test_reviewer_work_unit_reopen_reconstruct_and_owner_round_binding(tmp_path)
         repo.get_review_work_unit("rw-1", "job-review", "other", 1)
     with pytest.raises(PermissionError):
         repo.get_review_work_unit("rw-1", "job-review", "owner", 2)
-    repo.create_job("other", "owner", job_id="job-other")
+    repo.create_job("other", "owner", job_id="job-other", mutation_capable=False)
     with pytest.raises(PermissionError):
         repo.get_review_work_unit("rw-1", "job-other", "owner", 1)
     repo.close()

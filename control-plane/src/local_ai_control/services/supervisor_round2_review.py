@@ -76,6 +76,10 @@ class Round2ReviewRepositoryMixin:
         if not job.baseline_commit_sha:
             raise ValueError("trusted immutable job baseline is missing")
         candidate_identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
+        policy = RepoAccessPolicy(Path(validated["repo_root"]))
+        validated["safe_file_manifest"] = list(policy.merge_candidate_manifest(
+            candidate_identity, tuple(Path(path) for path in validated["allowed_paths"]),
+        ))
         spec_hash = _canonical_digest(self._review_manifest(
             job_id, owner_id, round_number, validated, prompt_sha, candidate_identity,
         ))

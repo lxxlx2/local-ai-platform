@@ -41,7 +41,7 @@ def test_round2_followup_review_result_lifecycle_and_round_bound(tmp_path):
     repository.update_job(job.job_id, current_stage=WorkflowStage.REVIEW)
     spec = ReviewTaskSpec(
         AI_ROOT,
-        (AI_ROOT / "control-plane",),
+        (AI_ROOT / "control-plane", AI_ROOT / "docs"),
         "safe durable reviewer task",
         True,
         "LOW",

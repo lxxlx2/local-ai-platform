@@ -31,6 +31,8 @@ MAX_CONTENT_FILES = 2_000
 LOCK_TTL_SECONDS = 30
 MAX_CANDIDATE_IDENTITY_FILES = 2_000
 MAX_CANDIDATE_IDENTITY_BYTES = 16_000_000
+MAX_SAFE_AGENT_FILE_BYTES = 1_000_000
+MAX_MUTATING_JOBS_IN_SYSTEM = 1
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,24 @@ class RepoAccessPolicy:
             raise PermissionError("candidate path outside reviewer allowed paths")
         return relative.as_posix()
 
+    def _safe_manifest_entry(self, value: str, allowed: tuple[Path, ...], *, scan_secrets: bool = False) -> dict:
+        normalized = self.validate_candidate_path(value, allowed)
+        candidate = self.repo_root / normalized
+        if candidate.is_symlink() or not candidate.is_file():
+            raise PermissionError("safe manifest requires a regular non-symlink file")
+        payload = candidate.read_bytes()
+        if len(payload) > MAX_SAFE_AGENT_FILE_BYTES:
+            raise ValueError("safe manifest file exceeds scan bound")
+        if b"\0" in payload:
+            raise ValueError("safe manifest binary content denied")
+        try:
+            text = payload.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ValueError("safe manifest non-UTF-8 content denied") from error
+        if scan_secrets and SecretFirewall().inspect(text).action == "BLOCK":
+            raise ValueError("safe manifest content rejected by Secret Firewall")
+        return {"path": normalized, "sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload)}
+
     def build_safe_file_manifest(self, allowed_paths: tuple[Path, ...] | list[Path]) -> tuple[dict, ...]:
         """Return a bounded manifest of safe tracked files; parent access is never delegated."""
         allowed = self.validate_allowed_paths(list(allowed_paths))
@@ -124,19 +144,66 @@ class RepoAccessPolicy:
                 normalized = self.validate_candidate_path(value, allowed)
             except PermissionError:
                 continue
-            candidate = self.repo_root / normalized
-            if candidate.is_symlink() or not candidate.is_file():
+            # Baseline test fixtures may intentionally contain synthetic credential patterns.
+            # They are delegated only when they are part of the immutable candidate, where the
+            # same Secret Firewall gate below is mandatory.
+            if "tests" in Path(normalized).parts:
                 continue
-            payload = candidate.read_bytes()
-            total += len(payload)
+            entry = self._safe_manifest_entry(normalized, allowed, scan_secrets=True)
+            total += int(entry["size_bytes"])
             if total > MAX_CANDIDATE_IDENTITY_BYTES:
                 raise ValueError("safe tracked-file manifest exceeds content bound")
-            manifest.append({
-                "path": normalized,
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "size_bytes": len(payload),
-            })
+            manifest.append(entry)
         return tuple(manifest)
+
+    def build_candidate_file_manifest(self, identity: "CandidateIdentity",
+                                      allowed_paths: tuple[Path, ...] | list[Path]) -> tuple[dict, ...]:
+        """Manifest every non-deleted immutable-candidate path, including safe untracked files."""
+        allowed = self.validate_allowed_paths(list(allowed_paths))
+        deleted = set(identity.deleted_paths)
+        values = [path for path in identity.candidate_paths if path not in deleted]
+        if len(values) > MAX_CANDIDATE_IDENTITY_FILES:
+            raise ValueError("candidate safe manifest exceeds file bound")
+        manifest, total = [], 0
+        for value in sorted(set(values)):
+            entry = self._safe_manifest_entry(value, allowed, scan_secrets=True)
+            total += int(entry["size_bytes"])
+            if total > MAX_CANDIDATE_IDENTITY_BYTES:
+                raise ValueError("candidate safe manifest exceeds content bound")
+            manifest.append(entry)
+        return tuple(manifest)
+
+    def merge_candidate_manifest(self, identity: "CandidateIdentity",
+                                 allowed_paths: tuple[Path, ...] | list[Path]) -> tuple[dict, ...]:
+        tracked = self.build_safe_file_manifest(allowed_paths)
+        candidate = self.build_candidate_file_manifest(identity, allowed_paths)
+        return tuple(sorted({item["path"]: item for item in (*tracked, *candidate)}.values(),
+                            key=lambda item: item["path"]))
+
+    def validate_supplied_manifest(self, manifest: tuple[Mapping, ...] | list[Mapping],
+                                   allowed_paths: tuple[Path, ...] | list[Path]) -> tuple[dict, ...]:
+        allowed = self.validate_allowed_paths(list(allowed_paths))
+        if len(manifest) > MAX_CANDIDATE_IDENTITY_FILES:
+            raise ValueError("safe manifest exceeds file bound")
+        checked, total, seen = [], 0, set()
+        for raw in manifest:
+            path = str(raw.get("path", ""))
+            if path in seen:
+                raise ValueError("safe manifest contains duplicate path")
+            seen.add(path)
+            entry = self._safe_manifest_entry(path, allowed)
+            if entry != {"path": path, "sha256": str(raw.get("sha256", "")),
+                         "size_bytes": int(raw.get("size_bytes", -1))}:
+                raise ValueError("safe manifest is stale or invalid")
+            total += int(entry["size_bytes"])
+            if total > MAX_CANDIDATE_IDENTITY_BYTES:
+                raise ValueError("safe manifest exceeds content bound")
+            checked.append(entry)
+        tracked = {item["path"]: item for item in self.build_safe_file_manifest(allowed)}
+        supplied = {item["path"]: item for item in checked}
+        if any(supplied.get(path) != item for path, item in tracked.items()):
+            raise ValueError("safe manifest omits or changes tracked content")
+        return tuple(checked)
 
     def read_safe_file(self, value: str, allowed_paths: tuple[Path, ...] | list[Path],
                        manifest: tuple[Mapping, ...] | list[Mapping]) -> bytes:
@@ -415,6 +482,8 @@ class WorkflowJob:
     metadata: dict
     next_retry_at: float | None
     baseline_commit_sha: str | None = None
+    mutation_capable: bool = True
+    baseline_candidate_state_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -605,10 +674,8 @@ class CodexTaskSpec:
         policy = RepoAccessPolicy(root)
         allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
         generated_manifest = policy.build_safe_file_manifest(tuple(Path(path) for path in allowed))
-        manifest = self.safe_file_manifest or generated_manifest
-        if self.safe_file_manifest and _json_exact(list(self.safe_file_manifest), 1_000_000) != _json_exact(
-                list(generated_manifest), 1_000_000):
-            raise ValueError("Codex safe tracked-file manifest is stale or invalid")
+        manifest = (policy.validate_supplied_manifest(self.safe_file_manifest,
+                    tuple(Path(path) for path in allowed)) if self.safe_file_manifest else generated_manifest)
         if not self.task_prompt or len(self.task_prompt.encode()) > MAX_WORK_UNIT_PROMPT_BYTES:
             raise ValueError("Codex task prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":

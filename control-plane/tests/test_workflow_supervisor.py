@@ -397,8 +397,10 @@ def test_audit_payload_and_stage_text_are_secret_safe(tmp_path):
 
 def test_terminal_job_retention_removes_children(tmp_path):
     repository = make_repository(tmp_path)
-    jobs = [repository.create_job(f"done-{index}", "owner") for index in range(3)]
-    for job in jobs:
+    jobs = []
+    for index in range(3):
+        job = repository.create_job(f"done-{index}", "owner")
+        jobs.append(job)
         repository.update_job(job.job_id, status=JobStatus.COMPLETED, current_stage=WorkflowStage.DONE)
     assert repository.prune_terminal_jobs(keep=1) == 2
     assert len(repository.list_jobs()) == 1

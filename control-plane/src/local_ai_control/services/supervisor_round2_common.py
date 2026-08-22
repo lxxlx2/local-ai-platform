@@ -69,10 +69,8 @@ class ReviewTaskSpec:
         policy = RepoAccessPolicy(root)
         allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
         generated_manifest = policy.build_safe_file_manifest(tuple(Path(path) for path in allowed))
-        manifest = self.safe_file_manifest or generated_manifest
-        if self.safe_file_manifest and _json_exact(list(self.safe_file_manifest), 1_000_000) != _json_exact(
-                list(generated_manifest), 1_000_000):
-            raise ValueError("review safe tracked-file manifest is stale or invalid")
+        manifest = (policy.validate_supplied_manifest(self.safe_file_manifest,
+                    tuple(Path(path) for path in allowed)) if self.safe_file_manifest else generated_manifest)
         if not self.task_prompt or len(self.task_prompt.encode()) > 256_000:
             raise ValueError("review prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":

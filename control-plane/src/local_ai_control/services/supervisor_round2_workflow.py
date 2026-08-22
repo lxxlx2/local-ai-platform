@@ -150,8 +150,11 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
             try:
                 self.repository.submitted_review_result(job.job_id, job.owner_id, review_round, unit.review_work_unit_id)
             except KeyError:
+                candidate_file = next(iter(unit.candidate_identity.candidate_paths), None)
+                if not candidate_file:
+                    raise ValueError("demo review requires a bounded candidate file")
                 synthetic = (ReviewResult("FAIL", (ReviewFinding(
-                    "BLOCKING", "control-plane/tests/test_workflow_supervisor.py",
+                    "BLOCKING", candidate_file,
                     "synthetic demo evidence", "synthetic demo revision",
                 ),)) if job.review_round == 0 else ReviewResult("PASS"))
                 self.repository.submit_review_result(job.job_id, job.owner_id, review_round,

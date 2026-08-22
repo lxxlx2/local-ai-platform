@@ -118,6 +118,14 @@ class Round2RepositoryCoreMixin:
         round_number = 0 if stage is WorkflowStage.PRODUCER else int(job.review_round if review_round is None else review_round)
         if round_number < 0 or round_number > job.max_review_rounds:
             raise ValueError("work unit review round outside safe range")
+        if stage is WorkflowStage.REVISION:
+            if not job.baseline_commit_sha:
+                raise ValueError("trusted immutable job baseline is missing")
+            identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
+            policy = RepoAccessPolicy(Path(validated["repo_root"]))
+            validated["safe_file_manifest"] = list(policy.merge_candidate_manifest(
+                identity, tuple(Path(path) for path in validated["allowed_paths"]),
+            ))
         identifier = work_unit_id or str(uuid.uuid4())
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", identifier):
             raise ValueError("invalid work_unit_id")

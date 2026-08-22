@@ -44,7 +44,7 @@ def test_durable_work_unit_survives_reopen_and_is_owner_job_path_secret_safe(tmp
     assert second.reconstruct_codex_task(job.job_id, "owner-a", WorkflowStage.PRODUCER).task_prompt == prompt
     with pytest.raises(PermissionError):
         second.get_work_unit("wu-1", job.job_id, "owner-b")
-    other = second.create_job("other", "owner-a")
+    other = second.create_job("other", "owner-a", mutation_capable=False)
     with pytest.raises(PermissionError):
         second.get_work_unit("wu-1", other.job_id, "owner-a")
     with pytest.raises(ValueError):
@@ -64,7 +64,7 @@ def test_review_findings_persist_reopen_redact_round_isolate_and_revision_reads(
     first = repo(tmp_path)
     job = first.create_job("review", "owner")
     first.update_job(job.job_id, current_stage=WorkflowStage.REVIEW)
-    spec = ReviewTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), "review", True, "LOW", 60,
+    spec = ReviewTaskSpec(AI_ROOT, (AI_ROOT / "control-plane", AI_ROOT / "docs"), "review", True, "LOW", 60,
                           "REVIEW", round2.REVIEW_RESULT_SCHEMA)
     first.create_review_work_unit(job.job_id, "owner", 1, spec, "round1-unit")
     findings = (
@@ -135,7 +135,7 @@ def test_blocked_jobs_cannot_pause_resume_or_retry_around_gates(tmp_path):
         assert supervisor.pause(job.job_id).resume_state == reason
         assert supervisor.resume(job.job_id).resume_state == reason
         assert supervisor.retry(job.job_id).resume_state == reason
-    ordinary = repository.create_job("ordinary", "owner")
+    ordinary = repository.create_job("ordinary", "owner", mutation_capable=False)
     assert supervisor.pause(ordinary.job_id).resume_state == "PAUSED"
     resumed = supervisor.resume(ordinary.job_id)
     assert resumed.status is JobStatus.QUEUED and resumed.resume_state is None
@@ -216,12 +216,10 @@ def test_run_until_terminal_targets_only_requested_job(tmp_path):
     supervisor = WorkflowSupervisor(repository, demo_runners())
     assert supervisor.acquire_singleton()
     a = supervisor.create_demo("owner", job_id="job-a")
-    b = supervisor.create_demo("owner", job_id="job-b")
+    with pytest.raises(RuntimeError, match="MAX_MUTATING_JOBS_IN_SYSTEM"):
+        supervisor.create_demo("owner", job_id="job-b")
     result = supervisor.run_until_terminal(a.job_id)
     assert result.status is JobStatus.COMPLETED
-    untouched = supervisor.status(b.job_id)
-    assert untouched.status is JobStatus.QUEUED and untouched.current_stage is WorkflowStage.INTAKE
-    assert repository.latest_stage_runs(b.job_id) == []
     supervisor.release_singleton(); repository.close()
 
 
