@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -301,7 +302,7 @@ def test_codex_spec_enforces_scope_and_secret_firewall():
         CodexTaskSpec(AI_ROOT, (AI_ROOT / "control-plane",), unsafe_prompt, "LOW", 60, "CODE", {}).validate()
     with pytest.raises(PermissionError):
         CodexTaskSpec(AI_ROOT, (AI_ROOT,), "safe", "LOW", 60, "CODE", {}).validate()
-    blocked = RealCodexRunner().run_task(spec)
+    blocked = RealCodexRunner().run_task(spec, str(uuid.uuid4()))
     assert blocked.status is StageResultStatus.BLOCKED
 
 

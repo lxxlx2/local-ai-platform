@@ -32,6 +32,7 @@ class LeaseKeepingRunner:
         self.heartbeat_interval = heartbeat_interval or max(0.25, min(5.0, ttl / 3.0))
         self.cancel_succeeded = False
         self.external_execution_may_still_be_active = False
+        self.durable_fence_persisted = False
 
     def run(self, context: StageContext) -> StageResult:
         stop = threading.Event()
@@ -57,6 +58,16 @@ class LeaseKeepingRunner:
                     if not self.cancel_succeeded:
                         self.external_execution_may_still_be_active = True
                         self.repository.external_execution_may_still_be_active = True
+                        execution_id = getattr(self.inner, "execution_id", None)
+                        work_unit_id = getattr(self.inner, "work_unit_id", None)
+                        reason = ("LEASE_LOST_CANCELLATION_FAILED" if cancel_attempted.is_set()
+                                  else "LEASE_LOST_CANCELLATION_UNSUPPORTED")
+                        persist_fence = getattr(self.repository, "persist_mutation_fence_external", None)
+                        context_job = getattr(context, "job", None)
+                        self.durable_fence_persisted = bool(persist_fence and context_job and persist_fence(
+                            self.repository.path, context_job.job_id, reason,
+                            work_unit_id, execution_id,
+                        ))
                     return
 
         thread = threading.Thread(target=keeper, name="supervisor-lease-keeper", daemon=True)
@@ -71,6 +82,8 @@ class LeaseKeepingRunner:
                 raise LeaseLostError("lease lost during runner; internal cancellation propagated")
             raise LeaseLostError(
                 "EXTERNAL_EXECUTION_MAY_STILL_BE_ACTIVE; BLOCKED_REQUIRES_RECONCILIATION; "
+                + ("durable fence persisted; " if self.durable_fence_persisted
+                   else "DURABLE_FENCE_PERSIST_FAILED; ")
                 + ("cancellation failed" if cancel_attempted.is_set() else "cancellation unsupported")
             )
         return result
@@ -93,7 +106,8 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
     def _run_selected(self, job: WorkflowJob) -> WorkflowJob:
         self._require_lease()
         if (job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
-                and getattr(self.repository, "external_execution_may_still_be_active", False)):
+                and (getattr(self.repository, "external_execution_may_still_be_active", False)
+                     or self.repository.has_active_mutation_fence())):
             return self.repository.update_job(
                 job.job_id, status=JobStatus.BLOCKED,
                 resume_state="BLOCKED_REQUIRES_RECONCILIATION",
@@ -108,11 +122,7 @@ class Round2WorkflowSupervisor(BaseWorkflowSupervisor):
             result = super()._run_selected(job)
             self._require_lease()
             if job.current_stage is WorkflowStage.REVIEW:
-                round_number = job.review_round + 1
-                unit = self.repository.review_work_unit_for_round(job.job_id, job.owner_id, round_number)
-                self.repository.mark_review_result_consumed(
-                    job.job_id, job.owner_id, round_number, unit.review_work_unit_id,
-                )
+                self.repository.reconcile_submitted_review_results()
             return result
         finally:
             self.runners[job.current_stage] = original

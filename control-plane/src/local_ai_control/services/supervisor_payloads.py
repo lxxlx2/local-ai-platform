@@ -42,12 +42,15 @@ class DurablePayloadMixin:
         try:
             with self.db:
                 self.db.execute(
-                    "INSERT INTO supervisor_work_units VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO supervisor_work_units "
+                    "(work_unit_id,job_id,owner_id,stage,review_round,repo_root,allowed_paths_json,risk_level,"
+                    "timeout_seconds,model_role,expected_output_schema_json,prompt_content_ref,prompt_sha256,"
+                    "created_at,status,safe_file_manifest_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier, job_id, str(owner_id), stage.value, round_number, validated["repo_root"],
                      _json_exact(validated["allowed_paths"], 16_000), validated["risk_level"],
                      validated["timeout_seconds"], validated["model_role"],
                      _json_exact(validated["expected_output_schema"], 16_000), content_ref, prompt_sha,
-                     created, "READY"),
+                     created, "READY", _json_exact(validated["safe_file_manifest"], 1_000_000)),
                 )
         except Exception:
             self.content_store.delete(content_ref)
@@ -63,6 +66,7 @@ class DurablePayloadMixin:
             float(row["timeout_seconds"]), row["model_role"], json.loads(row["expected_output_schema_json"]),
             row["prompt_content_ref"], row["prompt_sha256"], row["created_at"], row["status"],
             int(row["review_round"]),
+            tuple(json.loads(row["safe_file_manifest_json"] or "[]")),
         )
 
     def get_work_unit(self, work_unit_id: str, job_id: str, owner_id: str) -> WorkUnitSpec:
@@ -94,7 +98,8 @@ class DurablePayloadMixin:
         unit = self.work_unit_for_stage(job_id, owner_id, stage, review_round)
         prompt = self.load_work_unit_prompt(unit.work_unit_id, job_id, owner_id)
         spec = CodexTaskSpec(unit.repo_root, unit.allowed_paths, prompt, unit.risk_level,
-                             unit.timeout_seconds, unit.model_role, unit.expected_output_schema)
+                             unit.timeout_seconds, unit.model_role, unit.expected_output_schema,
+                             unit.safe_file_manifest)
         persisted = spec.validate()
         if persisted["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("work unit prompt hash mismatch")

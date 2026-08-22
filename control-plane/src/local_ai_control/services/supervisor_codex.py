@@ -51,7 +51,7 @@ class CodexCapabilityProbe:
 
 class CodexTaskRunner(Protocol):
     cancellation_supported: bool
-    def run_task(self, spec: CodexTaskSpec) -> StageResult: ...
+    def run_task(self, spec: CodexTaskSpec, execution_id: str) -> StageResult: ...
     def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool: ...
 
 
@@ -65,8 +65,12 @@ class RealCodexRunner:
     def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool:
         return False
 
-    def run_task(self, spec: CodexTaskSpec) -> StageResult:
+    def run_task(self, spec: CodexTaskSpec, execution_id: str) -> StageResult:
         spec.validate()
+        try:
+            uuid.UUID(execution_id)
+        except (ValueError, AttributeError) as error:
+            raise ValueError("execution_id must be a canonical UUID") from error
         return StageResult(
             StageResultStatus.BLOCKED,
             "Real Codex task execution is disabled pending independent review",
@@ -81,6 +85,8 @@ class PersistedCodexStageRunner:
     def __init__(self, task_runner: CodexTaskRunner | None = None):
         self.task_runner = task_runner or RealCodexRunner()
         self.execution_id: str | None = None
+        self.work_unit_id: str | None = None
+        self.repository = None
         self.cancellation_result: str | None = None
 
     @property
@@ -90,9 +96,16 @@ class PersistedCodexStageRunner:
     def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool:
         if not self.cancellation_supported:
             self.cancellation_result = "UNSUPPORTED"
+            if self.execution_id and self.repository:
+                self.repository.record_execution_cancellation_external(
+                    self.repository.path, self.execution_id, "UNSUPPORTED",
+                )
             return False
         active = self.execution_id
-        if execution_id is not None and active is not None and execution_id != active:
+        if active is None:
+            self.cancellation_result = "NO_ACTIVE_EXECUTION"
+            return False
+        if execution_id is not None and execution_id != active:
             self.cancellation_result = "EXECUTION_ID_MISMATCH"
             return False
         if active is not None and not re.fullmatch(r"[a-f0-9-]{36}", active):
@@ -102,8 +115,19 @@ class PersistedCodexStageRunner:
             result = bool(self.task_runner.cancel(execution_id=active, reason=reason))
         except Exception:
             self.cancellation_result = "CANCEL_FAILED"
+            if active and self.repository:
+                self.repository.record_execution_cancellation_external(
+                    self.repository.path, active, "FAILED",
+                )
             return False
         self.cancellation_result = "CANCELED" if result else "CANCEL_FAILED"
+        if active and self.repository:
+            persisted = self.repository.record_execution_cancellation_external(
+                self.repository.path, active, "CANCELED" if result else "FAILED",
+            )
+            if not persisted:
+                self.cancellation_result = "CANCEL_STATUS_PERSIST_FAILED"
+                return False
         return result
 
     def run(self, context: StageContext) -> StageResult:
@@ -112,14 +136,43 @@ class PersistedCodexStageRunner:
         if context.stage is WorkflowStage.REVISION and not context.current_review_findings():
             return StageResult(StageResultStatus.BLOCKED, "Revision findings unavailable", error="REVISION_FINDINGS_NOT_AVAILABLE")
         try:
+            unit = context.repository.work_unit_for_stage(
+                context.job.job_id, context.job.owner_id, context.stage,
+                context.job.review_round if context.stage is WorkflowStage.REVISION else 0,
+            )
             spec = context.repository.reconstruct_codex_task(
                 context.job.job_id, context.job.owner_id, context.stage,
                 context.job.review_round if context.stage is WorkflowStage.REVISION else 0,
             )
-        except (KeyError, ValueError, PermissionError) as error:
+        except Exception as error:
             return StageResult(StageResultStatus.BLOCKED, "Durable work unit unavailable or invalid", error=type(error).__name__)
         self.execution_id = str(uuid.uuid4())
+        self.work_unit_id = unit.work_unit_id
+        self.repository = context.repository
+        provider = type(self.task_runner).__name__
         try:
-            return self.task_runner.run_task(spec)
+            context.repository.start_execution(
+                self.execution_id, context.job.job_id, unit.work_unit_id, context.stage,
+                context.idempotency_key, provider,
+            )
+        except Exception as error:
+            self.execution_id = None
+            self.work_unit_id = None
+            self.repository = None
+            return StageResult(
+                StageResultStatus.BLOCKED, "Durable execution start denied", error=type(error).__name__,
+            )
+        try:
+            result = self.task_runner.run_task(spec.execution_view(), self.execution_id)
+            context.repository.complete_execution(self.execution_id, result)
+            return result
+        except Exception:
+            context.repository.persist_mutation_fence(
+                context.job.job_id, "EXTERNAL_EXECUTION_UNCERTAIN",
+                unit.work_unit_id, self.execution_id,
+            )
+            raise
         finally:
             self.execution_id = None
+            self.work_unit_id = None
+            self.repository = None

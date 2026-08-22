@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -12,8 +13,9 @@ from typing import Mapping
 from local_ai_control.services.security import SecretFirewall
 from .supervisor_contracts import (
     AI_ROOT, SUPERVISOR_DB, LOCK_TTL_SECONDS, MAX_ACTIVE_JOBS, MAX_EVENTS_PER_JOB, MAX_TERMINAL_JOBS,
-    JobStatus, StageResult, WorkflowJob, WorkflowStage, _bounded, _safe_audit_value, _safe_json,
-    _safe_metadata, _safe_text, ensure_private_directory, ensure_private_file, utc_now, OwnerPrivateContentStore,
+    CandidateIdentityProvider, JobStatus, StageResult, StageResultStatus, WorkflowJob, WorkflowStage,
+    _bounded, _json_exact, _safe_audit_value, _safe_json, _safe_metadata, _safe_text,
+    ensure_private_directory, ensure_private_file, utc_now, OwnerPrivateContentStore,
 )
 from .supervisor_payloads import DurablePayloadMixin
 
@@ -21,8 +23,9 @@ from .supervisor_payloads import DurablePayloadMixin
 class SupervisorRepository(DurablePayloadMixin):
     """Owner-private durable state and executable payloads for the workflow supervisor."""
 
-    def __init__(self, path: Path = SUPERVISOR_DB):
+    def __init__(self, path: Path = SUPERVISOR_DB, candidate_identity_provider=None):
         self.path = Path(path)
+        self.candidate_identity_provider = candidate_identity_provider or CandidateIdentityProvider(AI_ROOT)
         ensure_private_directory(self.path.parent)
         self.db = sqlite3.connect(self.path, timeout=5)
         ensure_private_file(self.path)
@@ -42,7 +45,8 @@ class SupervisorRepository(DurablePayloadMixin):
               attempt INTEGER NOT NULL DEFAULT 0, review_round INTEGER NOT NULL DEFAULT 0,
               max_review_rounds INTEGER NOT NULL, max_attempts_per_stage INTEGER NOT NULL,
               last_error TEXT, resume_state TEXT, created_by TEXT NOT NULL,
-              metadata_json TEXT NOT NULL, next_retry_at REAL
+              metadata_json TEXT NOT NULL, next_retry_at REAL,
+              baseline_commit_sha TEXT
             );
             CREATE INDEX IF NOT EXISTS supervisor_jobs_queue_idx
               ON supervisor_jobs(status, next_retry_at, created_at);
@@ -51,6 +55,7 @@ class SupervisorRepository(DurablePayloadMixin):
               attempt INTEGER NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
               completed_at TEXT, idempotency_key TEXT NOT NULL UNIQUE,
               summary TEXT, error TEXT, metrics_json TEXT NOT NULL DEFAULT '{}',
+              review_round INTEGER NOT NULL DEFAULT 0,
               FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id)
             );
             CREATE INDEX IF NOT EXISTS supervisor_stage_runs_job_idx
@@ -80,6 +85,7 @@ class SupervisorRepository(DurablePayloadMixin):
               model_role TEXT NOT NULL, expected_output_schema_json TEXT NOT NULL,
               prompt_content_ref TEXT NOT NULL, prompt_sha256 TEXT NOT NULL,
               created_at TEXT NOT NULL, status TEXT NOT NULL,
+              safe_file_manifest_json TEXT,
               FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id),
               UNIQUE(job_id, stage, review_round)
             );
@@ -95,8 +101,37 @@ class SupervisorRepository(DurablePayloadMixin):
             );
             CREATE INDEX IF NOT EXISTS supervisor_review_findings_job_idx
               ON supervisor_review_findings(job_id, review_round, created_at);
+            CREATE TABLE IF NOT EXISTS supervisor_executions(
+              execution_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, work_unit_id TEXT NOT NULL,
+              stage TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
+              started_at TEXT NOT NULL, completed_at TEXT, completion_status TEXT NOT NULL,
+              result_hash TEXT, cancellation_status TEXT NOT NULL DEFAULT 'NOT_REQUESTED',
+              FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id),
+              FOREIGN KEY(work_unit_id) REFERENCES supervisor_work_units(work_unit_id),
+              FOREIGN KEY(run_id) REFERENCES supervisor_stage_runs(run_id)
+            );
+            CREATE INDEX IF NOT EXISTS supervisor_executions_job_idx
+              ON supervisor_executions(job_id,stage,started_at);
+            CREATE TABLE IF NOT EXISTS supervisor_execution_fences(
+              fence_name TEXT PRIMARY KEY, job_id TEXT NOT NULL, work_unit_id TEXT,
+              execution_id TEXT, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+              status TEXT NOT NULL, requires_manual_reconciliation INTEGER NOT NULL,
+              cleared_at TEXT, reconciliation_note_sha256 TEXT,
+              FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id)
+            );
+            CREATE INDEX IF NOT EXISTS supervisor_execution_fences_status_idx
+              ON supervisor_execution_fences(status,created_at);
             """
         )
+        migrations = (
+            ("supervisor_jobs", "baseline_commit_sha", "TEXT"),
+            ("supervisor_stage_runs", "review_round", "INTEGER NOT NULL DEFAULT 0"),
+            ("supervisor_work_units", "safe_file_manifest_json", "TEXT"),
+        )
+        for table, column, definition in migrations:
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self.db.commit()
         for candidate in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             if candidate.exists():
@@ -115,6 +150,7 @@ class SupervisorRepository(DurablePayloadMixin):
             max_attempts_per_stage=row["max_attempts_per_stage"], last_error=row["last_error"],
             resume_state=row["resume_state"], created_by=row["created_by"],
             metadata=json.loads(row["metadata_json"]), next_retry_at=row["next_retry_at"],
+            baseline_commit_sha=row["baseline_commit_sha"],
         )
 
     def create_job(self, title: str, owner_id: str, project_scope: str = str(AI_ROOT),
@@ -128,6 +164,9 @@ class SupervisorRepository(DurablePayloadMixin):
             raise ValueError("job title rejected by Secret Firewall")
         if not 1 <= max_review_rounds <= 5 or not 1 <= max_attempts_per_stage <= 5:
             raise ValueError("round/attempt limit outside safe range")
+        supplied_metadata = dict(metadata or {})
+        if {"baseline_commit_sha", "candidate_base_commit_sha"} & set(supplied_metadata):
+            raise ValueError("trusted baseline cannot be supplied through metadata")
         now, identifier = utc_now(), job_id or str(uuid.uuid4())
         if not re.fullmatch(r"[A-Za-z0-9._:-]{1,46}", identifier):
             raise ValueError("job_id is not callback-safe")
@@ -138,13 +177,17 @@ class SupervisorRepository(DurablePayloadMixin):
                 if job.owner_id != str(owner_id) or job.title != title:
                     raise ValueError("idempotency key conflicts with existing job")
                 return job
+        baseline = self.candidate_identity_provider.capture_baseline()
         with self.db:
             self.db.execute(
-                "INSERT INTO supervisor_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO supervisor_jobs "
+                "(job_id,title,project_scope,created_at,updated_at,owner_id,risk_level,status,current_stage,attempt,"
+                "review_round,max_review_rounds,max_attempts_per_stage,last_error,resume_state,created_by,"
+                "metadata_json,next_retry_at,baseline_commit_sha) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (identifier, _bounded(title, 200), str(resolved), now, now, str(owner_id), risk_level,
                  JobStatus.QUEUED.value, WorkflowStage.INTAKE.value, 0, 0, max_review_rounds,
                  max_attempts_per_stage, None, None, created_by,
-                 _safe_json(_safe_metadata(metadata), 16_000), None),
+                 _safe_json(_safe_metadata(supplied_metadata), 16_000), None, baseline),
             )
             self.record_event(identifier, "JOB_CREATED", WorkflowStage.INTAKE,
                               {"risk_level": risk_level}, commit=False)
@@ -186,6 +229,8 @@ class SupervisorRepository(DurablePayloadMixin):
     def update_job_metadata(self, job_id: str, metadata_patch: Mapping) -> WorkflowJob:
         if not isinstance(metadata_patch, Mapping):
             raise TypeError("metadata patch must be a Mapping")
+        if {"baseline_commit_sha", "candidate_base_commit_sha"} & set(metadata_patch):
+            raise ValueError("trusted baseline is immutable and cannot be patched")
         current = self.get_job(job_id)
         merged = dict(current.metadata)
         merged.update(dict(metadata_patch))
@@ -242,6 +287,10 @@ class SupervisorRepository(DurablePayloadMixin):
     def begin_stage(self, job: WorkflowJob) -> tuple[str, int, str] | None:
         try:
             self.db.execute("BEGIN IMMEDIATE")
+            if (job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
+                    and self._active_mutation_fence_row() is not None):
+                self.db.rollback()
+                return None
             active = self.db.execute(
                 "SELECT COUNT(*) FROM supervisor_jobs WHERE status=? AND job_id<>?",
                 (JobStatus.RUNNING.value, job.job_id),
@@ -252,10 +301,13 @@ class SupervisorRepository(DurablePayloadMixin):
             attempt = self.stage_attempts(job.job_id, job.current_stage) + 1
             key = f"{job.job_id}:{job.current_stage.value}:{attempt}"
             run_id = str(uuid.uuid4())
+            effective_review_round = job.review_round + 1 if job.current_stage is WorkflowStage.REVIEW else job.review_round
             self.db.execute(
-                "INSERT INTO supervisor_stage_runs(run_id,job_id,stage,attempt,status,started_at,idempotency_key) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (run_id, job.job_id, job.current_stage.value, attempt, "RUNNING", utc_now(), key),
+                "INSERT INTO supervisor_stage_runs"
+                "(run_id,job_id,stage,attempt,status,started_at,idempotency_key,review_round) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (run_id, job.job_id, job.current_stage.value, attempt, "RUNNING", utc_now(), key,
+                 effective_review_round),
             )
             self.db.execute(
                 "UPDATE supervisor_jobs SET status=?,attempt=?,updated_at=?,last_error=NULL WHERE job_id=?",
@@ -292,10 +344,257 @@ class SupervisorRepository(DurablePayloadMixin):
             "SELECT * FROM supervisor_stage_runs WHERE job_id=? ORDER BY started_at", (job_id,)
         ).fetchall()]
 
+    @staticmethod
+    def _validate_execution_id(execution_id: str) -> str:
+        try:
+            return str(uuid.UUID(str(execution_id)))
+        except (ValueError, AttributeError) as error:
+            raise ValueError("execution_id must be a canonical UUID") from error
+
+    def start_execution(self, execution_id: str, job_id: str, work_unit_id: str,
+                        stage: WorkflowStage, idempotency_key: str, provider: str) -> dict:
+        identifier = self._validate_execution_id(execution_id)
+        if stage not in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}:
+            raise ValueError("execution records are restricted to mutating stages")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", str(provider)):
+            raise ValueError("unsafe execution provider identifier")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self._active_mutation_fence_row() is not None:
+                self.db.rollback()
+                raise ValueError("active mutation fence denies execution start")
+            run = self.db.execute(
+                "SELECT * FROM supervisor_stage_runs WHERE idempotency_key=?", (idempotency_key,),
+            ).fetchone()
+            unit = self.db.execute(
+                "SELECT * FROM supervisor_work_units WHERE work_unit_id=?", (work_unit_id,),
+            ).fetchone()
+            if (not run or run["job_id"] != job_id or run["stage"] != stage.value or run["status"] != "RUNNING"
+                    or not unit or unit["job_id"] != job_id or unit["stage"] != stage.value
+                    or int(unit["review_round"]) != int(run["review_round"])):
+                self.db.rollback()
+                raise ValueError("execution binding does not match durable run/work unit")
+            existing = self.db.execute(
+                "SELECT * FROM supervisor_executions WHERE execution_id=?", (identifier,),
+            ).fetchone()
+            if existing:
+                expected = (job_id, work_unit_id, stage.value, run["run_id"], str(provider))
+                actual = tuple(existing[key] for key in ("job_id", "work_unit_id", "stage", "run_id", "provider"))
+                if actual != expected:
+                    self.db.rollback()
+                    raise ValueError("execution_id conflicts with durable binding")
+                self.db.commit()
+                return dict(existing)
+            self.db.execute(
+                "INSERT INTO supervisor_executions"
+                "(execution_id,job_id,work_unit_id,stage,run_id,provider,started_at,completion_status) "
+                "VALUES(?,?,?,?,?,?,?,'STARTED')",
+                (identifier, job_id, work_unit_id, stage.value, run["run_id"], str(provider), utc_now()),
+            )
+            self.db.commit()
+        except sqlite3.Error:
+            self.db.rollback()
+            raise
+        return dict(self.db.execute(
+            "SELECT * FROM supervisor_executions WHERE execution_id=?", (identifier,),
+        ).fetchone())
+
+    def complete_execution(self, execution_id: str, result: StageResult) -> dict:
+        identifier = self._validate_execution_id(execution_id)
+        row = self.db.execute(
+            "SELECT * FROM supervisor_executions WHERE execution_id=?", (identifier,),
+        ).fetchone()
+        if not row or row["completion_status"] != "STARTED":
+            raise ValueError("execution is not in a completable state")
+        status = ("COMPLETED_CONFIRMED"
+                  if result.status is StageResultStatus.PASS and row["cancellation_status"] == "NOT_REQUESTED"
+                  else "COMPLETED_NONPASS")
+        digest = hashlib.sha256(_json_exact({
+            "status": result.status.value,
+            "summary_sha256": hashlib.sha256(str(result.summary).encode()).hexdigest(),
+            "error_sha256": hashlib.sha256(str(result.error or "").encode()).hexdigest(),
+        }, 2_000).encode()).hexdigest()
+        with self.db:
+            self.db.execute(
+                "UPDATE supervisor_executions SET completed_at=?,completion_status=?,result_hash=? "
+                "WHERE execution_id=? AND completion_status='STARTED'",
+                (utc_now(), status, digest, identifier),
+            )
+        return dict(self.db.execute(
+            "SELECT * FROM supervisor_executions WHERE execution_id=?", (identifier,),
+        ).fetchone())
+
+    def record_execution_cancellation(self, execution_id: str, cancellation_status: str) -> None:
+        identifier = self._validate_execution_id(execution_id)
+        if cancellation_status not in {"CANCELED", "FAILED", "UNSUPPORTED"}:
+            raise ValueError("invalid execution cancellation status")
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE supervisor_executions SET cancellation_status=? WHERE execution_id=?",
+                (cancellation_status, identifier),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("execution record not found")
+
+    @staticmethod
+    def record_execution_cancellation_external(path: Path, execution_id: str,
+                                               cancellation_status: str) -> bool:
+        try:
+            identifier = str(uuid.UUID(str(execution_id)))
+        except (ValueError, AttributeError):
+            return False
+        if cancellation_status not in {"CANCELED", "FAILED", "UNSUPPORTED"}:
+            return False
+        try:
+            db = sqlite3.connect(path, timeout=2)
+            with db:
+                cursor = db.execute(
+                    "UPDATE supervisor_executions SET cancellation_status=? WHERE execution_id=?",
+                    (cancellation_status, identifier),
+                )
+            db.close()
+            return cursor.rowcount == 1
+        except sqlite3.Error:
+            return False
+
+    def confirmed_execution_for_run(self, run_id: str, job_id: str, stage: WorkflowStage) -> dict | None:
+        row = self.db.execute(
+            "SELECT * FROM supervisor_executions WHERE run_id=? AND job_id=? AND stage=? "
+            "AND completion_status='COMPLETED_CONFIRMED' AND completed_at IS NOT NULL",
+            (run_id, job_id, stage.value),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def _active_mutation_fence_row(self):
+        return self.db.execute(
+            "SELECT * FROM supervisor_execution_fences WHERE status='ACTIVE' "
+            "AND requires_manual_reconciliation=1 ORDER BY created_at LIMIT 1"
+        ).fetchone()
+
+    def active_mutation_fence(self) -> dict | None:
+        row = self._active_mutation_fence_row()
+        return dict(row) if row else None
+
+    def has_active_mutation_fence(self) -> bool:
+        return self._active_mutation_fence_row() is not None
+
+    def persist_mutation_fence(self, job_id: str, reason: str,
+                               work_unit_id: str | None = None,
+                               execution_id: str | None = None) -> dict:
+        job = self.get_job(job_id)
+        if job.current_stage not in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}:
+            raise ValueError("mutation fence requires a mutating job stage")
+        identifier = self._validate_execution_id(execution_id) if execution_id else None
+        if identifier:
+            execution = self.db.execute(
+                "SELECT * FROM supervisor_executions WHERE execution_id=? AND job_id=?",
+                (identifier, job_id),
+            ).fetchone()
+            if not execution:
+                raise ValueError("mutation fence execution binding mismatch")
+            work_unit_id = execution["work_unit_id"]
+            basis = identifier
+        else:
+            run = self.db.execute(
+                "SELECT run_id FROM supervisor_stage_runs WHERE job_id=? AND stage=? AND status='RUNNING' "
+                "ORDER BY started_at DESC LIMIT 1", (job_id, job.current_stage.value),
+            ).fetchone()
+            basis = run["run_id"] if run else job_id
+        fence_name = f"mutation:{basis}"
+        safe_reason = _safe_text(reason, 200) or "EXTERNAL_EXECUTION_UNCERTAIN"
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO supervisor_execution_fences"
+                "(fence_name,job_id,work_unit_id,execution_id,reason,created_at,status,requires_manual_reconciliation) "
+                "VALUES(?,?,?,?,?,?,'ACTIVE',1)",
+                (fence_name, job_id, work_unit_id, identifier, safe_reason, utc_now()),
+            )
+        return dict(self.db.execute(
+            "SELECT * FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
+        ).fetchone())
+
+    @staticmethod
+    def persist_mutation_fence_external(path: Path, job_id: str, reason: str,
+                                        work_unit_id: str | None = None,
+                                        execution_id: str | None = None) -> bool:
+        try:
+            identifier = str(uuid.UUID(str(execution_id))) if execution_id else None
+        except (ValueError, AttributeError):
+            return False
+        try:
+            db = sqlite3.connect(path, timeout=2)
+            db.row_factory = sqlite3.Row
+            job = db.execute("SELECT * FROM supervisor_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if not job or job["current_stage"] not in {WorkflowStage.PRODUCER.value, WorkflowStage.REVISION.value}:
+                db.close()
+                return False
+            if identifier:
+                execution = db.execute(
+                    "SELECT * FROM supervisor_executions WHERE execution_id=? AND job_id=?",
+                    (identifier, job_id),
+                ).fetchone()
+                if not execution:
+                    db.close()
+                    return False
+                work_unit_id = execution["work_unit_id"]
+                basis = identifier
+            else:
+                if work_unit_id:
+                    unit = db.execute(
+                        "SELECT 1 FROM supervisor_work_units WHERE work_unit_id=? AND job_id=?",
+                        (work_unit_id, job_id),
+                    ).fetchone()
+                    if not unit:
+                        work_unit_id = None
+                run = db.execute(
+                    "SELECT run_id FROM supervisor_stage_runs WHERE job_id=? AND stage=? AND status='RUNNING' "
+                    "ORDER BY started_at DESC LIMIT 1", (job_id, job["current_stage"]),
+                ).fetchone()
+                basis = run["run_id"] if run else job_id
+            fence_name = f"mutation:{basis}"
+            safe_reason = reason if reason in {
+                "EXTERNAL_EXECUTION_UNCERTAIN", "LEASE_LOST_CANCELLATION_FAILED",
+                "LEASE_LOST_CANCELLATION_UNSUPPORTED",
+            } else "EXTERNAL_EXECUTION_UNCERTAIN"
+            with db:
+                db.execute(
+                    "INSERT OR IGNORE INTO supervisor_execution_fences"
+                    "(fence_name,job_id,work_unit_id,execution_id,reason,created_at,status,"
+                    "requires_manual_reconciliation) VALUES(?,?,?,?,?,?,'ACTIVE',1)",
+                    (fence_name, job_id, work_unit_id, identifier, safe_reason, utc_now()),
+                )
+            row = db.execute(
+                "SELECT status FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
+            ).fetchone()
+            db.close()
+            return bool(row and row["status"] == "ACTIVE")
+        except sqlite3.Error:
+            return False
+
+    def reconcile_mutation_fence(self, fence_name: str, reconciliation_note: str) -> dict:
+        if not reconciliation_note or SecretFirewall().inspect(reconciliation_note).action == "BLOCK":
+            raise ValueError("manual reconciliation note is required and must be secret-free")
+        digest = hashlib.sha256(reconciliation_note.encode()).hexdigest()
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE supervisor_execution_fences SET status='CLEARED',requires_manual_reconciliation=0,"
+                "cleared_at=?,reconciliation_note_sha256=? WHERE fence_name=? AND status='ACTIVE' "
+                "AND requires_manual_reconciliation=1",
+                (utc_now(), digest, fence_name),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("active mutation fence not found")
+        return dict(self.db.execute(
+            "SELECT * FROM supervisor_execution_fences WHERE fence_name=?", (fence_name,),
+        ).fetchone())
+
     def prune_terminal_jobs(self, keep: int = MAX_TERMINAL_JOBS) -> int:
         keep = min(max(int(keep), 1), MAX_TERMINAL_JOBS)
         rows = self.db.execute(
-            "SELECT job_id FROM supervisor_jobs WHERE status IN (?,?,?,?) ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
+            "SELECT job_id FROM supervisor_jobs WHERE status IN (?,?,?,?) "
+            "AND NOT EXISTS (SELECT 1 FROM supervisor_execution_fences f WHERE f.job_id=supervisor_jobs.job_id "
+            "AND f.status='ACTIVE' AND f.requires_manual_reconciliation=1) "
+            "ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
             (JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELED.value,
              JobStatus.BLOCKED.value, keep),
         ).fetchall()
@@ -307,6 +606,8 @@ class SupervisorRepository(DurablePayloadMixin):
                 ).fetchall()
                 for unit in units:
                     self.content_store.delete(unit["prompt_content_ref"])
+                self.db.execute("DELETE FROM supervisor_execution_fences WHERE job_id=?", (job_id,))
+                self.db.execute("DELETE FROM supervisor_executions WHERE job_id=?", (job_id,))
                 self.db.execute("DELETE FROM supervisor_review_findings WHERE job_id=?", (job_id,))
                 self.db.execute("DELETE FROM supervisor_work_units WHERE job_id=?", (job_id,))
                 self.db.execute("DELETE FROM supervisor_artifacts WHERE job_id=?", (job_id,))

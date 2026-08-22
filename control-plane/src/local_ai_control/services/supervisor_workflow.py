@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import os
-import re
 import time
 import uuid
 from typing import Mapping
@@ -121,6 +119,8 @@ class WorkflowSupervisor:
 
     def recover_interrupted(self) -> int:
         recovered = 0
+        if hasattr(self.repository, "reconcile_submitted_review_results"):
+            self.repository.reconcile_submitted_review_results()
         for job in self.repository.list_jobs(limit=200):
             if job.status is not JobStatus.RUNNING:
                 continue
@@ -130,12 +130,13 @@ class WorkflowSupervisor:
                 (job.job_id, job.current_stage.value),
             ).fetchone()
             if latest and latest["status"] == StageResultStatus.PASS.value and latest["completed_at"]:
-                metrics = json.loads(latest["metrics_json"] or "{}")
                 mutating = job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
-                confirmed = (
-                    metrics.get("completion_provenance_confirmed") is True
-                    and bool(re.fullmatch(r"[a-f0-9-]{36}", str(metrics.get("execution_id", ""))))
-                )
+                confirmed = (not mutating or (
+                    self.repository.confirmed_execution_for_run(
+                        latest["run_id"], job.job_id, job.current_stage,
+                    ) is not None
+                    and not self.repository.has_active_mutation_fence()
+                ))
                 if mutating and not confirmed:
                     self.repository.update_job(
                         job.job_id, status=JobStatus.BLOCKED,

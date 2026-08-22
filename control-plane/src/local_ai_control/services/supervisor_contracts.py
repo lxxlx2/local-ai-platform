@@ -104,6 +104,56 @@ class RepoAccessPolicy:
             raise PermissionError("candidate path outside reviewer allowed paths")
         return relative.as_posix()
 
+    def build_safe_file_manifest(self, allowed_paths: tuple[Path, ...] | list[Path]) -> tuple[dict, ...]:
+        """Return a bounded manifest of safe tracked files; parent access is never delegated."""
+        allowed = self.validate_allowed_paths(list(allowed_paths))
+        relative_roots = [path.relative_to(self.repo_root).as_posix() for path in allowed]
+        completed = subprocess.run(
+            ("git", "ls-files", "-z", "--", *relative_roots), cwd=self.repo_root,
+            capture_output=True, shell=False, timeout=10, check=False,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("safe tracked-file manifest Git probe failed")
+        paths = sorted({item for item in completed.stdout.decode("utf-8", errors="strict").split("\0") if item})
+        if len(paths) > MAX_CANDIDATE_IDENTITY_FILES:
+            raise ValueError("safe tracked-file manifest exceeds file bound")
+        manifest, total = [], 0
+        for value in paths:
+            try:
+                normalized = self.validate_candidate_path(value, allowed)
+            except PermissionError:
+                continue
+            candidate = self.repo_root / normalized
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            payload = candidate.read_bytes()
+            total += len(payload)
+            if total > MAX_CANDIDATE_IDENTITY_BYTES:
+                raise ValueError("safe tracked-file manifest exceeds content bound")
+            manifest.append({
+                "path": normalized,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            })
+        return tuple(manifest)
+
+    def read_safe_file(self, value: str, allowed_paths: tuple[Path, ...] | list[Path],
+                       manifest: tuple[Mapping, ...] | list[Mapping]) -> bytes:
+        normalized = self.validate_candidate_path(value, tuple(allowed_paths))
+        entries = {str(item.get("path", "")): item for item in manifest}
+        entry = entries.get(normalized)
+        if entry is None:
+            raise PermissionError("file is outside the safe tracked-file manifest")
+        candidate = self.repo_root / normalized
+        if candidate.is_symlink() or not candidate.is_file():
+            raise PermissionError("safe manifest file is no longer a regular file")
+        payload = candidate.read_bytes()
+        if (len(payload) != int(entry.get("size_bytes", -1))
+                or hashlib.sha256(payload).hexdigest() != str(entry.get("sha256", ""))):
+            raise ValueError("safe tracked-file manifest integrity mismatch")
+        return payload
+
 
 AgentPathPolicy = RepoAccessPolicy
 
@@ -152,6 +202,12 @@ class CandidateIdentity:
             raise ValueError("commit candidate identity requires commit SHA")
         if ref_type == "TREE_MANIFEST" and not tree:
             raise ValueError("tree candidate identity requires tree SHA")
+        try:
+            created_value = datetime.fromisoformat(created)
+        except ValueError as error:
+            raise ValueError("invalid candidate identity creation timestamp") from error
+        if created_value.tzinfo is None:
+            raise ValueError("candidate identity creation timestamp must be timezone-aware")
         return cls(ref_type, str(commit) if commit else None, str(tree) if tree else None,
                    base, diff, created, paths, deleted)
 
@@ -178,6 +234,18 @@ class CandidateIdentityProvider:
             raise RuntimeError("candidate identity Git probe failed")
         return completed.stdout
 
+    def validate_baseline(self, baseline_commit_sha: str) -> str:
+        value = str(baseline_commit_sha)
+        if not re.fullmatch(r"[a-f0-9]{40}", value):
+            raise ValueError("trusted baseline requires a full commit SHA")
+        if self._git("cat-file", "-t", value).decode().strip() != "commit":
+            raise ValueError("trusted baseline does not identify a commit")
+        self._git("merge-base", "--is-ancestor", value, "HEAD")
+        return value
+
+    def capture_baseline(self) -> str:
+        return self.validate_baseline(self._git("rev-parse", "HEAD").decode().strip())
+
     @staticmethod
     def _parse_name_status(payload: bytes) -> list[tuple[str, str]]:
         fields = payload.decode("utf-8", errors="strict").split("\0")
@@ -196,7 +264,9 @@ class CandidateIdentityProvider:
 
     def snapshot(self, base_commit_sha: str | None = None) -> CandidateIdentity:
         head = self._git("rev-parse", "HEAD").decode().strip()
-        base = base_commit_sha or self._git("rev-parse", "main").decode().strip()
+        base = self.validate_baseline(base_commit_sha) if base_commit_sha else self.validate_baseline(
+            self._git("rev-parse", "main").decode().strip()
+        )
         if not re.fullmatch(r"[a-f0-9]{40}", head) or not re.fullmatch(r"[a-f0-9]{40}", base):
             raise ValueError("candidate identity requires full Git SHAs")
         changes = self._parse_name_status(self._git("diff", "--name-status", "-z", "--find-renames", base, "--"))
@@ -344,6 +414,7 @@ class WorkflowJob:
     created_by: str
     metadata: dict
     next_retry_at: float | None
+    baseline_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -525,6 +596,7 @@ class CodexTaskSpec:
     timeout_seconds: float
     model_role: str
     expected_output_schema: dict
+    safe_file_manifest: tuple[dict, ...] = ()
 
     def validate(self) -> dict:
         root = self.repo_root.resolve()
@@ -532,6 +604,11 @@ class CodexTaskSpec:
             raise PermissionError("Codex repo_root denied")
         policy = RepoAccessPolicy(root)
         allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
+        generated_manifest = policy.build_safe_file_manifest(tuple(Path(path) for path in allowed))
+        manifest = self.safe_file_manifest or generated_manifest
+        if self.safe_file_manifest and _json_exact(list(self.safe_file_manifest), 1_000_000) != _json_exact(
+                list(generated_manifest), 1_000_000):
+            raise ValueError("Codex safe tracked-file manifest is stale or invalid")
         if not self.task_prompt or len(self.task_prompt.encode()) > MAX_WORK_UNIT_PROMPT_BYTES:
             raise ValueError("Codex task prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":
@@ -548,7 +625,25 @@ class CodexTaskSpec:
             "timeout_seconds": float(self.timeout_seconds),
             "model_role": self.model_role,
             "expected_output_schema": schema,
+            "safe_file_manifest": list(manifest),
         }
+
+    def read_safe_file(self, value: str) -> bytes:
+        validated = self.validate()
+        return RepoAccessPolicy(self.repo_root).read_safe_file(
+            value, self.allowed_paths, tuple(validated["safe_file_manifest"]),
+        )
+
+    def execution_view(self) -> "CodexTaskSpec":
+        validated = self.validate()
+        file_paths = tuple(self.repo_root / item["path"] for item in validated["safe_file_manifest"])
+        if not file_paths:
+            raise PermissionError("safe execution manifest contains no files")
+        return CodexTaskSpec(
+            self.repo_root, file_paths, self.task_prompt, self.risk_level,
+            self.timeout_seconds, self.model_role, self.expected_output_schema,
+            tuple(validated["safe_file_manifest"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -567,6 +662,7 @@ class WorkUnitSpec:
     created_at: str
     status: str
     review_round: int
+    safe_file_manifest: tuple[dict, ...] = ()
 
 
 class OwnerPrivateContentStore:

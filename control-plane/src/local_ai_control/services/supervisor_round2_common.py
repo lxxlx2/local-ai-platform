@@ -56,6 +56,7 @@ class ReviewTaskSpec:
     timeout_seconds: float
     model_role: str
     expected_review_schema: dict
+    safe_file_manifest: tuple[dict, ...] = ()
 
     def validate(self) -> dict:
         root = self.repo_root.resolve()
@@ -65,7 +66,13 @@ class ReviewTaskSpec:
             raise PermissionError("review task must be read-only")
         if self.model_role != "REVIEW":
             raise ValueError("review task model_role must be REVIEW")
-        allowed = [str(path) for path in RepoAccessPolicy(root).validate_allowed_paths(list(self.allowed_paths))]
+        policy = RepoAccessPolicy(root)
+        allowed = [str(path) for path in policy.validate_allowed_paths(list(self.allowed_paths))]
+        generated_manifest = policy.build_safe_file_manifest(tuple(Path(path) for path in allowed))
+        manifest = self.safe_file_manifest or generated_manifest
+        if self.safe_file_manifest and _json_exact(list(self.safe_file_manifest), 1_000_000) != _json_exact(
+                list(generated_manifest), 1_000_000):
+            raise ValueError("review safe tracked-file manifest is stale or invalid")
         if not self.task_prompt or len(self.task_prompt.encode()) > 256_000:
             raise ValueError("review prompt outside safe size bound")
         if SecretFirewall().inspect(self.task_prompt).action == "BLOCK":
@@ -81,7 +88,25 @@ class ReviewTaskSpec:
             "risk_level": self.risk_level, "timeout_seconds": float(self.timeout_seconds),
             "model_role": "REVIEW", "expected_review_schema": schema,
             "task_prompt_sha256": hashlib.sha256(self.task_prompt.encode()).hexdigest(),
+            "safe_file_manifest": list(manifest),
         }
+
+    def read_safe_file(self, value: str) -> bytes:
+        validated = self.validate()
+        return RepoAccessPolicy(self.repo_root).read_safe_file(
+            value, self.allowed_paths, tuple(validated["safe_file_manifest"]),
+        )
+
+    def execution_view(self) -> "ReviewTaskSpec":
+        validated = self.validate()
+        file_paths = tuple(self.repo_root / item["path"] for item in validated["safe_file_manifest"])
+        if not file_paths:
+            raise PermissionError("safe reviewer manifest contains no files")
+        return ReviewTaskSpec(
+            self.repo_root, file_paths, self.task_prompt, self.read_only, self.risk_level,
+            self.timeout_seconds, self.model_role, self.expected_review_schema,
+            tuple(validated["safe_file_manifest"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -103,6 +128,7 @@ class ReviewerWorkUnit:
     candidate_identity: CandidateIdentity
     created_at: str
     status: str
+    safe_file_manifest: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)

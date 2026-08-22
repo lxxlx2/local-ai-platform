@@ -24,8 +24,41 @@ class Round2ReviewRepositoryMixin:
             "read_only": True, "risk_level": validated["risk_level"],
             "timeout_seconds": float(validated["timeout_seconds"]), "model_role": "REVIEW",
             "expected_review_schema": validated["expected_review_schema"], "prompt_sha256": prompt_sha,
-            "candidate_identity": candidate_identity.stable_payload(),
+            "candidate_identity": candidate_identity.to_mapping(),
+            "safe_file_manifest": validated["safe_file_manifest"],
         }
+
+    def _backfill_review_manifests(self) -> None:
+        rows = self.db.execute(
+            "SELECT * FROM supervisor_review_work_units WHERE safe_file_manifest_json IS NULL "
+            "OR safe_file_manifest_json=''"
+        ).fetchall()
+        with self.db:
+            for row in rows:
+                if not row["candidate_identity_json"]:
+                    continue
+                allowed_paths = tuple(Path(item) for item in json.loads(row["allowed_paths_json"]))
+                safe_manifest = RepoAccessPolicy(Path(row["repo_root"])).build_safe_file_manifest(allowed_paths)
+                validated = {
+                    "repo_root": row["repo_root"],
+                    "allowed_paths": json.loads(row["allowed_paths_json"]),
+                    "read_only": bool(row["read_only"]),
+                    "risk_level": row["risk_level"],
+                    "timeout_seconds": float(row["timeout_seconds"]),
+                    "model_role": row["model_role"],
+                    "expected_review_schema": json.loads(row["expected_review_schema_json"]),
+                    "safe_file_manifest": list(safe_manifest),
+                }
+                candidate_identity = CandidateIdentity.from_mapping(json.loads(row["candidate_identity_json"]))
+                digest = _canonical_digest(self._review_manifest(
+                    row["job_id"], row["owner_id"], int(row["review_round"]), validated,
+                    row["prompt_sha256"], candidate_identity,
+                ))
+                self.db.execute(
+                    "UPDATE supervisor_review_work_units SET safe_file_manifest_json=?,spec_hash=? "
+                    "WHERE review_work_unit_id=?",
+                    (_json_exact(list(safe_manifest), 1_000_000), digest, row["review_work_unit_id"]),
+                )
 
     def create_review_work_unit(self, job_id: str, owner_id: str, review_round: int,
                                 spec: ReviewTaskSpec, review_work_unit_id: str | None = None) -> ReviewerWorkUnit:
@@ -40,9 +73,9 @@ class Round2ReviewRepositoryMixin:
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", identifier):
             raise ValueError("invalid review_work_unit_id")
         prompt_sha = validated["task_prompt_sha256"]
-        candidate_identity = self.candidate_identity_provider.snapshot(
-            job.metadata.get("candidate_base_commit_sha")
-        )
+        if not job.baseline_commit_sha:
+            raise ValueError("trusted immutable job baseline is missing")
+        candidate_identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
         spec_hash = _canonical_digest(self._review_manifest(
             job_id, owner_id, round_number, validated, prompt_sha, candidate_identity,
         ))
@@ -64,13 +97,13 @@ class Round2ReviewRepositoryMixin:
                     "INSERT INTO supervisor_review_work_units "
                     "(review_work_unit_id,job_id,owner_id,review_round,repo_root,allowed_paths_json,read_only,"
                     "risk_level,timeout_seconds,model_role,expected_review_schema_json,prompt_content_ref,"
-                    "prompt_sha256,spec_hash,candidate_identity_json,created_at,status) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "prompt_sha256,spec_hash,candidate_identity_json,safe_file_manifest_json,created_at,status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier, job_id, str(owner_id), round_number, validated["repo_root"],
                      _json_exact(validated["allowed_paths"], 16_000), 1, validated["risk_level"],
                      validated["timeout_seconds"], "REVIEW", _json_exact(validated["expected_review_schema"], 16_000),
                      content_ref, prompt_sha, spec_hash, _json_exact(candidate_identity.to_mapping(), 64_000),
-                     utc_now(), "READY"),
+                     _json_exact(validated["safe_file_manifest"], 1_000_000), utc_now(), "READY"),
                 )
         except Exception:
             self.content_store.delete(content_ref)
@@ -91,6 +124,7 @@ class Round2ReviewRepositoryMixin:
             "read_only": bool(row["read_only"]), "risk_level": row["risk_level"],
             "timeout_seconds": float(row["timeout_seconds"]), "model_role": row["model_role"],
             "expected_review_schema": json.loads(row["expected_review_schema_json"]),
+            "safe_file_manifest": json.loads(row["safe_file_manifest_json"] or "[]"),
         }
         if not row["candidate_identity_json"]:
             raise ValueError("review work unit candidate identity missing")
@@ -106,6 +140,7 @@ class Round2ReviewRepositoryMixin:
             True, row["risk_level"], float(row["timeout_seconds"]), row["model_role"],
             json.loads(row["expected_review_schema_json"]), row["prompt_content_ref"], row["prompt_sha256"],
             row["spec_hash"], candidate_identity, row["created_at"], row["status"],
+            tuple(json.loads(row["safe_file_manifest_json"] or "[]")),
         )
 
     def review_work_unit_for_round(self, job_id: str, owner_id: str, review_round: int) -> ReviewerWorkUnit:
@@ -122,7 +157,8 @@ class Round2ReviewRepositoryMixin:
         unit = self.review_work_unit_for_round(job_id, owner_id, review_round)
         prompt = self.content_store.get(unit.prompt_content_ref, unit.prompt_sha256)
         spec = ReviewTaskSpec(unit.repo_root, unit.allowed_paths, prompt, unit.read_only, unit.risk_level,
-                              unit.timeout_seconds, unit.model_role, unit.expected_review_schema)
+                              unit.timeout_seconds, unit.model_role, unit.expected_review_schema,
+                              unit.safe_file_manifest)
         validated = spec.validate()
         if validated["task_prompt_sha256"] != unit.prompt_sha256:
             raise ValueError("review work unit prompt hash mismatch")
@@ -266,6 +302,68 @@ class Round2ReviewRepositoryMixin:
                 self.db.rollback()
             raise
 
+    def reconcile_submitted_review_results(self) -> int:
+        """Consume only results whose exact review run and durable transition already agree."""
+        reconciled = 0
+        rows = self.db.execute(
+            "SELECT * FROM supervisor_review_results WHERE status='SUBMITTED' ORDER BY created_at"
+        ).fetchall()
+        for row in rows:
+            try:
+                unit = self.get_review_work_unit(
+                    row["review_work_unit_id"], row["job_id"], row["owner_id"], int(row["review_round"]),
+                )
+                if unit.status != "RESULT_SUBMITTED":
+                    continue
+                if hashlib.sha256(row["result_json"].encode()).hexdigest() != row["result_hash"]:
+                    continue
+                payload = json.loads(row["result_json"])
+                result_status = payload.get("status")
+                job = self.get_job_for_owner(row["job_id"], row["owner_id"])
+                expected_stage_status = "PASS" if result_status == "PASS" else "FAIL"
+                completed = self.db.execute(
+                    "SELECT 1 FROM supervisor_stage_runs WHERE job_id=? AND stage=? AND review_round=? "
+                    "AND status=? AND completed_at IS NOT NULL LIMIT 1",
+                    (job.job_id, WorkflowStage.REVIEW.value, int(row["review_round"]), expected_stage_status),
+                ).fetchone()
+                if not completed:
+                    continue
+                if result_status == "PASS":
+                    consistent = (
+                        job.review_round == int(row["review_round"]) - 1
+                        and job.current_stage in {WorkflowStage.SECURITY, WorkflowStage.GIT_GATE, WorkflowStage.DONE}
+                    )
+                elif result_status == "FAIL":
+                    consistent = (
+                        job.review_round == int(row["review_round"])
+                        and (job.current_stage in {
+                            WorkflowStage.REVISION, WorkflowStage.VALIDATION,
+                            WorkflowStage.SELF_ACCEPTANCE, WorkflowStage.SECURITY,
+                            WorkflowStage.GIT_GATE, WorkflowStage.DONE,
+                        } or (job.current_stage is WorkflowStage.REVIEW
+                              and job.status is JobStatus.BLOCKED
+                              and job.resume_state == "MAX_REVIEW_ROUNDS"))
+                    )
+                else:
+                    consistent = False
+                if not consistent:
+                    continue
+                with self.db:
+                    self.db.execute(
+                        "UPDATE supervisor_review_results SET status='CONSUMED' "
+                        "WHERE review_work_unit_id=? AND status='SUBMITTED'",
+                        (unit.review_work_unit_id,),
+                    )
+                    self.db.execute(
+                        "UPDATE supervisor_review_work_units SET status='CONSUMED' "
+                        "WHERE review_work_unit_id=?",
+                        (unit.review_work_unit_id,),
+                    )
+                reconciled += 1
+            except (KeyError, ValueError, PermissionError, json.JSONDecodeError):
+                continue
+        return reconciled
+
     def has_submitted_review_result(self, job_id: str, owner_id: str, review_round: int) -> bool:
         unit = self.review_work_unit_for_round(job_id, owner_id, review_round)
         row = self.db.execute(
@@ -276,7 +374,10 @@ class Round2ReviewRepositoryMixin:
     def prune_terminal_jobs(self, keep: int = MAX_TERMINAL_JOBS) -> int:
         keep = min(max(int(keep), 1), MAX_TERMINAL_JOBS)
         rows = self.db.execute(
-            "SELECT job_id FROM supervisor_jobs WHERE status IN (?,?,?,?) ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
+            "SELECT job_id FROM supervisor_jobs WHERE status IN (?,?,?,?) "
+            "AND NOT EXISTS (SELECT 1 FROM supervisor_execution_fences f WHERE f.job_id=supervisor_jobs.job_id "
+            "AND f.status='ACTIVE' AND f.requires_manual_reconciliation=1) "
+            "ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
             (JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELED.value,
              JobStatus.BLOCKED.value, keep),
         ).fetchall()
