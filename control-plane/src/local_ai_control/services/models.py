@@ -62,7 +62,7 @@ def _profile(pid, name, provider, model_id, role, *, precision=None, owner_only=
 DEFAULT_MODELS = (
     QWEN36, QWEN38,
     _profile("owner-qwen38-raw", "Qwen3.8-27B RAW 8-bit", "local-mlx-vlm",
-             "OrcaRouter/Qwen3.8-27B-Uncensored-Abliterated-8bit-MLX", ModelRole.RAW,
+             "orcarouter/Qwen3.8-27B-Uncensored-MLX#8-bit", ModelRole.RAW,
              precision="8bit", owner_only=True, runtime_env="/Users/jerson/AI/runtime/qwen38-venv", expected_memory_gib=34),
     _profile("whisper-large-v3", "Whisper large-v3 MLX", "local-mlx-audio",
              "mlx-community/whisper-large-v3-mlx", ModelRole.STT_MAIN,

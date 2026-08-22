@@ -2,10 +2,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
+import json
 import socket
 from typing import Callable, Protocol
 from urllib.error import HTTPError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ALLOWED_MIME=("text/html","text/plain","application/xhtml+xml","application/json")
@@ -86,6 +87,26 @@ class DDGSSearchProvider:
             from ddgs import DDGS
         except ImportError as exc: raise RuntimeError("DDGS_NOT_CONFIGURED") from exc
         return [SearchResult(item.get("title",""),item.get("href",""),item.get("body","")) for item in DDGS().text(query,max_results=limit)]
+
+class SearXNGSearchProvider:
+    def __init__(self,base_url,fetcher): self.base_url=base_url.rstrip("/"); self.fetcher=fetcher
+    def search(self,query,limit=5):
+        if not query.strip() or not 1<=limit<=10: raise ValueError("invalid search request")
+        url=f"{self.base_url}/search?{urlencode({'q':query,'format':'json'})}"
+        response=self.fetcher.fetch(url); payload=json.loads(response.body)
+        return [SearchResult(item.get("title",""),item.get("url",""),item.get("content","")) for item in payload.get("results",[])[:limit]]
+
+@dataclass(frozen=True)
+class WebProviderRegistration:
+    provider_id:str; kind:str; status:str; credential_alias:str|None=None; owner_only:bool=False
+
+WEB_PROVIDERS=(
+    WebProviderRegistration("ddgs","SEARCH","AVAILABLE_IN_ISOLATED_RUNTIME"),
+    WebProviderRegistration("searxng","SEARCH","NOT_CONFIGURED"),
+    WebProviderRegistration("brave","SEARCH","NOT_CONFIGURED","BRAVE_SEARCH_API_KEY"),
+    WebProviderRegistration("tavily","SEARCH","NOT_CONFIGURED","TAVILY_API_KEY"),
+    WebProviderRegistration("playwright","BROWSER","REGISTERED",owner_only=True),
+)
 
 class WebResearchService:
     def __init__(self,fetcher,search_provider=None,browser_provider=None):

@@ -13,5 +13,6 @@ def test_registry_has_all_production_roles_and_never_qualifies_registered_candid
 def test_raw_is_owner_only_and_unknown_repo_cannot_bypass_registry():
     registry=ModelRegistry()
     with pytest.raises(PermissionError): registry.require("owner-qwen38-raw",owner=False)
-    assert registry.require("owner-qwen38-raw",owner=True).owner_only
+    raw=registry.require("owner-qwen38-raw",owner=True)
+    assert raw.owner_only and raw.model_id=="orcarouter/Qwen3.8-27B-Uncensored-MLX#8-bit"
     with pytest.raises(LookupError): registry.require("attacker/repo",owner=True)

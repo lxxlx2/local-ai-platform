@@ -15,7 +15,7 @@
 |---|---|---|
 | MAIN / VISION / VIDEO_UNDERSTANDING | `mlx-community/Qwen3.8-27B-8bit` | Registered; hardware qualification required |
 | FAST / FALLBACK | `mlx-community/Qwen3.6-35B-A3B-4bit` | Previously validated; live health is checked separately |
-| RAW | Owner-selected OrcaRouter Qwen3.8 candidate | Owner-only; exact repository/configuration not qualified |
+| RAW | `orcarouter/Qwen3.8-27B-Uncensored-MLX` (`8-bit/`) | Owner-only; not downloaded or qualified; refusal removal is never a security boundary |
 | STT_MAIN | `mlx-community/whisper-large-v3-mlx` | Registered |
 | TTS_MAIN | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16` | Registered |
 | TTS_DESIGN | `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16` | Registered |
