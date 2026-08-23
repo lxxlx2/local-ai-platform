@@ -1,0 +1,89 @@
+{
+  "schema_version": "0.1",
+  "serial_only": true,
+  "max_attempts": 3,
+  "reserve_bytes": 21474836480,
+  "models": [
+    {
+      "id": "stt-whisper-large-v3",
+      "role": "STT_MAIN",
+      "repo": "mlx-community/whisper-large-v3-mlx",
+      "revision": "49e6aa286ad60c14352c404340ded53710378a11",
+      "local_dir": "/Users/jerson/AI/models/whisper-large-v3-mlx",
+      "expected_bytes": 3083522487,
+      "license": "mit",
+      "runtime": "MLX Whisper"
+    },
+    {
+      "id": "tts-qwen3-base-bf16",
+      "role": "TTS_MAIN",
+      "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+      "revision": "a6eb4f68e4b056f1215157bb696209bc82a6db48",
+      "local_dir": "/Users/jerson/AI/models/qwen3-tts-base-bf16",
+      "expected_bytes": 4544212739,
+      "license": "apache-2.0",
+      "runtime": "MLX Audio"
+    },
+    {
+      "id": "tts-qwen3-voice-design-bf16",
+      "role": "TTS_DESIGN",
+      "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+      "revision": "7d3824abff87e49756bb0f83fb5411de75d160c4",
+      "local_dir": "/Users/jerson/AI/models/qwen3-tts-voice-design-bf16",
+      "expected_bytes": 4520194992,
+      "license": "apache-2.0",
+      "runtime": "MLX Audio"
+    },
+    {
+      "id": "image-flux2-klein-4b-bf16",
+      "role": "IMAGE_MAIN",
+      "repo": "mlx-community/FLUX.2-klein-4B-bf16",
+      "revision": "2f7dd4ac69a9fd9c909f8cc25b072dab2c83781d",
+      "local_dir": "/Users/jerson/AI/models/flux2-klein-4b-bf16",
+      "expected_bytes": 23739989637,
+      "license": "apache-2.0",
+      "runtime": "MLX Swift diffusion adapter; qualification required"
+    },
+    {
+      "id": "embed-qwen3-8b",
+      "role": "EMBED",
+      "repo": "Qwen/Qwen3-Embedding-8B",
+      "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+      "local_dir": "/Users/jerson/AI/models/qwen3-embedding-8b",
+      "expected_bytes": 15150575778,
+      "license": "apache-2.0",
+      "runtime": "Transformers snapshot; Apple Silicon qualification required"
+    },
+    {
+      "id": "rerank-qwen3-8b",
+      "role": "RERANK",
+      "repo": "Qwen/Qwen3-Reranker-8B",
+      "revision": "77d193c791ed757ca307ee72715aa132723da912",
+      "local_dir": "/Users/jerson/AI/models/qwen3-reranker-8b",
+      "expected_bytes": 16393071729,
+      "license": "apache-2.0",
+      "runtime": "Transformers snapshot; Apple Silicon qualification required"
+    },
+    {
+      "id": "video-longcat-q8",
+      "role": "VIDEO_HIGH",
+      "repo": "mlx-community/LongCat-Video-q8",
+      "revision": "87131df610609966db29734b399694ee3ebd6463",
+      "local_dir": "/Users/jerson/AI/models/longcat-video-q8",
+      "expected_bytes": 33624123487,
+      "license": "mit",
+      "runtime": "MLX video; 48 GB qualification required"
+    },
+    {
+      "id": "raw-qwen38-27b-8bit",
+      "role": "RAW_OWNER_ONLY",
+      "repo": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+      "revision": "b4603df5fd2a51e7fed2560ee7090caa4e13e4b7",
+      "local_dir": "/Users/jerson/AI/models/qwen38-27b-raw-8bit",
+      "expected_bytes": 29528165982,
+      "license": "apache-2.0",
+      "runtime": "MLX 8-bit subfolder; owner-only; system safety remains mandatory",
+      "include": ["8-bit/*"]
+    }
+  ]
+}
