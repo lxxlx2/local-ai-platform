@@ -15,10 +15,10 @@ class ControlPlane:
  def __init__(self,path): self.db=sqlite3.connect(path);self.db.row_factory=sqlite3.Row
  def close(self): self.db.close()
  def migrate(self):
-  self.db.executescript('''CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,project TEXT,name TEXT,state TEXT,risk INTEGER,model TEXT,context INTEGER,created_at TEXT,updated_at TEXT);CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT,state TEXT,version INTEGER,owner_id TEXT,created_at TEXT,updated_at TEXT);CREATE TABLE IF NOT EXISTS audit_events(id TEXT PRIMARY KEY,kind TEXT,payload TEXT,created_at TEXT);CREATE TABLE IF NOT EXISTS quick_actions(id TEXT PRIMARY KEY,key TEXT UNIQUE,display_name_zh TEXT,project TEXT,enabled INTEGER,display_order INTEGER,task_template TEXT,default_model TEXT,default_context INTEGER,risk_level INTEGER,requires_confirmation INTEGER,created_at TEXT,updated_at TEXT);CREATE TABLE IF NOT EXISTS model_registry(key TEXT PRIMARY KEY,display_name TEXT,role TEXT,enabled INTEGER,default_context INTEGER);''')
-  self.db.execute("INSERT OR IGNORE INTO model_registry VALUES ('qwen36_fast','Qwen3.6','FAST / 默认本地模型',1,8192)");self.db.commit()
+  self.db.executescript('''CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,project TEXT,name TEXT,state TEXT,risk INTEGER,model TEXT,context INTEGER,created_at TEXT,updated_at TEXT);CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT,state TEXT,version INTEGER,owner_id TEXT,created_at TEXT,updated_at TEXT);CREATE TABLE IF NOT EXISTS audit_events(id TEXT PRIMARY KEY,kind TEXT,payload TEXT,created_at TEXT);CREATE TABLE IF NOT EXISTS quick_actions(id TEXT PRIMARY KEY,key TEXT UNIQUE,display_name_zh TEXT,project TEXT,enabled INTEGER,display_order INTEGER,task_template TEXT,default_model TEXT,default_context INTEGER,risk_level INTEGER,requires_confirmation INTEGER,created_at TEXT,updated_at TEXT);''')
+  self.db.commit()
  def audit(self,k,p): self.db.execute('INSERT INTO audit_events VALUES (?,?,?,?)',(str(uuid.uuid4()),k,json.dumps(p),now()));self.db.commit()
- def create_task(self,project,name,risk=1,model='qwen36_fast',context=8192):
+ def create_task(self,project,name,risk=1,model='MAIN',context=16384):
   i=str(uuid.uuid4());self.db.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)',(i,project,name,'DRAFT',risk,model,context,now(),now()));self.audit('TASK_CREATED',{'task_id':i});return i
  def get_task(self,i): return self.db.execute('SELECT * FROM tasks WHERE id=?',(i,)).fetchone()
  def set_state(self,i,new):

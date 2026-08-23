@@ -11,7 +11,7 @@
 | 4D Remote memory/storage provider integration | NEXT |
 | 4E Public real-user test | NEXT |
 | 4F Telegram Mini App | LATER |
-| 5 Qwen3.8 benchmark | FUTURE |
+| 5 Qwen3.8 qualification | DONE — MAIN/VISION qualified, max 16K on this Mac; runtime integration review pending |
 | 6 Embedding model | FUTURE |
 | 7 Vision / Whisper / image models | FUTURE |
 | 8 Business adapters | FUTURE |

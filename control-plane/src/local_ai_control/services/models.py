@@ -35,6 +35,7 @@ class ModelProfile:
     last_evaluated: str | None = None; precision: str | None = None
     heavy: bool = True; owner_only: bool = False; runtime_env: str | None = None
     local_path: str | None = None; expected_memory_gib: float | None = None
+    max_qualified_context_tokens: int | None = None
 
 
 REGISTRY_PATH = Path("/Users/jerson/AI/config/model-registry-v0.1.json")
@@ -75,6 +76,7 @@ QWEN38 = ModelProfile(
     frozenset({ModelRole.MAIN,ModelRole.VISION,ModelRole.VIDEO_UNDERSTANDING,ModelRole.DEEP}),
     "LOCAL", "NONE", precision="8bit", runtime_env="/Users/jerson/AI/runtime/qwen38-venv",
     local_path="/Users/jerson/AI/models/qwen38-27b-8bit", expected_memory_gib=34,
+    max_qualified_context_tokens=16384,
 )
 
 
@@ -136,7 +138,7 @@ class ModelRoleRegistry:
         if payload["runtime_isolation"] != IMMUTABLE_RUNTIME_ISOLATION or payload["policy"] != IMMUTABLE_POLICY:
             raise ValueError("immutable model safety policy mismatch")
         aliases=payload["production_aliases"]
-        required={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING"}
+        required={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING","STT_MAIN","TTS_MAIN","TTS_DESIGN","IMAGE_MAIN","VIDEO_MAIN","VIDEO_HIGH","EMBED","RERANK","RAW"}
         if not isinstance(aliases,dict) or set(aliases)!=required:
             raise ValueError("invalid production aliases")
         return self._validate_aliases(aliases)
@@ -159,6 +161,10 @@ class ModelRoleRegistry:
                 raise ValueError("invalid max context")
             if status not in ELIGIBLE_STATUSES and maximum is not None:
                 raise ValueError("unqualified profile cannot publish context")
+            if role is ModelRole.MAIN and status in ELIGIBLE_STATUSES and maximum is None:
+                raise ValueError("qualified MAIN requires max context")
+            if maximum is not None and profile.max_qualified_context_tokens is not None and maximum>profile.max_qualified_context_tokens:
+                raise ValueError("context exceeds immutable qualified envelope")
             result[role]=RegistryAlias(role,profile_id,status,maximum)
         return result
 
@@ -208,6 +214,8 @@ class ModelRouter:
 @dataclass(frozen=True)
 class MemorySnapshot:
     total_gib: float; available_gib: float; swap_used_gib: float; pressure: str
+    reclaimable_gib: float|None=None; compressed_gib: float=0; swap_delta_gib: float=0
+    owned_heavy_profile_id: str|None=None
     timestamp: str=field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -217,8 +225,9 @@ class MemoryPreflightResult:
 
 
 class MemoryPreflight:
-    def __init__(self, probe: Callable[[],MemorySnapshot]|None=None, reserve_gib=6):
-        self.probe=probe or self._macos_snapshot; self.reserve_gib=reserve_gib
+    def __init__(self, probe: Callable[[],MemorySnapshot]|None=None, reserve_gib=4,max_swap_delta_gib=2):
+        self.probe=probe or self._macos_snapshot; self.reserve_gib=reserve_gib; self.max_swap_delta_gib=max_swap_delta_gib
+        self._last_swap_used_gib=None
     @staticmethod
     def _macos_snapshot():
         total=int(subprocess.check_output(["sysctl","-n","hw.memsize"],text=True).strip())
@@ -228,15 +237,32 @@ class MemoryPreflight:
             if ":" in line:
                 k,v=line.split(":",1); pages[k]=int(v.strip().rstrip("."))
         available=(pages.get("Pages free",0)+pages.get("Pages inactive",0)+pages.get("Pages speculative",0))*page
+        reclaimable=available+pages.get("Pages purgeable",0)*page
+        compressed=pages.get("Pages occupied by compressor",0)*page
         swap_text=subprocess.check_output(["sysctl","-n","vm.swapusage"],text=True)
         match=re.search(r"used = ([0-9.]+)([MG])",swap_text)
         swap=0 if not match else float(match.group(1))/(1024 if match.group(2)=="M" else 1)
-        ratio=available/total if total else 0
-        pressure="NORMAL" if ratio>=.25 else ("WARNING" if ratio>=.12 else "CRITICAL")
-        return MemorySnapshot(total/1024**3,available/1024**3,swap,pressure)
-    def check(self, required_gib):
-        snapshot=self.probe(); allowed=snapshot.pressure!="CRITICAL" and snapshot.available_gib>=required_gib+self.reserve_gib
-        reason="OK" if allowed else ("MEMORY_PRESSURE_CRITICAL" if snapshot.pressure=="CRITICAL" else "INSUFFICIENT_AVAILABLE_MEMORY")
+        pressure_text=subprocess.check_output(["memory_pressure","-Q"],text=True)
+        pressure_match=re.search(r"free percentage: (\d+)%",pressure_text); free_percent=int(pressure_match.group(1)) if pressure_match else 0
+        pressure="NORMAL" if free_percent>=20 else ("WARNING" if free_percent>=8 else "CRITICAL")
+        return MemorySnapshot(total/1024**3,available/1024**3,swap,pressure,reclaimable/1024**3,compressed/1024**3,0,None)
+    def check(self, required_gib, *, owned_reclaimable_gib=0):
+        snapshot=self.probe(); reclaimable=snapshot.reclaimable_gib if snapshot.reclaimable_gib is not None else snapshot.available_gib
+        sampled_delta=0 if self._last_swap_used_gib is None else max(0,snapshot.swap_used_gib-self._last_swap_used_gib)
+        self._last_swap_used_gib=snapshot.swap_used_gib
+        swap_delta=max(snapshot.swap_delta_gib,sampled_delta)
+        if snapshot.pressure=="CRITICAL": allowed=False; reason="MEMORY_PRESSURE_CRITICAL"
+        elif swap_delta>self.max_swap_delta_gib: allowed=False; reason="SWAP_RUNAWAY"
+        else:
+            # Qualification proved that 34 GiB peak is safe on a 48 GiB Mac
+            # with normal pressure and ~34 GiB reclaimable. Require total-system
+            # headroom plus 85% reclaimability instead of fixed free+reserve.
+            # A platform-owned resident model is reclaimable by the lifecycle
+            # manager before the target starts. Unknown user processes are never
+            # counted here and are never terminated by this policy.
+            effective_reclaimable=min(snapshot.total_gib,reclaimable+max(0,owned_reclaimable_gib))
+            allowed=snapshot.total_gib>=required_gib+self.reserve_gib and effective_reclaimable>=required_gib*.85
+            reason="OK" if allowed else "INSUFFICIENT_RECLAIMABLE_MEMORY"
         return MemoryPreflightResult(allowed,required_gib,snapshot.available_gib,reason,snapshot)
 
 
@@ -295,15 +321,18 @@ class ModelManager:
         return ModelSwitchResult(target.profile_id,"FAILED",self.active_profile_id,rolled_back,reason)
 
 
-def model_center_text(registry=None):
+def model_center_text(registry=None,runtime_health=None):
     registry=registry or ModelRegistry()
     main=registry.alias(ModelRole.MAIN); vision=registry.alias(ModelRole.VISION)
     main_profile=registry.models[main.profile_id]; vision_profile=registry.models[vision.profile_id]
     context_text=f"，最大实测上下文 {main.max_context_tokens} tokens" if main.max_context_tokens else ""
-    main_text=(f"{main_profile.display_name}（已资格验证{context_text}）" if main.status in ELIGIBLE_STATUSES else "当前不可用，聊天自动回退 FAST")
-    vision_text=(f"{vision_profile.display_name}（已资格验证）" if vision.status in ELIGIBLE_STATUSES else f"{vision_profile.display_name}（未资格验证）")
+    main_state=(runtime_health or {}).get("MAIN","NOT_CHECKED")
+    fast_state=(runtime_health or {}).get("FAST","NOT_CHECKED")
+    vision_state=(runtime_health or {}).get("VISION","NOT_CHECKED")
+    main_text=(f"{main_profile.display_name}（已资格验证{context_text}；运行：{main_state}）" if main.status in ELIGIBLE_STATUSES else "当前不可用，聊天自动回退 FAST")
+    vision_text=(f"{vision_profile.display_name}（已资格验证；运行：{vision_state}）" if vision.status in ELIGIBLE_STATUSES else f"{vision_profile.display_name}（未资格验证）")
     return (f"模型中心\n\n默认聊天 / MAIN：{main_text}\n"
-            "FAST / FALLBACK：Qwen3.6-35B-A3B-4bit（已验证；运行状态以健康检查为准）\n"
+            f"FAST / FALLBACK：Qwen3.6-35B-A3B-4bit（已验证；运行：{fast_state}）\n"
             f"VISION：{vision_text}\nVIDEO_UNDERSTANDING：未资格验证\n"
             "RAW：Owner only，尚未配置\nCODING：未通过；继续由外部 Codex Producer 承担\n"
             "STT / TTS / IMAGE / VIDEO / EMBED / RERANK：已注册候选，未完成本机 qualification\n\n"

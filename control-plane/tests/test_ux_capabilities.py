@@ -210,5 +210,7 @@ def publish(user_level):
 
 
 def test_model_center_is_owner_controlled_and_does_not_claim_coding_ready():
-    text = model_center_text()
+    text = model_center_text(runtime_health={"MAIN":"NOT_RUNNING","FAST":"HEALTHY","VISION":"NOT_RUNNING"})
     assert MODEL_NAME in text and "CODING：未通过" in text and "不会自动下载模型" not in text
+    assert "运行：NOT_RUNNING" in text and "Qwen3.6-35B-A3B-4bit（已验证；运行：HEALTHY）" in text
+    assert "已加载" not in text

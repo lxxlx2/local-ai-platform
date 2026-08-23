@@ -10,7 +10,7 @@ Generated solely from `capability_matrix.py`. FUNCTIONAL coverage includes PRODU
 | 历史搜索 | FOUNDATION | storage only |
 | 文件分析 | FOUNDATION | file safety tests |
 | PDF | NOT_STARTED | provider missing |
-| 图片理解 | FOUNDATION | Qwen3.8 vision registered; not qualified |
+| 图片理解 | FUNCTIONAL | Qwen3.8 owner-private vision runtime tests |
 | 图片生成编辑 | FOUNDATION | owner-only provider boundary |
 | 音频转写 | FOUNDATION | STT provider boundary |
 | 音频理解 | FOUNDATION | audio routing and quotas |
@@ -27,7 +27,7 @@ Generated solely from `capability_matrix.py`. FUNCTIONAL coverage includes PRODU
 | 审批工作流 | FUNCTIONAL | test_control |
 | Public/Private | FUNCTIONAL | isolation regressions |
 | 数据导出删除 | FOUNDATION | memory deletion |
-| 多模型路由 | FOUNDATION | test_quality_governance |
+| 多模型路由 | FUNCTIONAL | test_runtime_integration |
 | Embeddings | FOUNDATION | Qwen3 8B providers registered |
 | 长期存储 | PARTIAL | SQLite |
 | Browser/Computer | FOUNDATION | owner-only browser boundary |
@@ -37,8 +37,8 @@ Generated solely from `capability_matrix.py`. FUNCTIONAL coverage includes PRODU
 
 <!-- CAPABILITY_MATRIX_METRICS: generated; do not edit manually -->
 TOTAL_CAPABILITIES: 30
-FUNCTIONAL_COUNT: 9
+FUNCTIONAL_COUNT: 11
 PRODUCTION_READY_COUNT: 0
-FUNCTIONAL_COVERAGE: 30%
+FUNCTIONAL_COVERAGE: 37%
 PRODUCTION_READY_COVERAGE: 0%
 <!-- /CAPABILITY_MATRIX_METRICS -->

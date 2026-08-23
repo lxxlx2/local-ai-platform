@@ -5,7 +5,16 @@
     "FAST": {"profile": "local-qwen36", "status": "VALIDATED"},
     "FALLBACK": {"profile": "local-qwen36", "status": "VALIDATED"},
     "VISION": {"profile": "local-qwen38", "status": "QUALIFIED"},
-    "VIDEO_UNDERSTANDING": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"}
+    "VIDEO_UNDERSTANDING": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"},
+    "STT_MAIN": {"profile": "whisper-large-v3", "status": "REGISTERED_NOT_QUALIFIED"},
+    "TTS_MAIN": {"profile": "qwen3-tts-base", "status": "REGISTERED_NOT_QUALIFIED"},
+    "TTS_DESIGN": {"profile": "qwen3-tts-design", "status": "REGISTERED_NOT_QUALIFIED"},
+    "IMAGE_MAIN": {"profile": "flux2-klein", "status": "REGISTERED_NOT_QUALIFIED"},
+    "VIDEO_MAIN": {"profile": "wan21-video", "status": "REGISTERED_NOT_QUALIFIED"},
+    "VIDEO_HIGH": {"profile": "longcat-video", "status": "REGISTERED_NOT_QUALIFIED"},
+    "EMBED": {"profile": "qwen3-embedding", "status": "REGISTERED_NOT_QUALIFIED"},
+    "RERANK": {"profile": "qwen3-reranker", "status": "REGISTERED_NOT_QUALIFIED"},
+    "RAW": {"profile": "owner-qwen38-raw", "status": "REGISTERED_NOT_QUALIFIED"}
   },
   "runtime_isolation": {
     "qwen38": "/Users/jerson/AI/runtime/qwen38-venv",

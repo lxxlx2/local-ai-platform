@@ -5,3 +5,6 @@ def test_transitions_and_idempotent_approval(tmp_path):
 
 def test_registry_counts_and_project_list(tmp_path):
  c=ControlPlane(tmp_path/'x.db');c.migrate();assert dict(c.projects())['guidengji']=='📚 归灯记';assert c.counts()=={'running':0,'waiting_approval':0,'failed':0}
+ assert not c.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_registry'").fetchone()
+ task=c.create_task('guidengji','预览'); row=c.get_task(task)
+ assert row['model']=='MAIN' and row['context']==16384

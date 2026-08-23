@@ -27,7 +27,11 @@
 
 ## Provider boundaries
 
-`AudioService`, `ImageService`, `VideoService`, `EmbeddingProvider`, and `RerankProvider` are dependency-free control contracts. Heavy inference implementations belong in their isolated runtime environments. `MediaJobRepository` persists only owner scope, state, bounded progress, private references, model role, and error category; raw prompts are excluded from its schema.
+`Qwen38Provider` talks only to a localhost sidecar on port 8001. Normal chat and Owner-private JPEG understanding use this provider; `/fast` and deterministic fallback use the existing localhost-only Qwen3.6 oMLX provider. The lifecycle owns only its two exact launchd labels, refuses simultaneous healthy heavy runtimes, performs memory preflight, and restores MAIN after a temporary FAST session. It never terminates unknown user processes.
+
+Owner Telegram images are bounded to 20 MB, checked by MIME, magic bytes, exact size, and symlink policy, then copied with mode 0600 into an ignored TTL spool. The provider accepts only paths below that spool root. Public image inference remains disabled.
+
+`AudioService`, `ImageService`, `VideoService`, `EmbeddingProvider`, and `RerankProvider` are dependency-free control contracts. Other heavy inference implementations belong in their isolated runtime environments. `MediaJobRepository` persists only owner scope, state, bounded progress, private references, model role, and error category; raw prompts are excluded from its schema.
 
 `SafeHttpFetcher` allows only HTTP(S), resolves and rejects every private/special address on every redirect, refuses URL credentials and nonstandard ports, bounds bytes/redirects/time, and accepts only uncompressed text/HTML/JSON. Web evidence is always marked `UNTRUSTED_EXTERNAL_CONTENT`. Browser execution remains Owner-only and separately configured.
 

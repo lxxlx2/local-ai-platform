@@ -8,7 +8,7 @@ Telegram → Bot ingress → Identity router → Authorization → deterministic
                                       └─ Public: public DB, public sandbox
 ```
 
-Qwen3.6 is the fast/default local text model. Default chat context is 8K; complex owner tasks and research may use 32K; 64K remains a special long-context mode. Qwen3.6 is not a coding-agent replacement.
+Qualified Qwen3.8 is the normal local chat model through a localhost-only sidecar, capped at 16K on this Mac. Qwen3.6 is the explicit FAST and deterministic fallback model. Historical Qwen3.6 context benchmarks remain evidence for that fallback; Qwen3.6 is not a coding-agent replacement.
 
 ## Program-level workflow supervision
 

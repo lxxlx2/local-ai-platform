@@ -6,7 +6,10 @@ documentation, future Codex Local integration, private Tailscale access, and
 future model evaluation. Models remain local and are never committed; secrets
 are never committed; business repositories remain independent.
 
-Current V1 model: `mlx-community/Qwen3.6-35B-A3B-4bit`.
+Current deployed V1 fallback model: `mlx-community/Qwen3.6-35B-A3B-4bit`.
+The production-capabilities branch qualifies `mlx-community/Qwen3.8-27B-8bit`
+as 16K MAIN/VISION and wires it through an isolated localhost-only runtime;
+deployment still requires the explicit service-restart gate.
 
 Current status: 8K PASS, 32K PASS, 64K Special Long Context Mode, and 30-minute
 stability with 30/30 API success. Structured Tool Calling is pending independent

@@ -38,6 +38,8 @@ def test_qualified_main_becomes_eligible_and_drives_normal_chat(tmp_path):
     lambda p:p["production_aliases"]["MAIN"].update(extra="unsafe"),
     lambda p:p["production_aliases"].pop("FAST"),
     lambda p:p.update(extra="unsafe"),
+    lambda p:p["production_aliases"]["MAIN"].update(max_context_tokens=32768),
+    lambda p:p["production_aliases"]["MAIN"].pop("max_context_tokens"),
 ])
 def test_malformed_registry_fails_closed(tmp_path,mutation):
     payload=json.loads(SOURCE.read_text()); mutation(payload)
@@ -62,3 +64,24 @@ def test_chat_falls_back_when_main_missing_unhealthy_or_resource_denied(tmp_path
     qualified=registry_with(tmp_path,MAIN={"profile":"local-qwen38","status":"QUALIFIED","max_context_tokens":16384})
     assert ModelRouter(qualified,health_check=lambda p:p.profile_id!="local-qwen38").route("CHAT").profile_id=="local-qwen36"
     assert ModelRouter(qualified,resource_check=lambda p:p.profile_id!="local-qwen38").route("CHAT").profile_id=="local-qwen36"
+
+
+def test_every_production_role_has_exact_future_eligibility_without_repo_injection(tmp_path):
+    source=json.loads(SOURCE.read_text())
+    roles=set(source["production_aliases"])
+    assert roles=={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING","STT_MAIN","TTS_MAIN",
+                   "TTS_DESIGN","IMAGE_MAIN","VIDEO_MAIN","VIDEO_HIGH","EMBED","RERANK","RAW"}
+    for role_name,configured in source["production_aliases"].items():
+        payload=json.loads(SOURCE.read_text())
+        payload["production_aliases"][role_name]={"profile":configured["profile"],"status":"QUALIFIED"}
+        if role_name=="MAIN": payload["production_aliases"][role_name]["max_context_tokens"]=16384
+        path=tmp_path/f"{role_name}.json"; path.write_text(json.dumps(payload))
+        registry=ModelRegistry(config_path=path)
+        eligible=registry.eligible(ModelRole(role_name))
+        assert len(eligible)==1 and eligible[0].profile_id==configured["profile"]
+        if role_name=="RAW":
+            with pytest.raises(PermissionError): registry.require(configured["profile"],owner=False)
+    payload=json.loads(SOURCE.read_text())
+    payload["production_aliases"]["MAIN"]={"profile":"arbitrary/repo","status":"QUALIFIED"}
+    path=tmp_path/"injected.json"; path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError): ModelRegistry(config_path=path)

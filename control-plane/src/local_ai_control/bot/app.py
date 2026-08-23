@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import re
 import subprocess
 
 from aiogram import Bot, Dispatcher, F
@@ -18,18 +19,23 @@ from local_ai_control.services.authorization import AuthorizationDenied, authori
 from local_ai_control.services.chat import ChatService
 from local_ai_control.services.control import ControlPlane
 from local_ai_control.services.intent import classify_owner_text, preview_text
-from local_ai_control.services.models import model_center_text
-from local_ai_control.services.multimodal import MultimodalRouter
-from local_ai_control.services.omlx import OmlxProvider
+from local_ai_control.services.models import ModelRegistry, model_center_text
+from local_ai_control.services.multimodal import AttachmentValidationError, MultimodalRouter
 from local_ai_control.services.output import TelegramOutputRenderer
 from local_ai_control.services.rate_limit import PublicRateLimiter
 from local_ai_control.services.security import SECRET_BLOCK_MESSAGE, SecretFirewall
 from local_ai_control.services.storage import ScopedSQLiteRepository
 from local_ai_control.services.supervisor import JobStatus, SupervisorRepository, WorkflowSupervisor, default_demo_runners
+from local_ai_control.services.qwen38_runtime import ContextLimitExceeded, RuntimeUnavailable
+from local_ai_control.services.runtime_providers import HeavyModelConflict, RuntimeProviderFactory
+from local_ai_control.services.vision import TelegramImageService
 
 OWNER_HOME = "本地 AI 控制中心\n\n请选择一个功能："
 PUBLIC_HOME = "AI 助手\n\n你好！可以直接发送问题，或选择一个功能："
 SUPERVISOR_CONTROL_ACTIONS = {"pause", "resume", "cancel", "retry"}
+
+
+class FastPromptRequired(ValueError): pass
 
 
 def owner_keyboard():
@@ -51,12 +57,25 @@ def safe_command(command, fallback="不可用"):
         return fallback
 
 
-def _health_ok():
-    try:
-        OmlxProvider().health()
-        return True
-    except Exception:
-        return False
+def chat_request(text):
+    """Return the controlled runtime class and user text (no model IDs accepted)."""
+    match=re.match(r"^/fast(?:\s+([\s\S]+))?$",text.strip(),flags=re.I)
+    if match:
+        if not match.group(1): raise FastPromptRequired("FAST_PROMPT_REQUIRED")
+        return "FAST",match.group(1).strip()
+    return "CHAT",text
+
+
+def chat_reply_with_runtime(provider_factory,repository,firewall,ctx,session_id,text):
+    task,prompt=chat_request(text)
+    with provider_factory.session(task) as provider:
+        return ChatService(repository,provider,firewall).reply(ctx,session_id,prompt)
+
+
+async def owner_image_reply(role,image_service,provider_factory,bot,file_ref,*,declared_size,caption=""):
+    if role is not Role.OWNER: raise AuthorizationDenied("Owner image inference only")
+    with provider_factory.session("VISION") as provider:
+        return await image_service.analyze(bot,file_ref,declared_size=declared_size,caption=caption,provider=provider)
 
 
 async def send_start_dashboard(target, title, keyboard):
@@ -94,6 +113,9 @@ async def run():
     renderer = TelegramOutputRenderer()
     rate_limiter = PublicRateLimiter(settings.public_messages_per_minute, settings.public_messages_per_hour, settings.public_messages_per_day)
     multimodal_router = MultimodalRouter()
+    registry = ModelRegistry()
+    provider_factory = RuntimeProviderFactory(registry)
+    image_service = TelegramImageService(provider_factory.main)
     bot = Bot(settings.token)
     dp = Dispatcher()
 
@@ -131,7 +153,19 @@ async def run():
             return
         mime = "image/jpeg" if message.photo else ("video/mp4" if message.video else "audio/mpeg")
         decision = multimodal_router.route(ctx.role, message.caption or "", mime)
-        await send_chat_output(message, routed_capability_text(decision))
+        if message.photo:
+            photo=message.photo[-1]
+            try:
+                answer=await owner_image_reply(ctx.role,image_service,provider_factory,bot,photo,
+                                               declared_size=photo.file_size or 0,caption=message.caption or "")
+            except (AttachmentValidationError,ValueError,PermissionError):
+                answer="图片未通过安全校验，请发送 20MB 以内的 JPEG 图片。"
+            except (RuntimeUnavailable,ContextLimitExceeded,HeavyModelConflict,RuntimeError) as error:
+                logging.warning("vision unavailable type=%s",type(error).__name__)
+                answer="图片理解服务暂时不可用，请稍后重试。"
+            await send_chat_output(message,answer)
+            return
+        await send_chat_output(message, routed_capability_text(decision,registry=registry,runtime_health=provider_factory.runtime_health()))
 
     @dp.message(F.text)
     async def plain_chat(message: Message):
@@ -145,11 +179,12 @@ async def run():
             await message.answer("请求过于频繁，请稍后再试。")
             return
         intent = classify_owner_text(ctx.role, message.text)
+        runtime_health=provider_factory.runtime_health()
         if intent.kind == "MODEL_IDENTITY_INTENT":
-            await send_chat_output(message, model_identity(healthy=_health_ok()))
+            await send_chat_output(message, model_identity(registry=registry,runtime_health=runtime_health))
             return
         if intent.kind == "CAPABILITY_INTENT":
-            await send_chat_output(message, capability_intro(ctx.role, healthy=_health_ok()))
+            await send_chat_output(message, capability_intro(ctx.role,registry=registry,runtime_health=runtime_health))
             return
         if intent.kind == "CONTROL_INTENT":
             await message.answer(preview_text(intent), reply_markup=inline([[("⬅️ 返回首页", "home")]]))
@@ -160,11 +195,17 @@ async def run():
             await send_chat_output(message, "该生成能力当前仅限 Owner 使用。")
             return
         if routed.intent.value != "CHAT":
-            await send_chat_output(message, routed_capability_text(routed))
+            await send_chat_output(message, routed_capability_text(routed,registry=registry,runtime_health=runtime_health))
             return
         session_id = await chat_session(ctx)
         try:
-            result = ChatService(repo_for(ctx), OmlxProvider(), firewall).reply(ctx, session_id, message.text)
+            result = chat_reply_with_runtime(provider_factory,repo_for(ctx),firewall,ctx,session_id,message.text)
+        except ContextLimitExceeded:
+            await send_chat_output(message,"上下文超过 MAIN 的 16K 安全限制，请缩短问题或新建对话。")
+            return
+        except FastPromptRequired:
+            await send_chat_output(message,"请在 /fast 后输入问题。")
+            return
         except Exception as error:
             logging.warning("chat unavailable type=%s role=%s", type(error).__name__, ctx.role)
             result = None
@@ -300,12 +341,9 @@ async def run():
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True)
             return
-        try:
-            OmlxProvider().health(); health = "正常"
-        except Exception:
-            health = "暂不可用"
+        runtime=provider_factory.runtime_health()
         swap = safe_command(["sysctl", "-n", "vm.swapusage"])
-        await edit_page(query, f"系统状态\n\n本地 AI：{health}\nQwen3.6：已加载\noMLX：{health}\nSwap：{swap}", back_for(query.data))
+        await edit_page(query, f"系统状态\n\nMAIN / Qwen3.8：{runtime['MAIN']}\nFAST / Qwen3.6：{runtime['FAST']}\nSwap：{swap}", back_for(query.data))
 
     @dp.callback_query(F.data == "owner:model")
     async def models(query: CallbackQuery):
@@ -314,7 +352,7 @@ async def run():
             authorize(ctx, "owner:system")
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        await edit_page(query, model_center_text(), back_for(query.data))
+        await edit_page(query, model_center_text(registry,provider_factory.runtime_health()), back_for(query.data))
 
     @dp.callback_query(F.data == "owner:memory")
     async def owner_memory(query: CallbackQuery):
@@ -332,16 +370,21 @@ async def run():
             authorize(ctx, query.data)
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        text = {
-            "owner:image": "视觉理解\n\nQwen3.8 VISION 已注册，尚未完成本机 qualification。",
-            "owner:video": "视频理解\n\nQwen3.8 原生视频 adapter 与安全抽帧 fallback 已规划，尚未完成本机 qualification。",
+        routed_by_callback={
+            "owner:image": multimodal_router.route(ctx.role,"描述图片","image/jpeg"),
+            "owner:video": multimodal_router.route(ctx.role,"总结视频","video/mp4"),
+            "owner:audio": multimodal_router.route(ctx.role,"转写语音","audio/mpeg"),
+            "owner:image_generate": multimodal_router.route(ctx.role,"生成图片"),
+            "owner:video_generate": multimodal_router.route(ctx.role,"生成视频"),
+        }
+        if query.data in routed_by_callback:
+            text=routed_capability_text(routed_by_callback[query.data],registry=registry,runtime_health=provider_factory.runtime_health())
+        else:
+            text = {
             "owner:file": "文件分析\n\n当前仅开放受控 txt / md 入口；不会任意读取私人项目文件。",
-            "owner:audio": "语音\n\nWhisper STT 与 Qwen3-TTS 已注册，尚未安装隔离 provider。",
-            "owner:image_generate": "图片生成\n\nFLUX.2 klein BF16 已注册，尚未完成本机 qualification。",
-            "owner:video_generate": "视频生成\n\n后台 MediaJob 路由已注册；重模型尚未完成本机 qualification。",
             "owner:media_jobs": "任务与进度\n\nMediaJob 支持排队、进度、取消与失败状态；当前生产 Bot 尚未部署此版本。",
             "owner:web": "联网研究\n\n安全 URL Fetch 与 Search Provider 已接入代码；当前 provider 尚未部署。",
-        }[query.data]
+            }[query.data]
         await edit_page(query, text, back_for(query.data))
 
     @dp.callback_query(F.data.startswith(("owner:", "private:", "guidengji:")))
