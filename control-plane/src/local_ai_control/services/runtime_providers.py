@@ -7,10 +7,11 @@ import plistlib
 import subprocess
 import threading
 import time
+import urllib.error
 
 from local_ai_control.services.models import MemoryPreflight,ModelRegistry,ModelRole,QWEN36,QWEN38
 from local_ai_control.services.omlx import OmlxProvider
-from local_ai_control.services.qwen38_runtime import Qwen38Provider,RuntimeUnavailable
+from local_ai_control.services.qwen38_runtime import ContextLimitExceeded,Qwen38Provider,RuntimeUnavailable
 
 
 class HeavyModelConflict(RuntimeError): pass
@@ -97,13 +98,27 @@ class RuntimeProviderFactory:
         try:
             if current and current_provider:
                 self.lifecycle.stop(current.profile_id); self._wait_down(current_provider)
-            self.lifecycle.start(target.profile_id); target_started=True; self._wait(provider)
+            # Treat start as potentially partial even when it raises. Cleanup
+            # must prove the target down before any rollback is attempted.
+            target_started=True; self.lifecycle.start(target.profile_id); self._wait(provider)
         except Exception:
-            if target_started: self.lifecycle.stop(target.profile_id)
+            if target_started:
+                self.lifecycle.stop(target.profile_id)
+                try: self._wait_down(provider)
+                except Exception as cleanup_error:
+                    raise HeavyModelConflict("failed target could not be confirmed down") from cleanup_error
             if current and current_provider:
                 if not _healthy(current_provider):
                     self.lifecycle.start(current.profile_id); self._wait(current_provider)
             raise
+
+    def _fallback_target(self,state):
+        if not self._eligible(ModelRole.FALLBACK,QWEN36.profile_id):
+            raise RuntimeUnavailable("FALLBACK is not eligible")
+        if state.fast_healthy: return self.fast
+        self._switch(QWEN36,self.fast,current=QWEN38 if state.main_healthy else None,
+                     current_provider=self.main if state.main_healthy else None)
+        return self.fast
 
     @contextmanager
     def session(self,task_type="CHAT"):
@@ -112,11 +127,15 @@ class RuntimeProviderFactory:
             restore_main=False
             if explicit_fast:
                 if not self._eligible(ModelRole.FAST,QWEN36.profile_id): raise RuntimeUnavailable("FAST is not eligible")
-                if state.main_healthy:
-                    self._switch(QWEN36,self.fast,current=QWEN38,current_provider=self.main); restore_main=True
-                elif not state.fast_healthy:
+                if state.fast_healthy:
+                    provider=self.fast
+                elif state.main_healthy:
+                    self._switch(QWEN36,self.fast,current=QWEN38,current_provider=self.main)
+                    restore_main=self._eligible(ModelRole.MAIN,QWEN38.profile_id)
+                    provider=self.fast
+                else:
                     self._switch(QWEN36,self.fast)
-                provider=self.fast
+                    provider=self.fast
             else:
                 required_role=ModelRole.VISION if task_type=="VISION" else ModelRole.MAIN
                 main_eligible=self._eligible(required_role,QWEN38.profile_id)
@@ -125,19 +144,54 @@ class RuntimeProviderFactory:
                     try:
                         self._switch(QWEN38,self.main,current=QWEN36 if state.fast_healthy else None,current_provider=self.fast if state.fast_healthy else None)
                         provider=self.main
+                    except HeavyModelConflict:
+                        raise
                     except Exception as main_error:
                         if task_type=="VISION": raise RuntimeUnavailable("VISION runtime unavailable") from main_error
-                        if not self._eligible(ModelRole.FALLBACK,QWEN36.profile_id): raise RuntimeUnavailable("MAIN unavailable and fallback ineligible") from main_error
-                        if not _healthy(self.fast): self._switch(QWEN36,self.fast)
-                        provider=self.fast
-                elif task_type!="VISION" and self._eligible(ModelRole.FALLBACK,QWEN36.profile_id):
-                    if not state.fast_healthy: self._switch(QWEN36,self.fast)
-                    provider=self.fast
+                        provider=self._fallback_target(self.state())
+                elif task_type!="VISION":
+                    # Eligibility selects Qwen3.6, but observed Qwen3.8 health
+                    # still governs the physical stop-before-start transition.
+                    provider=self._fallback_target(state)
                 else: raise RuntimeUnavailable("no healthy chat runtime")
             try: yield provider
             finally:
                 if restore_main:
                     self._switch(QWEN38,self.main,current=QWEN36,current_provider=self.fast)
+
+    @contextmanager
+    def failover_session(self):
+        """One infrastructure failover after a selected MAIN dies."""
+        with self.lock:
+            if not self._eligible(ModelRole.FALLBACK,QWEN36.profile_id):
+                raise RuntimeUnavailable("FALLBACK is not eligible")
+            # MAIN may be unhealthy while its managed process still owns Metal
+            # resources. Stop the exact owned label and confirm its endpoint down.
+            self.lifecycle.stop(QWEN38.profile_id); self._wait_down(self.main)
+            state=self.state()
+            provider=self.fast if state.fast_healthy else None
+            if provider is None:
+                self._switch(QWEN36,self.fast)
+                provider=self.fast
+            yield provider
+
+    def generate(self,task_type,prompt,max_output_tokens=1024):
+        """Select once, then retry once only for MAIN infrastructure death."""
+        selected_main=False
+        try:
+            with self.session(task_type) as provider:
+                selected_main=provider is self.main
+                return provider.generate(prompt,max_output_tokens=max_output_tokens)
+        except ContextLimitExceeded:
+            raise
+        except (PermissionError,ValueError):
+            # PermissionError is an OSError subclass; keep policy/validation
+            # rejection outside the infrastructure-failover boundary.
+            raise
+        except (RuntimeUnavailable,ConnectionError,urllib.error.URLError,OSError):
+            if task_type in {"FAST","CHAT_FAST"} or not selected_main: raise
+        with self.failover_session() as fallback:
+            return fallback.generate(prompt,max_output_tokens=max_output_tokens)
 
     def runtime_health(self):
         try: state=self.state()

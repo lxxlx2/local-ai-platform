@@ -27,9 +27,13 @@
 
 ## Provider boundaries
 
-`Qwen38Provider` talks only to a localhost sidecar on port 8001. Normal chat and Owner-private JPEG understanding use this provider; `/fast` and deterministic fallback use the existing localhost-only Qwen3.6 oMLX provider. The lifecycle owns only its two exact launchd labels, refuses simultaneous healthy heavy runtimes, performs memory preflight, and restores MAIN after a temporary FAST session. It never terminates unknown user processes.
+`Qwen38Provider` talks only to a localhost sidecar on port 8001. Normal chat and Owner-private JPEG understanding use this provider; `/fast` and deterministic fallback use the existing localhost-only Qwen3.6 oMLX provider. A bounded async executor admits one heavy operation and runs the complete synchronous lifecycle plus inference in one dedicated worker, so the Telegram event loop remains responsive without holding a thread lock across an `await`. If an already-selected MAIN dies for an infrastructure reason, the factory stops and confirms MAIN down, then retries exactly once on FALLBACK. Context, validation, authorization, secret-firewall, and cancellation failures are never failover candidates, and one `ChatService` invocation owns history persistence.
 
-Owner Telegram images are bounded to 20 MB, checked by MIME, magic bytes, exact size, and symlink policy, then copied with mode 0600 into an ignored TTL spool. The provider accepts only paths below that spool root. Public image inference remains disabled.
+The lifecycle owns only its two exact launchd labels, refuses simultaneous healthy heavy runtimes, performs both a 6 GiB absolute swap ceiling and a 2 GiB sampled-delta guard, and restores MAIN after a temporary FAST session. Partial starts are cleaned up and confirmed down before rollback. It never terminates unknown user processes.
+
+Owner Telegram images are downloaded and validated before heavy-runtime admission, bounded to 20 MB, checked by MIME, magic bytes, exact size, and symlink policy, then copied with mode 0600 into an ignored mode-0700 TTL spool. Each request spool file is deleted immediately after success, failure, or cancellation; TTL cleanup is crash recovery only. The provider accepts only paths below that spool root. Public image inference remains disabled and performs no download.
+
+Qwen3.8 applies the 16,384-token ceiling to `chat_template(prompt) + output`. The sidecar uses the real tokenizer, reserves at least 16 output tokens, and clamps requested output to the exact remaining budget. The client performs only a coarse 4 MiB request-size guard because character count is not token count.
 
 `AudioService`, `ImageService`, `VideoService`, `EmbeddingProvider`, and `RerankProvider` are dependency-free control contracts. Other heavy inference implementations belong in their isolated runtime environments. `MediaJobRepository` persists only owner scope, state, bounded progress, private references, model role, and error category; raw prompts are excluded from its schema.
 

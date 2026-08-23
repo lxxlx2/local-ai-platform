@@ -15,6 +15,8 @@ MODEL_ID="mlx-community/Qwen3.8-27B-8bit"
 MODEL_PATH=Path("/Users/jerson/AI/models/qwen38-27b-8bit")
 DEFAULT_PORT=8001
 MAX_CONTEXT_TOKENS=16384
+MIN_OUTPUT_TOKENS=16
+MAX_PROMPT_BYTES=4*1024**2
 PRIVATE_SPOOL_ROOT=Path("/Users/jerson/AI/runtime/private-media")
 
 
@@ -34,6 +36,8 @@ class Qwen38Provider:
             with urllib.request.urlopen(request,timeout=timeout or self.timeout) as response: return json.load(response)
         except urllib.error.HTTPError as exc:
             if exc.code==413: raise ContextLimitExceeded("prompt exceeds MAIN 16K context limit") from exc
+            if exc.code==400: raise ValueError("qwen38 request rejected") from exc
+            if exc.code in {401,403}: raise PermissionError("qwen38 request denied") from exc
             raise RuntimeUnavailable(f"qwen38 sidecar HTTP {exc.code}") from exc
         except (OSError,urllib.error.URLError,json.JSONDecodeError) as exc:
             raise RuntimeUnavailable("qwen38 sidecar unavailable") from exc
@@ -42,9 +46,10 @@ class Qwen38Provider:
 
     def _precheck(self,prompt):
         if not isinstance(prompt,str) or not prompt.strip(): raise ValueError("prompt required")
-        # Conservative client boundary; the sidecar applies the exact tokenizer
-        # limit after its chat template. This rejects safely without inference.
-        if len(prompt)>self.max_context_tokens: raise ContextLimitExceeded("prompt exceeds MAIN 16K context limit")
+        # Characters are not tokens: long ASCII text can be well below the
+        # tokenizer limit. The client only enforces a coarse DoS byte bound;
+        # exact total-context accounting is server-authoritative.
+        if len(prompt.encode("utf-8"))>MAX_PROMPT_BYTES: raise ValueError("prompt request too large")
 
     def generate(self,prompt,max_output_tokens=1024):
         self._precheck(prompt)
@@ -74,13 +79,16 @@ class Qwen38SidecarEngine:
     def _generate(self,prompt,*,image=None,max_output_tokens=1024):
         formatted=self.apply_chat_template(self.processor,self.config,prompt,num_images=1 if image else 0)
         exact_tokens=len(self.processor.tokenizer.encode(formatted))
-        if exact_tokens>self.max_context_tokens: raise ContextLimitExceeded("exact token limit exceeded")
+        remaining=self.max_context_tokens-exact_tokens
+        if remaining<MIN_OUTPUT_TOKENS: raise ContextLimitExceeded("no safe output budget remains")
+        effective_max_output=min(max_output_tokens,remaining)
+        if exact_tokens+effective_max_output>self.max_context_tokens: raise AssertionError("context budget invariant")
         pieces=[]; result=None
         with self.lock:
-            for item in self.stream_generate(self.model,self.processor,formatted,image=image,max_tokens=max_output_tokens,temperature=0,enable_thinking=False,verbose=False):
+            for item in self.stream_generate(self.model,self.processor,formatted,image=image,max_tokens=effective_max_output,temperature=0,enable_thinking=False,verbose=False):
                 pieces.append(item.text); result=item
         text="".join(pieces).strip()
-        return {"status":"completed" if result and result.finish_reason=="stop" else "incomplete","output_text":text,"output":[{"content":[{"type":"output_text","text":text}]}],"usage":{"input_tokens":result.prompt_tokens if result else exact_tokens,"output_tokens":result.generation_tokens if result else 0},"max_output_tokens":max_output_tokens,"incomplete_details":None if result and result.finish_reason=="stop" else {"reason":result.finish_reason if result else "empty"}}
+        return {"status":"completed" if result and result.finish_reason=="stop" else "incomplete","output_text":text,"output":[{"content":[{"type":"output_text","text":text}]}],"usage":{"input_tokens":result.prompt_tokens if result else exact_tokens,"output_tokens":result.generation_tokens if result else 0},"exact_prompt_tokens":exact_tokens,"requested_max_output_tokens":max_output_tokens,"max_output_tokens":effective_max_output,"incomplete_details":None if result and result.finish_reason=="stop" else {"reason":result.finish_reason if result else "empty"}}
 
     def text(self,prompt,max_output_tokens): return self._generate(prompt,max_output_tokens=max_output_tokens)
     def vision(self,image_ref,prompt,max_output_tokens):

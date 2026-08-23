@@ -22,3 +22,12 @@ def test_preflight_detects_swap_growth_between_live_samples():
     guard=MemoryPreflight(lambda: next(samples),max_swap_delta_gib=2)
     assert guard.check(34).allowed
     assert guard.check(34).reason=="SWAP_RUNAWAY"
+
+def test_preflight_rejects_high_absolute_swap_on_first_sample():
+    guard=MemoryPreflight(lambda: MemorySnapshot(48,34,6.1,"NORMAL",reclaimable_gib=34))
+    result=guard.check(34)
+    assert not result.allowed and result.reason=="SWAP_ABSOLUTE_LIMIT"
+
+def test_preflight_accepts_qualification_level_swap_when_other_signals_are_safe():
+    guard=MemoryPreflight(lambda: MemorySnapshot(48,34,3.999,"NORMAL",reclaimable_gib=34))
+    assert guard.check(34).allowed

@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,12 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def synchronized(method):
+    def guarded(self,*args,**kwargs):
+        with self.lock: return method(self,*args,**kwargs)
+    return guarded
+
+
 class ScopedSQLiteRepository:
     """A deliberately separate SQLite development store for one security plane."""
 
@@ -17,9 +24,11 @@ class ScopedSQLiteRepository:
         self.path = path
         self.plane = plane
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path)
+        self.lock=threading.RLock()
+        self.db = sqlite3.connect(path,check_same_thread=False)
         self.db.row_factory = sqlite3.Row
 
+    @synchronized
     def migrate(self):
         self.db.executescript(
             """
@@ -34,15 +43,18 @@ class ScopedSQLiteRepository:
         )
         self.db.commit()
 
+    @synchronized
     def close(self):
         self.db.close()
 
+    @synchronized
     def create_session(self, identity, title="新对话"):
         session_id = str(uuid.uuid4())
         self.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,NULL)", (session_id, identity.internal_user_id, title, utc_now(), utc_now()))
         self.db.commit()
         return session_id
 
+    @synchronized
     def _session(self, identity, session_id):
         row = self.db.execute("SELECT * FROM sessions WHERE id=? AND deleted_at IS NULL", (session_id,)).fetchone()
         if not row:
@@ -50,6 +62,7 @@ class ScopedSQLiteRepository:
         ensure_owned(identity, row["owner_id"])
         return row
 
+    @synchronized
     def add_message(self, identity, session_id, role, content):
         self._session(identity, session_id)
         message_id = str(uuid.uuid4())
@@ -58,14 +71,17 @@ class ScopedSQLiteRepository:
         self.db.commit()
         return message_id
 
+    @synchronized
     def recent_messages(self, identity, session_id, limit=12):
         self._session(identity, session_id)
         rows = self.db.execute("SELECT * FROM messages WHERE session_id=? AND owner_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?", (session_id, identity.internal_user_id, limit)).fetchall()
         return list(reversed(rows))
 
+    @synchronized
     def list_sessions(self, identity, limit=10):
         return self.db.execute("SELECT * FROM sessions WHERE owner_id=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT ?", (identity.internal_user_id, limit)).fetchall()
 
+    @synchronized
     def delete_session(self, identity, session_id):
         self._session(identity, session_id)
         now = utc_now()
@@ -73,23 +89,28 @@ class ScopedSQLiteRepository:
         self.db.execute("UPDATE messages SET deleted_at=? WHERE session_id=?", (now, session_id))
         self.db.commit()
 
+    @synchronized
     def set_summary(self, identity, session_id, content):
         self._session(identity, session_id)
         self.db.execute("INSERT INTO summaries VALUES (?,?,?,?,?,NULL) ON CONFLICT(session_id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at,deleted_at=NULL", (str(uuid.uuid4()), session_id, identity.internal_user_id, content, utc_now()))
         self.db.commit()
 
+    @synchronized
     def get_summary(self, identity, session_id):
         self._session(identity, session_id)
         return self.db.execute("SELECT * FROM summaries WHERE session_id=? AND owner_id=? AND deleted_at IS NULL", (session_id, identity.internal_user_id)).fetchone()
 
+    @synchronized
     def set_memory_opt_in(self, identity, enabled: bool):
         self.db.execute("INSERT INTO user_settings VALUES (?,?,?) ON CONFLICT(owner_id) DO UPDATE SET memory_opt_in=excluded.memory_opt_in,updated_at=excluded.updated_at", (identity.internal_user_id, int(enabled), utc_now()))
         self.db.commit()
 
+    @synchronized
     def memory_opted_in(self, identity):
         row = self.db.execute("SELECT memory_opt_in FROM user_settings WHERE owner_id=?", (identity.internal_user_id,)).fetchone()
         return bool(row and row["memory_opt_in"])
 
+    @synchronized
     def add_memory(self, identity, category, subject, content, source_ref=None, confidence=1.0):
         if self.plane == "public" and not self.memory_opted_in(identity):
             raise PermissionError("public memory requires consent")
@@ -98,6 +119,7 @@ class ScopedSQLiteRepository:
         self.db.commit()
         return memory_id
 
+    @synchronized
     def list_memories(self, identity, query=None, limit=10):
         sql = "SELECT * FROM memories WHERE owner_id=? AND deleted_at IS NULL AND status='ACTIVE'"
         values = [identity.internal_user_id]
@@ -108,6 +130,7 @@ class ScopedSQLiteRepository:
         values.append(limit)
         return self.db.execute(sql, values).fetchall()
 
+    @synchronized
     def delete_memory(self, identity, memory_id):
         row = self.db.execute("SELECT * FROM memories WHERE id=? AND deleted_at IS NULL", (memory_id,)).fetchone()
         if not row:
@@ -116,12 +139,14 @@ class ScopedSQLiteRepository:
         self.db.execute("UPDATE memories SET deleted_at=?,status='DELETED',updated_at=? WHERE id=?", (utc_now(), utc_now(), memory_id))
         self.db.commit()
 
+    @synchronized
     def create_task(self, identity, kind):
         task_id = str(uuid.uuid4())
         self.db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,NULL)", (task_id, identity.internal_user_id, kind, "QUEUED", utc_now(), utc_now()))
         self.db.commit()
         return task_id
 
+    @synchronized
     def get_task(self, identity, task_id):
         row = self.db.execute("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone()
         if not row:
@@ -129,6 +154,7 @@ class ScopedSQLiteRepository:
         ensure_owned(identity, row["owner_id"])
         return row
 
+    @synchronized
     def record_usage(self, identity, kind):
         self.db.execute("INSERT INTO usage_events VALUES (?,?,?,?)", (str(uuid.uuid4()), identity.internal_user_id, kind, utc_now()))
         self.db.commit()

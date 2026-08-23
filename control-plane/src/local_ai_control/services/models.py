@@ -225,8 +225,11 @@ class MemoryPreflightResult:
 
 
 class MemoryPreflight:
-    def __init__(self, probe: Callable[[],MemorySnapshot]|None=None, reserve_gib=4,max_swap_delta_gib=2):
-        self.probe=probe or self._macos_snapshot; self.reserve_gib=reserve_gib; self.max_swap_delta_gib=max_swap_delta_gib
+    def __init__(self, probe: Callable[[],MemorySnapshot]|None=None, reserve_gib=4,max_swap_delta_gib=2,max_swap_used_gib=6):
+        # Qwen3.8 qualification completed safely at 3.999 GiB swap. The 6 GiB
+        # ceiling preserves roughly 2 GiB operational headroom on this 48GB Mac.
+        self.probe=probe or self._macos_snapshot; self.reserve_gib=reserve_gib
+        self.max_swap_delta_gib=max_swap_delta_gib; self.max_swap_used_gib=max_swap_used_gib
         self._last_swap_used_gib=None
     @staticmethod
     def _macos_snapshot():
@@ -252,6 +255,7 @@ class MemoryPreflight:
         self._last_swap_used_gib=snapshot.swap_used_gib
         swap_delta=max(snapshot.swap_delta_gib,sampled_delta)
         if snapshot.pressure=="CRITICAL": allowed=False; reason="MEMORY_PRESSURE_CRITICAL"
+        elif snapshot.swap_used_gib>self.max_swap_used_gib: allowed=False; reason="SWAP_ABSOLUTE_LIMIT"
         elif swap_delta>self.max_swap_delta_gib: allowed=False; reason="SWAP_RUNAWAY"
         else:
             # Qualification proved that 34 GiB peak is safe on a 48 GiB Mac

@@ -14,6 +14,7 @@ import pytest
 from local_ai_control.bot.app import chat_reply_with_runtime, owner_image_reply
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.models import ModelRegistry, QWEN36, QWEN38
+from local_ai_control.services.async_runtime import AsyncRuntimeExecutor
 from local_ai_control.services.omlx import ModelReply
 from local_ai_control.services.qwen38_runtime import ContextLimitExceeded, MODEL_ID, Qwen38Provider, handler_for
 from local_ai_control.services.runtime_providers import HeavyModelConflict, RuntimeProviderFactory
@@ -82,7 +83,7 @@ def test_main_start_failure_deterministically_restores_fallback():
     runtime,main,fast,lifecycle=factory(main=False,fast=True,fail=QWEN38.profile_id)
     with runtime.session("CHAT") as provider: assert provider is fast
     assert fast.healthy and not main.healthy
-    assert lifecycle.events==[("stop",QWEN36.profile_id),("start",QWEN38.profile_id),("start",QWEN36.profile_id)]
+    assert lifecycle.events==[("stop",QWEN36.profile_id),("start",QWEN38.profile_id),("stop",QWEN38.profile_id),("start",QWEN36.profile_id)]
 
 
 def test_unknown_or_unowned_resident_process_is_never_killed_or_overlapped():
@@ -118,10 +119,11 @@ def test_production_chat_helper_selects_main_and_fast_without_model_injection(tm
     repo.close()
 
 
-def test_context_cap_rejects_before_network():
+def test_client_uses_coarse_dos_bound_not_character_token_guess():
     provider=Qwen38Provider(port=65534,max_context_tokens=16384)
     provider._request=lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("network reached"))
-    with pytest.raises(ContextLimitExceeded): provider.generate("字"*16385)
+    with pytest.raises(AssertionError): provider.generate("a"*20000)
+    with pytest.raises(ValueError): provider.generate("a"*(4*1024*1024+1))
 
 
 def test_lifecycle_only_controls_owned_launchd_labels_and_never_kills_unknown(monkeypatch,tmp_path):
@@ -183,14 +185,18 @@ def test_owner_image_ingestion_is_private_validated_and_public_is_denied(tmp_pat
     def provider_session(_task):
         yield provider
     runtime=SimpleNamespace(session=provider_session)
-    bot=FakeBot(b"\xff\xd8\xffsafe-jpeg")
-    answer=asyncio.run(owner_image_reply(Role.OWNER,service,runtime,bot,"photo",declared_size=len(bot.payload),caption="描述"))
-    assert "蓝色方块" in answer and bot.downloads==1 and len(provider.vision_calls)==1
-    assert not list((tmp_path/"inbox").iterdir())
-    with pytest.raises(Exception):
-        asyncio.run(owner_image_reply(Role.PUBLIC,service,runtime,bot,"photo",declared_size=len(bot.payload)))
-    assert bot.downloads==1
-    bad=FakeBot(b"not-an-image")
-    with pytest.raises(ValueError):
-        asyncio.run(owner_image_reply(Role.OWNER,service,runtime,bad,"photo",declared_size=len(bad.payload)))
-    assert len(provider.vision_calls)==1
+    executor=AsyncRuntimeExecutor(runtime)
+    async def scenario():
+        bot=FakeBot(b"\xff\xd8\xffsafe-jpeg")
+        answer=await owner_image_reply(Role.OWNER,service,executor,bot,"photo",declared_size=len(bot.payload),caption="描述")
+        assert "蓝色方块" in answer and bot.downloads==1 and len(provider.vision_calls)==1
+        assert not list((tmp_path/"inbox").iterdir()) and not list((tmp_path/"spool").iterdir())
+        with pytest.raises(Exception):
+            await owner_image_reply(Role.PUBLIC,service,executor,bot,"photo",declared_size=len(bot.payload))
+        assert bot.downloads==1
+        bad=FakeBot(b"not-an-image")
+        with pytest.raises(ValueError):
+            await owner_image_reply(Role.OWNER,service,executor,bad,"photo",declared_size=len(bad.payload))
+        assert len(provider.vision_calls)==1
+    try: asyncio.run(scenario())
+    finally: executor.shutdown()

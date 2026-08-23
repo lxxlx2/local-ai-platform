@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import logging
-import re
 import subprocess
 
 from aiogram import Bot, Dispatcher, F
@@ -16,7 +15,7 @@ from local_ai_control.services.capabilities import capability_intro, model_ident
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
 from local_ai_control.services.authorization import AuthorizationDenied, authorize
-from local_ai_control.services.chat import ChatService
+from local_ai_control.services.async_runtime import AsyncRuntimeExecutor,FastPromptRequired,parse_chat_request,sync_chat_reply
 from local_ai_control.services.control import ControlPlane
 from local_ai_control.services.intent import classify_owner_text, preview_text
 from local_ai_control.services.models import ModelRegistry, model_center_text
@@ -33,9 +32,6 @@ from local_ai_control.services.vision import TelegramImageService
 OWNER_HOME = "本地 AI 控制中心\n\n请选择一个功能："
 PUBLIC_HOME = "AI 助手\n\n你好！可以直接发送问题，或选择一个功能："
 SUPERVISOR_CONTROL_ACTIONS = {"pause", "resume", "cancel", "retry"}
-
-
-class FastPromptRequired(ValueError): pass
 
 
 def owner_keyboard():
@@ -58,24 +54,17 @@ def safe_command(command, fallback="不可用"):
 
 
 def chat_request(text):
-    """Return the controlled runtime class and user text (no model IDs accepted)."""
-    match=re.match(r"^/fast(?:\s+([\s\S]+))?$",text.strip(),flags=re.I)
-    if match:
-        if not match.group(1): raise FastPromptRequired("FAST_PROMPT_REQUIRED")
-        return "FAST",match.group(1).strip()
-    return "CHAT",text
+    return parse_chat_request(text)
 
 
 def chat_reply_with_runtime(provider_factory,repository,firewall,ctx,session_id,text):
-    task,prompt=chat_request(text)
-    with provider_factory.session(task) as provider:
-        return ChatService(repository,provider,firewall).reply(ctx,session_id,prompt)
+    return sync_chat_reply(provider_factory,repository,firewall,ctx,session_id,text)
 
 
-async def owner_image_reply(role,image_service,provider_factory,bot,file_ref,*,declared_size,caption=""):
+async def owner_image_reply(role,image_service,runtime_executor,bot,file_ref,*,declared_size,caption=""):
     if role is not Role.OWNER: raise AuthorizationDenied("Owner image inference only")
-    with provider_factory.session("VISION") as provider:
-        return await image_service.analyze(bot,file_ref,declared_size=declared_size,caption=caption,provider=provider)
+    request=await image_service.stage(bot,file_ref,declared_size=declared_size,caption=caption)
+    return await runtime_executor.vision(image_service,request)
 
 
 async def send_start_dashboard(target, title, keyboard):
@@ -115,6 +104,7 @@ async def run():
     multimodal_router = MultimodalRouter()
     registry = ModelRegistry()
     provider_factory = RuntimeProviderFactory(registry)
+    runtime_executor = AsyncRuntimeExecutor(provider_factory)
     image_service = TelegramImageService(provider_factory.main)
     bot = Bot(settings.token)
     dp = Dispatcher()
@@ -156,7 +146,7 @@ async def run():
         if message.photo:
             photo=message.photo[-1]
             try:
-                answer=await owner_image_reply(ctx.role,image_service,provider_factory,bot,photo,
+                answer=await owner_image_reply(ctx.role,image_service,runtime_executor,bot,photo,
                                                declared_size=photo.file_size or 0,caption=message.caption or "")
             except (AttachmentValidationError,ValueError,PermissionError):
                 answer="图片未通过安全校验，请发送 20MB 以内的 JPEG 图片。"
@@ -165,7 +155,8 @@ async def run():
                 answer="图片理解服务暂时不可用，请稍后重试。"
             await send_chat_output(message,answer)
             return
-        await send_chat_output(message, routed_capability_text(decision,registry=registry,runtime_health=provider_factory.runtime_health()))
+        runtime_health=await runtime_executor.runtime_health()
+        await send_chat_output(message, routed_capability_text(decision,registry=registry,runtime_health=runtime_health))
 
     @dp.message(F.text)
     async def plain_chat(message: Message):
@@ -179,11 +170,12 @@ async def run():
             await message.answer("请求过于频繁，请稍后再试。")
             return
         intent = classify_owner_text(ctx.role, message.text)
-        runtime_health=provider_factory.runtime_health()
         if intent.kind == "MODEL_IDENTITY_INTENT":
+            runtime_health=await runtime_executor.runtime_health()
             await send_chat_output(message, model_identity(registry=registry,runtime_health=runtime_health))
             return
         if intent.kind == "CAPABILITY_INTENT":
+            runtime_health=await runtime_executor.runtime_health()
             await send_chat_output(message, capability_intro(ctx.role,registry=registry,runtime_health=runtime_health))
             return
         if intent.kind == "CONTROL_INTENT":
@@ -195,11 +187,12 @@ async def run():
             await send_chat_output(message, "该生成能力当前仅限 Owner 使用。")
             return
         if routed.intent.value != "CHAT":
+            runtime_health=await runtime_executor.runtime_health()
             await send_chat_output(message, routed_capability_text(routed,registry=registry,runtime_health=runtime_health))
             return
         session_id = await chat_session(ctx)
         try:
-            result = chat_reply_with_runtime(provider_factory,repo_for(ctx),firewall,ctx,session_id,message.text)
+            result = await runtime_executor.chat(repo_for(ctx),firewall,ctx,session_id,message.text)
         except ContextLimitExceeded:
             await send_chat_output(message,"上下文超过 MAIN 的 16K 安全限制，请缩短问题或新建对话。")
             return
@@ -341,8 +334,8 @@ async def run():
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True)
             return
-        runtime=provider_factory.runtime_health()
-        swap = safe_command(["sysctl", "-n", "vm.swapusage"])
+        runtime=await runtime_executor.runtime_health()
+        swap = await runtime_executor.call(safe_command,["sysctl", "-n", "vm.swapusage"])
         await edit_page(query, f"系统状态\n\nMAIN / Qwen3.8：{runtime['MAIN']}\nFAST / Qwen3.6：{runtime['FAST']}\nSwap：{swap}", back_for(query.data))
 
     @dp.callback_query(F.data == "owner:model")
@@ -352,7 +345,8 @@ async def run():
             authorize(ctx, "owner:system")
         except AuthorizationDenied:
             await query.answer("当前账号没有此操作权限。", show_alert=True); return
-        await edit_page(query, model_center_text(registry,provider_factory.runtime_health()), back_for(query.data))
+        runtime=await runtime_executor.runtime_health()
+        await edit_page(query, model_center_text(registry,runtime), back_for(query.data))
 
     @dp.callback_query(F.data == "owner:memory")
     async def owner_memory(query: CallbackQuery):
@@ -378,7 +372,8 @@ async def run():
             "owner:video_generate": multimodal_router.route(ctx.role,"生成视频"),
         }
         if query.data in routed_by_callback:
-            text=routed_capability_text(routed_by_callback[query.data],registry=registry,runtime_health=provider_factory.runtime_health())
+            runtime=await runtime_executor.runtime_health()
+            text=routed_capability_text(routed_by_callback[query.data],registry=registry,runtime_health=runtime)
         else:
             text = {
             "owner:file": "文件分析\n\n当前仅开放受控 txt / md 入口；不会任意读取私人项目文件。",
@@ -409,7 +404,7 @@ async def run():
     try:
         await dp.start_polling(bot)
     finally:
-        private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); await bot.session.close()
+        runtime_executor.shutdown(); private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); await bot.session.close()
 
 
 if __name__ == "__main__":

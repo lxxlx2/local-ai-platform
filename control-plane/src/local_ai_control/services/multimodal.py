@@ -67,11 +67,12 @@ class SpoolRef:
 class PrivateMediaSpool:
     """Copies validated media into an owner-private, TTL-controlled runtime root."""
     def __init__(self,root:Path,ttl_seconds=24*3600):
-        self.root=root.resolve(); self.root.mkdir(parents=True,exist_ok=True,mode=0o700); self.ttl_seconds=ttl_seconds
+        self.root=root.resolve(); self.root.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.root,0o700); self.ttl_seconds=ttl_seconds
     def put(self,source:Path,suffix=".bin"):
         source=source.resolve(strict=True); ref_id=uuid.uuid4().hex; target=self.root/f"{ref_id}{suffix}"
         digest=hashlib.sha256()
-        with source.open("rb") as incoming, target.open("xb") as outgoing:
+        descriptor=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with source.open("rb") as incoming, os.fdopen(descriptor,"wb") as outgoing:
             while chunk:=incoming.read(1024*1024): digest.update(chunk); outgoing.write(chunk)
         os.chmod(target,0o600); expires=time.time()+self.ttl_seconds
         os.utime(target,(expires-self.ttl_seconds,expires-self.ttl_seconds))
