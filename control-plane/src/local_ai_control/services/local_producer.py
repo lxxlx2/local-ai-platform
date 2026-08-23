@@ -1,12 +1,14 @@
-"""Fail-closed local patch producer for Qwen3.8.
+"""Fail-closed local code producer for Qwen3.8.
 
-The model only proposes a unified diff. This module owns path validation and
-fixed-command application. It never exposes shell, Git credentials, arbitrary
-filesystem access, commit, push, merge, deploy, or service control to the model.
+The model proposes exact structured text replacements. This module validates the
+plan, materializes a unified diff deterministically, and optionally applies it.
+The model never receives shell, Git credentials, arbitrary filesystem access,
+commit, push, merge, deploy, or service-control authority.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import difflib
 import hashlib
 import json
 import os
@@ -28,6 +30,9 @@ MAX_FILE_CONTEXT_BYTES = 10_000
 MAX_PATCH_BYTES = 256_000
 MAX_PATCH_FILES = 8
 MAX_MODEL_OUTPUT_TOKENS = 4096
+MAX_EDITS = 12
+MAX_EDIT_BLOCK_BYTES = 32_000
+MAX_EDIT_TOTAL_BYTES = 128_000
 
 
 class LocalProducerError(RuntimeError):
@@ -110,8 +115,11 @@ def _bounded_file_excerpt(text: str, task: str, limit: int = MAX_FILE_CONTEXT_BY
             marker_bytes = marker.encode("utf-8")
             if used + len(marker_bytes) > limit:
                 break
-            rendered.append(marker); used += len(marker_bytes)
-        rendered.append(line + "\n"); used += len(encoded); previous = index
+            rendered.append(marker)
+            used += len(marker_bytes)
+        rendered.append(line + "\n")
+        used += len(encoded)
+        previous = index
     return "".join(rendered) + "# [LOCAL_PRODUCER_CONTEXT_EXCERPT]\n", True
 
 
@@ -192,14 +200,16 @@ def build_prompt(task: str, context: tuple[ContextFile, ...], feedback: str | No
         )
     repair = f"\nPrevious deterministic validation error:\n{feedback[:4000]}\n" if feedback else ""
     prompt = (
-        "You are Local Producer V0.1. Make the smallest correct code change for the task.\n"
+        "You are Local Producer V0.2. Make the smallest correct code change for the task.\n"
         "You have NO shell, Git, filesystem, network, secrets, deployment, or service-control authority.\n"
         "Return exactly one JSON object and nothing else. Schema:\n"
-        '{"summary":"short summary","patch":"unified git diff"}\n'
-        "Patch rules: text only; no binary patch; no rename/copy/delete/mode-only changes; at most 8 files; "
-        "paths must be repo-relative; modify only source/tests/docs; never touch runtime/models/cache/logs/secrets/.git. "
-        "Use standard `diff --git a/path b/path` unified diff. New text files are allowed.\n"
-        "Do not claim tests were executed.\n\nTASK:\n" + task + repair + "\nSAFE READ CONTEXT:\n" + "".join(files)
+        '{"summary":"short summary","edits":[{"path":"repo/relative/file.py","old":"exact existing text","new":"replacement text"}]}\n'
+        "Edit rules: use only files shown in SAFE READ CONTEXT; existing text files only; 1-12 edits; at most 8 files. "
+        "Each old value must be a non-empty EXACT UNIQUE substring copied verbatim from the provided file context. "
+        "Keep old blocks as small as possible while still unique. The deterministic host will create the unified diff. "
+        "Do not emit diff syntax, line numbers, new files, renames, deletes, shell commands, or tests-run claims. "
+        "If multiple edits touch one file, order them so each old block matches after earlier replacements.\n\nTASK:\n"
+        + task + repair + "\nSAFE READ CONTEXT:\n" + "".join(files)
     )
     if len(prompt.encode("utf-8")) > 48_000:
         raise LocalProducerError("assembled local-producer prompt exceeds safe 16K planning envelope")
@@ -215,12 +225,27 @@ def _parse_model_json(text: str) -> dict:
         payload = json.loads(value)
     except json.JSONDecodeError as exc:
         raise LocalProducerError("model did not return strict JSON") from exc
-    if not isinstance(payload, dict) or set(payload) != {"summary", "patch"}:
+    if not isinstance(payload, dict) or set(payload) != {"summary", "edits"}:
         raise LocalProducerError("model JSON schema mismatch")
-    if not isinstance(payload["summary"], str) or not isinstance(payload["patch"], str):
-        raise LocalProducerError("model JSON values must be strings")
-    if len(payload["summary"]) > 2000:
-        raise LocalProducerError("model summary too large")
+    if not isinstance(payload["summary"], str) or len(payload["summary"]) > 2000:
+        raise LocalProducerError("model summary invalid")
+    edits = payload["edits"]
+    if not isinstance(edits, list) or not 1 <= len(edits) <= MAX_EDITS:
+        raise LocalProducerError("model edits count outside safe bound")
+    total = 0
+    for edit in edits:
+        if not isinstance(edit, dict) or set(edit) != {"path", "old", "new"}:
+            raise LocalProducerError("model edit schema mismatch")
+        if not all(isinstance(edit[key], str) for key in ("path", "old", "new")):
+            raise LocalProducerError("model edit values must be strings")
+        if not edit["old"] or edit["old"] == edit["new"]:
+            raise LocalProducerError("model edit must replace non-empty text")
+        block_bytes = len(edit["old"].encode()) + len(edit["new"].encode())
+        if block_bytes > MAX_EDIT_BLOCK_BYTES:
+            raise LocalProducerError("model edit block too large")
+        total += block_bytes
+        if total > MAX_EDIT_TOTAL_BYTES:
+            raise LocalProducerError("model edits total too large")
     return payload
 
 
@@ -279,6 +304,76 @@ def validate_patch(patch: str, repo_root: Path = AI_ROOT, write_roots: tuple[Pat
     return tuple(targets)
 
 
+def materialize_edits(
+    edits: list[dict], context: tuple[ContextFile, ...], repo_root: Path = AI_ROOT,
+    write_roots: tuple[Path, ...] = (),
+) -> str:
+    root = Path(repo_root).resolve()
+    context_by_path = {item.path: item for item in context}
+    policy = RepoWritePolicy(root, write_roots)
+    firewall = SecretFirewall()
+    originals: dict[str, str] = {}
+    current: dict[str, str] = {}
+
+    for edit in edits:
+        path_value = edit["path"]
+        item = context_by_path.get(path_value)
+        if item is None:
+            raise LocalProducerError(f"edit path was not supplied as safe context: {path_value}")
+        try:
+            validated = policy.validate_git_ownership(path_value)
+        except PermissionError as exc:
+            raise LocalProducerError(str(exc)) from exc
+        relative = validated.relative_to(root).as_posix()
+        if relative != path_value:
+            raise LocalProducerError("non-canonical edit path denied")
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            raise LocalProducerError(f"edit target must be existing regular file: {relative}")
+        if relative not in originals:
+            data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != item.sha256:
+                raise LocalProducerError(f"context snapshot changed before edit materialization: {relative}")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LocalProducerError(f"non-UTF8 edit target denied: {relative}") from exc
+            originals[relative] = text
+            current[relative] = text
+        old = edit["old"]
+        new = edit["new"]
+        if "\0" in old or "\0" in new:
+            raise LocalProducerError("NUL in structured edit denied")
+        if firewall.inspect(new).action == "BLOCK":
+            raise LocalProducerError(f"secret-like replacement denied: {relative}")
+        count = current[relative].count(old)
+        if count != 1:
+            raise LocalProducerError(
+                f"old block must match exactly once in {relative}; matched {count} times. "
+                "Copy a smaller exact unique block from SAFE READ CONTEXT."
+            )
+        current[relative] = current[relative].replace(old, new, 1)
+
+    if not current:
+        raise LocalProducerError("structured edit plan produced no files")
+    parts: list[str] = []
+    for relative in sorted(current):
+        before = originals[relative]
+        after = current[relative]
+        if before == after:
+            raise LocalProducerError(f"structured edits produced no change: {relative}")
+        diff = "".join(difflib.unified_diff(
+            before.splitlines(keepends=True), after.splitlines(keepends=True),
+            fromfile=f"a/{relative}", tofile=f"b/{relative}", n=3,
+        ))
+        if not diff:
+            raise LocalProducerError(f"unable to materialize diff: {relative}")
+        parts.append(f"diff --git a/{relative} b/{relative}\n{diff}")
+    patch = "".join(parts)
+    validate_patch(patch, root, write_roots)
+    return patch
+
+
 def check_patch(patch: str, repo_root: Path = AI_ROOT) -> None:
     completed = _git(Path(repo_root).resolve(), "apply", "--check", "--whitespace=error-all", "-", input_text=patch)
     if completed.returncode != 0:
@@ -312,11 +407,11 @@ class LocalPatchProducer:
                 continue
             try:
                 payload = _parse_model_json(reply.text)
-                paths_out = validate_patch(payload["patch"], self.repo_root, self.write_roots)
-                check_patch(payload["patch"], self.repo_root)
+                patch = materialize_edits(payload["edits"], context, self.repo_root, self.write_roots)
+                paths_out = validate_patch(patch, self.repo_root, self.write_roots)
+                check_patch(patch, self.repo_root)
                 return LocalPatchProposal(
-                    payload["patch"], payload["summary"].strip(),
-                    hashlib.sha256(payload["patch"].encode()).hexdigest(), paths_out,
+                    patch, payload["summary"].strip(), hashlib.sha256(patch.encode()).hexdigest(), paths_out,
                 )
             except LocalProducerError as exc:
                 last_error = exc
