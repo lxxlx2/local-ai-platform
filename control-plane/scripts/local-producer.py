@@ -10,7 +10,7 @@ ROOT = Path("/Users/jerson/AI")
 sys.path.insert(0, str(ROOT / "control-plane/src"))
 
 from local_ai_control.services.local_producer import (  # noqa: E402
-    LocalPatchProducer, LocalProducerError, discover_context_paths, require_safe_worktree,
+    LocalPatchProducer, LocalProducerError, MAX_TASK_BYTES, discover_context_paths, require_safe_worktree,
 )
 
 
@@ -25,8 +25,8 @@ def main() -> int:
     try:
         branch = require_safe_worktree(ROOT)
         task_data = args.task_file.read_bytes()
-        if len(task_data) > 128_000:
-            raise LocalProducerError("task file exceeds 128KB")
+        if len(task_data) > MAX_TASK_BYTES:
+            raise LocalProducerError(f"task file exceeds {MAX_TASK_BYTES} bytes")
         task = task_data.decode("utf-8")
         paths = tuple(args.read) if args.read else discover_context_paths(task, ROOT)
         producer = LocalPatchProducer(repo_root=ROOT)

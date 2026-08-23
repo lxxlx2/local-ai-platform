@@ -26,6 +26,16 @@ def init_repo(tmp_path):
     return root
 
 
+def edit_patch():
+    return """diff --git a/control-plane/src/example.py b/control-plane/src/example.py
+--- a/control-plane/src/example.py
++++ b/control-plane/src/example.py
+@@ -1 +1 @@
+-VALUE = 1
++VALUE = 2
+"""
+
+
 def test_json_parser_is_strict_but_accepts_single_json_fence():
     payload=_parse_model_json('```json\n{"summary":"ok","patch":"diff"}\n```')
     assert payload=={"summary":"ok","patch":"diff"}
@@ -39,20 +49,16 @@ def test_excerpt_prefers_relevant_windows_and_is_bounded():
     assert truncated and "HeavyModelConflict" in excerpt and len(excerpt.encode())<=2200
 
 
-def test_patch_policy_accepts_tracked_edit_and_rejects_escape_delete_and_rename(tmp_path):
-    root=init_repo(tmp_path)
-    patch="""diff --git a/control-plane/src/example.py b/control-plane/src/example.py
---- a/control-plane/src/example.py
-+++ b/control-plane/src/example.py
-@@ -1 +1 @@
--VALUE = 1
-+VALUE = 2
-"""
+def test_patch_policy_accepts_tracked_edit_and_rejects_escape_delete_rename_and_metadata_forgery(tmp_path):
+    root=init_repo(tmp_path); patch=edit_patch()
     assert validate_patch(patch,root)==("control-plane/src/example.py",)
     check_patch(patch,root)
     with pytest.raises(LocalProducerError): validate_patch(patch.replace("control-plane/src/example.py","../escape.py"),root)
     with pytest.raises(LocalProducerError): validate_patch("deleted file mode 100644\n"+patch,root)
     with pytest.raises(LocalProducerError): validate_patch(patch.replace("b/control-plane/src/example.py","b/control-plane/src/other.py",1),root)
+    forged=patch.replace("+++ b/control-plane/src/example.py","+++ b/control-plane/tests/escape.py")
+    with pytest.raises(LocalProducerError,match="metadata path mismatch"): validate_patch(forged,root)
+    with pytest.raises(LocalProducerError): validate_patch("noise\n"+patch,root)
 
 
 def test_patch_policy_allows_safe_new_text_file_but_denies_runtime(tmp_path):
@@ -70,14 +76,7 @@ new file mode 100644
 
 
 def test_producer_repairs_once_after_invalid_patch(tmp_path):
-    root=init_repo(tmp_path)
-    good_patch="""diff --git a/control-plane/src/example.py b/control-plane/src/example.py
---- a/control-plane/src/example.py
-+++ b/control-plane/src/example.py
-@@ -1 +1 @@
--VALUE = 1
-+VALUE = 2
-"""
+    root=init_repo(tmp_path); good_patch=edit_patch()
     responses=iter((
         ModelReply("not json","completed",None,1,4096),
         ModelReply(json.dumps({"summary":"fix","patch":good_patch}),"completed",None,1,4096),

@@ -14,14 +14,17 @@ from pathlib import Path
 import re
 import subprocess
 from typing import Iterable
+import uuid
 
 from local_ai_control.services.qwen38_runtime import Qwen38Provider
 from local_ai_control.services.security import SecretFirewall
-from local_ai_control.services.supervisor_contracts import AI_ROOT, RepoAccessPolicy, RepoWritePolicy
+from local_ai_control.services.supervisor_contracts import (
+    AI_ROOT, CodexTaskSpec, RepoAccessPolicy, RepoWritePolicy, StageResult, StageResultStatus,
+)
 
-MAX_TASK_BYTES = 128_000
-MAX_CONTEXT_BYTES = 38_000
-MAX_FILE_CONTEXT_BYTES = 12_000
+MAX_TASK_BYTES = 20_000
+MAX_CONTEXT_BYTES = 24_000
+MAX_FILE_CONTEXT_BYTES = 10_000
 MAX_PATCH_BYTES = 256_000
 MAX_PATCH_FILES = 8
 MAX_MODEL_OUTPUT_TOKENS = 4096
@@ -86,13 +89,8 @@ def _bounded_file_excerpt(text: str, task: str, limit: int = MAX_FILE_CONTEXT_BY
     if len(raw) <= limit:
         return text, False
     lines = text.splitlines()
-    terms = _task_terms(task)
-    hits: list[int] = []
-    lowered_terms = tuple(term.lower() for term in terms)
-    for index, line in enumerate(lines):
-        low = line.lower()
-        if any(term in low for term in lowered_terms):
-            hits.append(index)
+    lowered_terms = tuple(term.lower() for term in _task_terms(task))
+    hits = [index for index, line in enumerate(lines) if any(term in line.lower() for term in lowered_terms)]
     if not hits:
         clipped = raw[:limit].decode("utf-8", errors="ignore")
         return clipped + "\n# [LOCAL_PRODUCER_CONTEXT_TRUNCATED]\n", True
@@ -193,16 +191,19 @@ def build_prompt(task: str, context: tuple[ContextFile, ...], feedback: str | No
             f"{item.content}\n</FILE>\n"
         )
     repair = f"\nPrevious deterministic validation error:\n{feedback[:4000]}\n" if feedback else ""
-    return (
+    prompt = (
         "You are Local Producer V0.1. Make the smallest correct code change for the task.\n"
         "You have NO shell, Git, filesystem, network, secrets, deployment, or service-control authority.\n"
         "Return exactly one JSON object and nothing else. Schema:\n"
         '{"summary":"short summary","patch":"unified git diff"}\n'
-        "Patch rules: text only; no binary patch; no rename/copy/delete; at most 8 files; paths must be repo-relative; "
-        "modify only source/tests/docs; never touch runtime/models/cache/logs/secrets/.git. "
+        "Patch rules: text only; no binary patch; no rename/copy/delete/mode-only changes; at most 8 files; "
+        "paths must be repo-relative; modify only source/tests/docs; never touch runtime/models/cache/logs/secrets/.git. "
         "Use standard `diff --git a/path b/path` unified diff. New text files are allowed.\n"
         "Do not claim tests were executed.\n\nTASK:\n" + task + repair + "\nSAFE READ CONTEXT:\n" + "".join(files)
     )
+    if len(prompt.encode("utf-8")) > 48_000:
+        raise LocalProducerError("assembled local-producer prompt exceeds safe 16K planning envelope")
+    return prompt
 
 
 def _parse_model_json(text: str) -> dict:
@@ -223,20 +224,43 @@ def _parse_model_json(text: str) -> dict:
     return payload
 
 
+def _validate_patch_section(section: str, source: str, target: str) -> None:
+    prefix = section.split("@@", 1)[0]
+    minus = re.findall(r"^--- (.+)$", prefix, flags=re.M)
+    plus = re.findall(r"^\+\+\+ (.+)$", prefix, flags=re.M)
+    if len(minus) != 1 or len(plus) != 1:
+        raise LocalProducerError("patch metadata headers are malformed")
+    expected_old = {f"a/{source}", "/dev/null"}
+    if minus[0] not in expected_old or plus[0] != f"b/{target}":
+        raise LocalProducerError("patch metadata path mismatch")
+    if minus[0] == "/dev/null" and "new file mode " not in prefix:
+        raise LocalProducerError("new file patch missing mode metadata")
+    if minus[0] != "/dev/null" and "new file mode " in prefix:
+        raise LocalProducerError("existing file patch has new-file metadata")
+
+
 def validate_patch(patch: str, repo_root: Path = AI_ROOT, write_roots: tuple[Path, ...] = ()) -> tuple[str, ...]:
     root = Path(repo_root).resolve()
     encoded = patch.encode("utf-8")
     if not encoded or len(encoded) > MAX_PATCH_BYTES or b"\0" in encoded:
         raise LocalProducerError("patch outside safe size bound")
-    forbidden = ("GIT binary patch", "Binary files ", "rename from ", "rename to ", "copy from ", "copy to ", "deleted file mode")
+    forbidden = (
+        "GIT binary patch", "Binary files ", "rename from ", "rename to ", "copy from ", "copy to ",
+        "deleted file mode", "old mode ", "new mode ", "similarity index ", "dissimilarity index ",
+    )
     if any(marker in patch for marker in forbidden):
         raise LocalProducerError("unsupported patch operation")
-    headers = re.findall(r"^diff --git a/(.+) b/(.+)$", patch, flags=re.M)
-    if not headers or len(headers) > MAX_PATCH_FILES:
+    matches = list(re.finditer(r"^diff --git a/(.+) b/(.+)$", patch, flags=re.M))
+    if not matches or len(matches) > MAX_PATCH_FILES:
         raise LocalProducerError("patch file count outside safe bound")
+    if patch[:matches[0].start()].strip():
+        raise LocalProducerError("content before first diff header denied")
     targets: list[str] = []
     policy = RepoWritePolicy(root, write_roots)
-    for source, target in headers:
+    for index, match in enumerate(matches):
+        source, target = match.group(1), match.group(2)
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(patch)
+        section = patch[match.start():end]
         if source != target:
             raise LocalProducerError("rename/copy style patch denied")
         if source.startswith("/") or ".." in Path(source).parts:
@@ -248,6 +272,7 @@ def validate_patch(patch: str, repo_root: Path = AI_ROOT, write_roots: tuple[Pat
         relative = validated.relative_to(root).as_posix()
         if relative != target:
             raise LocalProducerError("non-canonical patch path denied")
+        _validate_patch_section(section, source, target)
         targets.append(relative)
     if len(set(targets)) != len(targets):
         raise LocalProducerError("duplicate patch target denied")
@@ -299,9 +324,50 @@ class LocalPatchProducer:
         raise LocalProducerError(f"local producer failed after bounded repair attempts: {last_error}")
 
     def propose_auto(self, task: str, *, attempts: int = 2) -> LocalPatchProposal:
-        paths = discover_context_paths(task, self.repo_root)
-        return self.propose(task, paths, attempts=attempts)
+        return self.propose(task, discover_context_paths(task, self.repo_root), attempts=attempts)
 
     def apply(self, proposal: LocalPatchProposal) -> None:
         validate_patch(proposal.patch, self.repo_root, self.write_roots)
         apply_patch(proposal.patch, self.repo_root)
+
+
+class LocalProducerTaskRunner:
+    """CodexTaskRunner-compatible adapter for the durable Supervisor boundary."""
+    cancellation_supported = False
+
+    def __init__(self, provider=None, *, attempts: int = 2):
+        self.provider = provider or Qwen38Provider()
+        self.attempts = attempts
+
+    def cancel(self, execution_id: str | None = None, reason: str | None = None) -> bool:
+        return False
+
+    def run_task(self, spec: CodexTaskSpec, execution_id: str) -> StageResult:
+        try:
+            uuid.UUID(execution_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("execution_id must be a canonical UUID") from exc
+        validated = spec.validate()
+        require_safe_worktree(spec.repo_root)
+        manifest_paths = {str(item["path"]) for item in validated["safe_file_manifest"]}
+        discovered = discover_context_paths(spec.task_prompt, spec.repo_root)
+        selected = tuple(path for path in discovered if path in manifest_paths)
+        if not selected:
+            selected = tuple(sorted(manifest_paths))[:6]
+        producer = LocalPatchProducer(
+            self.provider, repo_root=spec.repo_root,
+            write_roots=tuple(Path(path) for path in validated["write_roots"]),
+        )
+        try:
+            proposal = producer.propose(spec.task_prompt, selected, attempts=self.attempts)
+            producer.apply(proposal)
+        except LocalProducerError as exc:
+            return StageResult(
+                StageResultStatus.BLOCKED, "Local Producer could not produce a safe applicable patch",
+                error=type(exc).__name__, metrics={"detail_sha256": hashlib.sha256(str(exc).encode()).hexdigest()},
+            )
+        return StageResult.passed(
+            "Local Qwen3.8 produced and applied a deterministic-policy-validated patch; tests not yet run",
+            artifacts=({"kind":"local_patch","reference":f"sha256:{proposal.patch_sha256}","size_bytes":len(proposal.patch.encode())},),
+            metrics={"provider":"Qwen3.8-27B-8bit","files_changed":len(proposal.paths),"tests_executed":False},
+        )

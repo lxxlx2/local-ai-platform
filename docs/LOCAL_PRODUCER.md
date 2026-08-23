@@ -6,31 +6,33 @@ Purpose: keep coding work moving when external Codex quota is exhausted, using t
 
 Qwen3.8 is treated as an untrusted code proposer, not an autonomous shell agent.
 
-It may receive only bounded, secret-scanned repository context and a task prompt. It returns one strict JSON object containing a unified diff. Deterministic Python/Git policy then validates the diff. The model receives no shell, Git credential, service-management, arbitrary filesystem, commit, push, merge, deployment, secret, or network tool.
+It may receive only bounded, secret-scanned repository context and a task prompt. It returns one strict JSON object containing a unified diff. Deterministic Python/Git policy validates the diff. The model receives no shell, Git credential, service-management, arbitrary filesystem, commit, push, merge, deployment, secret, or network tool.
 
 V0.1 refuses:
 
 - `main` branch mutation
 - dirty worktrees
-- path traversal
+- path traversal or non-canonical patch paths
 - runtime/models/cache/logs/secrets/.git access
 - binary patches
-- rename/copy/delete patches
+- rename/copy/delete/mode-only patches
 - ignored-file writes
+- mismatched `diff --git`, `---`, or `+++` paths
 - more than 8 changed files
 - patches over 256 KiB
-- task prompts over 128 KiB
+- task prompts over 20 KiB
+- assembled planning prompts over 48 KiB
 - model responses that are not strict JSON
 
-The fixed validation flow is:
+The fixed flow is:
 
-`task + safe context -> Qwen3.8 -> strict JSON patch -> path policy -> git apply --check -> optional git apply`
+`task + bounded safe context -> Qwen3.8 -> strict JSON patch -> path policy -> git apply --check -> optional git apply`
 
 No commit or push occurs.
 
 ## Pilot usage
 
-The Qwen3.8 localhost sidecar must already be healthy on `127.0.0.1:8001`. Do not start a second heavy model alongside another resident heavy model.
+The Qwen3.8 localhost sidecar must already be healthy on `127.0.0.1:8001`. Do not start a second heavy model alongside another resident heavy model. Until the separate heavy-process R4 review is closed, start/stop decisions remain a manual operational gate.
 
 From `/Users/jerson/AI` on a clean feature branch:
 
@@ -40,7 +42,7 @@ From `/Users/jerson/AI` on a clean feature branch:
   --task-file /absolute/path/to/task.txt
 ```
 
-That validates and prints a proposed patch without changing the worktree.
+This validates and prints a proposed patch without changing the worktree.
 
 To apply only after deterministic patch validation:
 
@@ -51,17 +53,31 @@ To apply only after deterministic patch validation:
   --apply
 ```
 
-Context can be explicitly bounded with repeated `--read` arguments. If omitted, V0.1 discovers a small set from repo paths and task keywords.
+Context can be explicitly bounded with repeated `--read` arguments. If omitted, V0.1 discovers a small set from repo paths and task keywords and extracts bounded relevant excerpts from large files.
 
 After application, the existing Supervisor validation/security/review stages remain authoritative. Local Producer V0.1 does not claim tests passed and does not self-certify review.
 
-## Planned Supervisor integration
+## Supervisor adapter
 
-After this pilot is independently reviewed, Producer provider priority can become:
+`local_producer_runners()` is an opt-in runner set. The normal Supervisor daemon still uses its existing default runner configuration, so merely adding this code does not turn on local mutation.
+
+The opt-in pipeline is:
+
+1. durable Producer work unit
+2. Local Qwen3.8 strict patch proposal
+3. deterministic patch validation/application
+4. pytest validation stage
+5. self-acceptance
+6. independent Review
+7. bounded Revision via the same Local Producer when required
+8. security regression
+9. read-only Git Gate
+
+Long-term provider priority can become:
 
 1. external Codex when available and authorized
 2. Local Qwen3.8 Patch Producer
-3. Local Qwen3.6 only for explicitly qualified simple/FAST coding tasks
+3. Local Qwen3.6 only after a separate simple-coding qualification
 4. WAIT_FOR_HUMAN
 
-Provider fallback must preserve the existing durable work-unit, validation, independent review, revision, security, and Git Gate contracts.
+Provider fallback must preserve the durable work-unit, validation, independent review, revision, security, and Git Gate contracts.
