@@ -11,7 +11,7 @@ It may receive only bounded, secret-scanned repository context and a task prompt
 V0.1 refuses:
 
 - `main` branch mutation
-- dirty worktrees
+- dirty target worktrees
 - path traversal or non-canonical patch paths
 - runtime/models/cache/logs/secrets/.git access
 - binary patches
@@ -30,25 +30,37 @@ The fixed flow is:
 
 No commit or push occurs.
 
-## Pilot usage
+## Recommended isolated pilot
+
+Keep the target feature branch in `/Users/jerson/AI` and check out the Local Producer code in a separate small Git worktree. This avoids cherry-picking Local Producer implementation into the feature branch being repaired.
+
+Example:
+
+```bash
+cd /Users/jerson/AI
+git fetch origin
+git worktree add /Users/jerson/AI-local-producer origin/feat/local-producer-v01
+```
 
 The Qwen3.8 localhost sidecar must already be healthy on `127.0.0.1:8001`. Do not start a second heavy model alongside another resident heavy model. Until the separate heavy-process R4 review is closed, start/stop decisions remain a manual operational gate.
 
-From `/Users/jerson/AI` on a clean feature branch:
+Dry-run proposal against `/Users/jerson/AI`:
 
 ```bash
 /Users/jerson/AI/runtime/control-plane-venv/bin/python \
-  control-plane/scripts/local-producer.py \
+  /Users/jerson/AI-local-producer/control-plane/scripts/local-producer.py \
+  --repo-root /Users/jerson/AI \
   --task-file /absolute/path/to/task.txt
 ```
 
-This validates and prints a proposed patch without changing the worktree.
+This validates and prints a proposed patch without changing the target worktree.
 
-To apply only after deterministic patch validation:
+Apply only after deterministic patch validation:
 
 ```bash
 /Users/jerson/AI/runtime/control-plane-venv/bin/python \
-  control-plane/scripts/local-producer.py \
+  /Users/jerson/AI-local-producer/control-plane/scripts/local-producer.py \
+  --repo-root /Users/jerson/AI \
   --task-file /absolute/path/to/task.txt \
   --apply
 ```
