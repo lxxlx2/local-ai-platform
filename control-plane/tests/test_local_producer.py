@@ -6,7 +6,7 @@ import pytest
 
 from local_ai_control.services.local_producer import (
     LocalPatchProducer, LocalProducerError, _bounded_file_excerpt, _parse_model_json,
-    check_patch, discover_context_paths, require_safe_worktree, validate_patch,
+    check_patch, discover_context_paths, materialize_edits, require_safe_worktree, validate_patch,
 )
 from local_ai_control.services.omlx import ModelReply
 
@@ -20,7 +20,7 @@ def init_repo(tmp_path):
     subprocess.run(["git","init","-b","feat/test"],cwd=root,check=True,capture_output=True)
     subprocess.run(["git","config","user.email","test@example.com"],cwd=root,check=True)
     subprocess.run(["git","config","user.name","test"],cwd=root,check=True)
-    target=root/"control-plane/src/example.py"; target.write_text("VALUE = 1\n")
+    target=root/"control-plane/src/example.py"; target.write_text("VALUE = 1\nOTHER = 1\n")
     subprocess.run(["git","add","."],cwd=root,check=True)
     subprocess.run(["git","commit","-m","base"],cwd=root,check=True,capture_output=True)
     return root
@@ -30,17 +30,23 @@ def edit_patch():
     return """diff --git a/control-plane/src/example.py b/control-plane/src/example.py
 --- a/control-plane/src/example.py
 +++ b/control-plane/src/example.py
-@@ -1 +1 @@
+@@ -1,2 +1,2 @@
 -VALUE = 1
 +VALUE = 2
+ OTHER = 1
 """
 
 
+def edit_payload(old="VALUE = 1", new="VALUE = 2"):
+    return {"summary":"fix","edits":[{"path":"control-plane/src/example.py","old":old,"new":new}]}
+
+
 def test_json_parser_is_strict_but_accepts_single_json_fence():
-    payload=_parse_model_json('```json\n{"summary":"ok","patch":"diff"}\n```')
-    assert payload=={"summary":"ok","patch":"diff"}
+    payload=_parse_model_json('```json\n'+json.dumps(edit_payload())+'\n```')
+    assert payload==edit_payload()
     with pytest.raises(LocalProducerError): _parse_model_json("text before {}")
-    with pytest.raises(LocalProducerError): _parse_model_json('{"summary":"ok","patch":"x","extra":1}')
+    with pytest.raises(LocalProducerError): _parse_model_json(json.dumps({**edit_payload(),"extra":1}))
+    with pytest.raises(LocalProducerError): _parse_model_json(json.dumps({"summary":"x","edits":[]}))
 
 
 def test_excerpt_prefers_relevant_windows_and_is_bounded():
@@ -75,16 +81,40 @@ new file mode 100644
     with pytest.raises(LocalProducerError): validate_patch(bad,root)
 
 
-def test_producer_repairs_once_after_invalid_patch(tmp_path):
-    root=init_repo(tmp_path); good_patch=edit_patch()
+def test_structured_edit_materializes_host_generated_patch_and_binds_context_snapshot(tmp_path):
+    from local_ai_control.services.local_producer import build_context
+    root=init_repo(tmp_path)
+    context=build_context("change VALUE",["control-plane/src/example.py"],root)
+    patch=materialize_edits(edit_payload()["edits"],context,root)
+    assert "-VALUE = 1" in patch and "+VALUE = 2" in patch
+    check_patch(patch,root)
+    (root/"control-plane/src/example.py").write_text("VALUE = 9\nOTHER = 1\n")
+    with pytest.raises(LocalProducerError,match="snapshot changed"):
+        materialize_edits(edit_payload()["edits"],context,root)
+
+
+def test_structured_edit_requires_path_in_context_and_unique_old_block(tmp_path):
+    from local_ai_control.services.local_producer import build_context
+    root=init_repo(tmp_path)
+    context=build_context("change VALUE",["control-plane/src/example.py"],root)
+    with pytest.raises(LocalProducerError,match="not supplied as safe context"):
+        materialize_edits([{"path":"control-plane/tests/x.py","old":"x","new":"y"}],context,root)
+    ambiguous=[{"path":"control-plane/src/example.py","old":"1","new":"2"}]
+    with pytest.raises(LocalProducerError,match="matched 2 times"):
+        materialize_edits(ambiguous,context,root)
+
+
+def test_producer_repairs_once_after_invalid_structured_edit(tmp_path):
+    root=init_repo(tmp_path)
     responses=iter((
-        ModelReply("not json","completed",None,1,4096),
-        ModelReply(json.dumps({"summary":"fix","patch":good_patch}),"completed",None,1,4096),
+        ModelReply(json.dumps(edit_payload("MISSING = 1","VALUE = 2")),"completed",None,1,4096),
+        ModelReply(json.dumps(edit_payload()),"completed",None,1,4096),
     ))
     provider=SimpleNamespace(generate=lambda *_a,**_k: next(responses))
     producer=LocalPatchProducer(provider,repo_root=root)
     proposal=producer.propose("change VALUE",["control-plane/src/example.py"],attempts=2)
     assert proposal.paths==("control-plane/src/example.py",) and proposal.summary=="fix"
+    assert "-VALUE = 1" in proposal.patch and "+VALUE = 2" in proposal.patch
 
 
 def test_clean_feature_branch_required(tmp_path):
