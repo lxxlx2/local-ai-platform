@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+import json
+from pathlib import Path
 import re
 import subprocess
 import threading
@@ -28,25 +30,49 @@ class ModelRole(StrEnum):
 @dataclass(frozen=True)
 class ModelProfile:
     profile_id: str; display_name: str; provider_id: str; model_id: str
-    roles: dict[ModelRole, str]; local_or_remote: str; data_egress: str
+    roles: frozenset[ModelRole]; local_or_remote: str; data_egress: str
     benchmark_version: str | None = None; benchmark_score: float | None = None
     last_evaluated: str | None = None; precision: str | None = None
     heavy: bool = True; owner_only: bool = False; runtime_env: str | None = None
     local_path: str | None = None; expected_memory_gib: float | None = None
 
 
+REGISTRY_PATH = Path("/Users/jerson/AI/config/model-registry-v0.1.json")
+ELIGIBLE_STATUSES = frozenset({"QUALIFIED", "VALIDATED"})
+ALL_STATUSES = ELIGIBLE_STATUSES | {"REGISTERED_NOT_QUALIFIED"}
+IMMUTABLE_RUNTIME_ISOLATION = {
+    "qwen38": "/Users/jerson/AI/runtime/qwen38-venv",
+    "audio": "/Users/jerson/AI/runtime/audio-venv",
+    "image": "/Users/jerson/AI/runtime/image-venv",
+    "video": "/Users/jerson/AI/runtime/video-venv",
+    "rag": "/Users/jerson/AI/runtime/rag-venv",
+}
+IMMUTABLE_POLICY = {
+    "one_heavy_model_resident": True,
+    "registered_is_not_ready": True,
+    "raw_owner_only": True,
+    "public_privilege_expansion": False,
+}
+
+
+@dataclass(frozen=True)
+class RegistryAlias:
+    role: ModelRole
+    profile_id: str
+    status: str
+    max_context_tokens: int | None = None
+
+
 QWEN36 = ModelProfile(
     "local-qwen36", "Qwen3.6-35B-A3B-4bit", "local-omlx",
     "mlx-community/Qwen3.6-35B-A3B-4bit",
-    {ModelRole.FAST:"CURRENT", ModelRole.FALLBACK:"CURRENT", ModelRole.MAIN:"VALIDATED",
-     ModelRole.DEEP:"NOT_QUALIFIED", ModelRole.CODE:"NO", ModelRole.REVIEW:"LIMITED"},
+    frozenset({ModelRole.FAST,ModelRole.FALLBACK,ModelRole.MAIN,ModelRole.REVIEW}),
     "LOCAL", "NONE", "v1", precision="4bit", runtime_env="/Users/jerson/AI/runtime/omlx-venv",
     local_path="/Users/jerson/AI/models/mlx-community/Qwen3.6-35B-A3B-4bit", expected_memory_gib=28,
 )
 QWEN38 = ModelProfile(
     "local-qwen38", "Qwen3.8-27B-8bit", "local-mlx-vlm", "mlx-community/Qwen3.8-27B-8bit",
-    {ModelRole.MAIN:"REGISTERED", ModelRole.VISION:"REGISTERED",
-     ModelRole.VIDEO_UNDERSTANDING:"REGISTERED", ModelRole.DEEP:"REGISTERED"},
+    frozenset({ModelRole.MAIN,ModelRole.VISION,ModelRole.VIDEO_UNDERSTANDING,ModelRole.DEEP}),
     "LOCAL", "NONE", precision="8bit", runtime_env="/Users/jerson/AI/runtime/qwen38-venv",
     local_path="/Users/jerson/AI/models/qwen38-27b-8bit", expected_memory_gib=34,
 )
@@ -54,7 +80,7 @@ QWEN38 = ModelProfile(
 
 def _profile(pid, name, provider, model_id, role, *, precision=None, owner_only=False,
              runtime_env=None, expected_memory_gib=None):
-    return ModelProfile(pid, name, provider, model_id, {role:"REGISTERED"}, "LOCAL", "NONE",
+    return ModelProfile(pid, name, provider, model_id, frozenset({role}), "LOCAL", "NONE",
                         precision=precision, owner_only=owner_only, runtime_env=runtime_env,
                         expected_memory_gib=expected_memory_gib)
 
@@ -90,12 +116,61 @@ DEFAULT_MODELS = (
 
 
 class ModelRoleRegistry:
-    def __init__(self, models=DEFAULT_MODELS): self.models={m.profile_id:m for m in models}
+    """Runtime registry whose eligibility comes only from versioned config.
+
+    Provider IDs, model IDs, paths, data-egress and owner-only policy remain
+    immutable code metadata. The JSON file may select a known profile and its
+    qualification status, but cannot introduce or weaken a profile.
+    """
+    def __init__(self, models=DEFAULT_MODELS, *, config_path=REGISTRY_PATH, aliases=None):
+        self.models={m.profile_id:m for m in models}
+        self.aliases = self._load_aliases(Path(config_path)) if aliases is None else self._validate_aliases(aliases)
+
+    def _load_aliases(self, path):
+        try:
+            payload=json.loads(path.read_text())
+        except (OSError,json.JSONDecodeError) as exc:
+            raise ValueError("invalid model registry JSON") from exc
+        if set(payload)!={"schema_version","production_aliases","runtime_isolation","policy"} or payload["schema_version"]!="0.1":
+            raise ValueError("invalid model registry schema")
+        if payload["runtime_isolation"] != IMMUTABLE_RUNTIME_ISOLATION or payload["policy"] != IMMUTABLE_POLICY:
+            raise ValueError("immutable model safety policy mismatch")
+        aliases=payload["production_aliases"]
+        required={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING"}
+        if not isinstance(aliases,dict) or set(aliases)!=required:
+            raise ValueError("invalid production aliases")
+        return self._validate_aliases(aliases)
+
+    def _validate_aliases(self, raw_aliases):
+        result={}
+        for role_name, raw in raw_aliases.items():
+            try: role=ModelRole(role_name)
+            except ValueError as exc: raise ValueError("unknown model role") from exc
+            if not isinstance(raw,dict) or not {"profile","status"} <= set(raw) or set(raw)-{"profile","status","max_context_tokens"}:
+                raise ValueError("malformed model alias")
+            profile_id=raw["profile"]; status=raw["status"]
+            if not isinstance(profile_id,str) or profile_id not in self.models or status not in ALL_STATUSES:
+                raise ValueError("unknown profile or status")
+            profile=self.models[profile_id]
+            if role not in profile.roles:
+                raise ValueError("profile does not support role")
+            maximum=raw.get("max_context_tokens")
+            if maximum is not None and (not isinstance(maximum,int) or isinstance(maximum,bool) or maximum < 1024 or maximum > 262144):
+                raise ValueError("invalid max context")
+            if status not in ELIGIBLE_STATUSES and maximum is not None:
+                raise ValueError("unqualified profile cannot publish context")
+            result[role]=RegistryAlias(role,profile_id,status,maximum)
+        return result
+
     def eligible(self, role):
-        return [m for m in self.models.values() if m.roles.get(role) in {"CURRENT","VALIDATED"}]
+        role=ModelRole(role); alias=self.aliases.get(role)
+        return [self.models[alias.profile_id]] if alias and alias.status in ELIGIBLE_STATUSES else []
     def registered(self, role): return [m for m in self.models.values() if role in m.roles]
     def status(self, role):
         choices=self.eligible(role); return choices[0].profile_id if choices else "NOT_AVAILABLE"
+    def alias(self, role): return self.aliases.get(ModelRole(role))
+    def is_profile_eligible(self, profile_id):
+        return any(alias.profile_id==profile_id and alias.status in ELIGIBLE_STATUSES for alias in self.aliases.values())
     def require(self, profile_id, *, owner):
         if profile_id not in self.models: raise LookupError("model is not registered")
         result=self.models[profile_id]
@@ -107,21 +182,27 @@ class ModelRegistry(ModelRoleRegistry): pass
 
 
 class ModelRouter:
-    _TASK_ROLE={"CHAT":ModelRole.FAST,"MAIN":ModelRole.MAIN,"CODE":ModelRole.CODE,"REVIEW":ModelRole.REVIEW,
+    _TASK_ROLE={"CHAT":ModelRole.MAIN,"FAST":ModelRole.FAST,"CHAT_FAST":ModelRole.FAST,"MAIN":ModelRole.MAIN,"CODE":ModelRole.CODE,"REVIEW":ModelRole.REVIEW,
                 "VISION":ModelRole.VISION,"VIDEO_UNDERSTANDING":ModelRole.VIDEO_UNDERSTANDING,
                 "AUDIO":ModelRole.STT_MAIN,"STT":ModelRole.STT_MAIN,"TTS":ModelRole.TTS_MAIN,
                 "EMBEDDING":ModelRole.EMBED,"RERANK":ModelRole.RERANK,"IMAGE":ModelRole.IMAGE_MAIN,
                 "VIDEO":ModelRole.VIDEO_MAIN,"DEEP_REASONING":ModelRole.DEEP}
-    def __init__(self, registry=None): self.registry=registry or ModelRegistry()
+    def __init__(self, registry=None, *, health_check=None, resource_check=None):
+        self.registry=registry or ModelRegistry(); self.health_check=health_check or (lambda _:True); self.resource_check=resource_check or (lambda _:True)
+    def _usable(self, profile): return bool(self.health_check(profile) and self.resource_check(profile))
     def route(self, task_type, user_override=None):
         role=self._TASK_ROLE[task_type]
         if user_override:
             candidate=self.registry.models.get(user_override)
-            if candidate and candidate.roles.get(role) in {"CURRENT","VALIDATED"}: return candidate
+            if candidate and candidate in self.registry.eligible(role) and self._usable(candidate): return candidate
             raise PermissionError("requested model is not eligible for this role")
-        choices=self.registry.eligible(role)
-        if not choices: raise LookupError(f"no validated model for {role}")
-        return choices[0]
+        roles=(role,ModelRole.FALLBACK,ModelRole.FAST) if task_type in {"CHAT","MAIN"} else (role,)
+        seen=set()
+        for candidate_role in roles:
+            for candidate in self.registry.eligible(candidate_role):
+                if candidate.profile_id not in seen and self._usable(candidate): return candidate
+                seen.add(candidate.profile_id)
+        raise LookupError(f"no healthy validated model for {role}")
 
 
 @dataclass(frozen=True)
@@ -184,6 +265,8 @@ class ModelManager:
     def request(self, profile_id, *, owner=False):
         with self._lock:
             target=self.registry.require(profile_id,owner=owner)
+            if not self.registry.is_profile_eligible(profile_id):
+                return ModelSwitchResult(profile_id,"NOT_ELIGIBLE",self.active_profile_id,failure_category="NOT_QUALIFIED")
             if self._active and self._active.profile_id==target.profile_id:
                 health=self.adapters[target.provider_id].health(target)
                 return ModelSwitchResult(profile_id,"READY" if health.healthy else "UNHEALTHY",self.active_profile_id)
@@ -213,9 +296,15 @@ class ModelManager:
 
 
 def model_center_text(registry=None):
-    registry=registry or ModelRegistry(); q38=registry.models["local-qwen38"]
-    return ("模型中心\n\n当前聊天 / FAST / FALLBACK：Qwen3.6-35B-A3B-4bit（已验证；运行状态以健康检查为准）\n"
-            f"MAIN / VISION / VIDEO_UNDERSTANDING：{q38.display_name}（已注册，尚未完成本机 qualification）\n"
+    registry=registry or ModelRegistry()
+    main=registry.alias(ModelRole.MAIN); vision=registry.alias(ModelRole.VISION)
+    main_profile=registry.models[main.profile_id]; vision_profile=registry.models[vision.profile_id]
+    context_text=f"，最大实测上下文 {main.max_context_tokens} tokens" if main.max_context_tokens else ""
+    main_text=(f"{main_profile.display_name}（已资格验证{context_text}）" if main.status in ELIGIBLE_STATUSES else "当前不可用，聊天自动回退 FAST")
+    vision_text=(f"{vision_profile.display_name}（已资格验证）" if vision.status in ELIGIBLE_STATUSES else f"{vision_profile.display_name}（未资格验证）")
+    return (f"模型中心\n\n默认聊天 / MAIN：{main_text}\n"
+            "FAST / FALLBACK：Qwen3.6-35B-A3B-4bit（已验证；运行状态以健康检查为准）\n"
+            f"VISION：{vision_text}\nVIDEO_UNDERSTANDING：未资格验证\n"
             "RAW：Owner only，尚未配置\nCODING：未通过；继续由外部 Codex Producer 承担\n"
             "STT / TTS / IMAGE / VIDEO / EMBED / RERANK：已注册候选，未完成本机 qualification\n\n"
             "注册不等于可用；模型切换必须通过互斥、内存预检、健康检查与失败回滚。")

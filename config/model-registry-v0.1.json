@@ -1,10 +1,10 @@
 {
   "schema_version": "0.1",
   "production_aliases": {
-    "MAIN": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"},
+    "MAIN": {"profile": "local-qwen38", "status": "QUALIFIED", "max_context_tokens": 16384},
     "FAST": {"profile": "local-qwen36", "status": "VALIDATED"},
     "FALLBACK": {"profile": "local-qwen36", "status": "VALIDATED"},
-    "VISION": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"},
+    "VISION": {"profile": "local-qwen38", "status": "QUALIFIED"},
     "VIDEO_UNDERSTANDING": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"}
   },
   "runtime_isolation": {

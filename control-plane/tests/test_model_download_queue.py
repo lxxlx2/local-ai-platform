@@ -8,6 +8,7 @@ from local_ai_control.services.model_downloads import (
     ModelDownloadQueue,
     bounded_status,
     load_queue_config,
+    storage_bytes,
     write_launch_plist,
 )
 
@@ -111,6 +112,33 @@ def test_status_is_bounded_and_secret_free(tmp_path):
     assert len(output.splitlines()) < 35
     assert "EVENT_3" not in output and "EVENT_8" in output
     assert not any(word in (runtime / "state.json").read_text().lower() for word in ("authorization", "cookie", "credential"))
+
+
+def test_partial_cache_is_separate_and_cannot_complete_snapshot(tmp_path):
+    config,_=make_config(tmp_path,count=1); spec=config.models[0]
+    cache=spec.local_dir/".cache/huggingface/download"; cache.mkdir(parents=True)
+    (cache/"weights.incomplete").write_bytes(b"x"*100)
+    sizes=storage_bytes(spec.local_dir)
+    assert sizes.payload_bytes==0 and sizes.partial_cache_bytes==100
+    runner=ModelDownloadQueue(config,tmp_path/"runtime",downloader=lambda *_:0,sleeper=lambda _:None)
+    runner._write_marker(spec)
+    assert not runner._is_complete(spec)
+
+
+def test_indexed_snapshot_requires_every_referenced_shard(tmp_path):
+    config,_=make_config(tmp_path,count=1); spec=config.models[0]
+    spec.local_dir.mkdir(); (spec.local_dir/"model.safetensors.index.json").write_text(json.dumps({"weight_map":{"a":"a.safetensors","b":"b.safetensors"}}))
+    (spec.local_dir/"a.safetensors").write_bytes(b"x"*10)
+    runner=ModelDownloadQueue(config,tmp_path/"runtime",downloader=lambda *_:0,sleeper=lambda _:None)
+    assert not runner._snapshot_valid(spec)
+
+
+def test_completion_marker_binds_exact_payload_manifest(tmp_path):
+    config,_=make_config(tmp_path,count=1); spec=config.models[0]; complete_file(spec)
+    runner=ModelDownloadQueue(config,tmp_path/"runtime",downloader=lambda *_:0,sleeper=lambda _:None)
+    runner._write_marker(spec); assert runner._is_complete(spec)
+    (spec.local_dir/"weights.bin").write_bytes(b"tampered")
+    assert not runner._is_complete(spec)
 
 
 def test_launch_plist_is_one_shot_and_old_job_cannot_respawn(tmp_path):

@@ -13,7 +13,8 @@
 
 | Role | Candidate | State at code integration |
 |---|---|---|
-| MAIN / VISION / VIDEO_UNDERSTANDING | `mlx-community/Qwen3.8-27B-8bit` | Registered; hardware qualification required |
+| MAIN / VISION | `mlx-community/Qwen3.8-27B-8bit` | Qualified on this 48 GB Mac; MAIN default/max is 16K, VISION passed independently; runtime eligibility comes from the strict versioned registry |
+| VIDEO_UNDERSTANDING | `mlx-community/Qwen3.8-27B-8bit` | Registered; a separate video adapter qualification is required |
 | FAST / FALLBACK | `mlx-community/Qwen3.6-35B-A3B-4bit` | Previously validated; live health is checked separately |
 | RAW | `orcarouter/Qwen3.8-27B-Uncensored-MLX` (`8-bit/`) | Owner-only; not downloaded or qualified; refusal removal is never a security boundary |
 | STT_MAIN | `mlx-community/whisper-large-v3-mlx` | Registered |

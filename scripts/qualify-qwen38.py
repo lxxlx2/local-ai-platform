@@ -6,7 +6,6 @@ prompts, model output, credentials, or private conversation data.
 """
 from __future__ import annotations
 
-import argparse
 import gc
 import json
 from pathlib import Path
@@ -91,9 +90,6 @@ def healthy_for_next_test(baseline_swap_gib: float) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--try-64k", action="store_true")
-    args = parser.parse_args()
     snapshot = require_complete()
     if not port_8000_free():
         raise RuntimeError("CURRENT_OMLX_IS_RUNNING_REFUSE_SECOND_HEAVY_MODEL")
@@ -182,9 +178,8 @@ def main() -> None:
         draw.ellipse((180, 35, 290, 145), fill="red")
         canvas.save(image_path)
         run("VISION", "描述图中两个主要形状和颜色。", lambda value, _: "蓝" in value and "红" in value and any(term in value for term in ("方", "矩形")) and any(term in value for term in ("圆", "椭圆")), image=str(image_path))
-        run("CONTEXT_32K", context(processor, 30000) + "\n请用一句话说明这些是何种语言的标准库源码。", lambda value, result: result.prompt_tokens >= 30000 and "python" in value.lower(), max_tokens=64)
-        if args.try_64k:
-            run("CONTEXT_64K", context(processor, 60000) + "\n请用一句话说明这些是何种语言的标准库源码。", lambda value, result: result.prompt_tokens >= 60000 and "python" in value.lower(), max_tokens=64)
+        for name,target in (("CONTEXT_8K",8192),("CONTEXT_16K",16384),("CONTEXT_24K",24576),("CONTEXT_32K",32768)):
+            run(name,context(processor,target)+"\n请用一句话说明这些是何种语言的标准库源码。",lambda value,result,minimum=target:result.prompt_tokens>=minimum and "python" in value.lower(),max_tokens=64)
         end_memory = memory()
     finally:
         if model is not None:
@@ -200,15 +195,22 @@ def main() -> None:
         recovered = memory()
         image_path.unlink(missing_ok=True)
 
-    required = {"INSTRUCTION", "CHINESE", "ENGLISH", "JSON", "TOOL_SCHEMA", "VISION", "CONTEXT_32K"}
+    required = {"INSTRUCTION", "CHINESE", "ENGLISH", "JSON", "TOOL_SCHEMA", "CONTEXT_8K"}
     by_name = {item["name"]: item for item in metrics}
     unload_recovered = recovered["available_percent"] >= 60 and float(recovered["swap_used_gib"]) - float(start_memory["swap_used_gib"]) < 2.0
+    max_qualified_context_tokens=max((tokens for name,tokens in (("CONTEXT_8K",8192),("CONTEXT_16K",16384),("CONTEXT_24K",24576),("CONTEXT_32K",32768)) if by_name.get(name,{}).get("ok") is True),default=0)
     main_qualified = bool(all(by_name.get(name, {}).get("ok") is True for name in required) and unload_recovered)
+    vision_qualified = bool(by_name.get("VISION",{}).get("ok") is True and load_seconds is not None and unload_recovered)
+    production_default_context_tokens=24576 if max_qualified_context_tokens>=24576 else (16384 if max_qualified_context_tokens>=16384 else (8192 if max_qualified_context_tokens>=8192 else 0))
     report = {
         "model": "mlx-community/Qwen3.8-27B-8bit", "revision": REVISION, "snapshot": snapshot,
         "load_ok": load_seconds is not None, "load_seconds": round(load_seconds, 3) if load_seconds is not None else None,
         "start_memory": start_memory, "end_memory": end_memory, "recovered_memory": recovered,
-        "unload_recovered": unload_recovered, "main_qualified": main_qualified, "tests": metrics,
+        "unload_recovered": unload_recovered, "stable_memory": unload_recovered,
+        "main_qualified": main_qualified, "vision_qualified": vision_qualified,
+        "max_qualified_context_tokens": max_qualified_context_tokens,
+        "production_default_context_tokens": production_default_context_tokens,
+        "tests": metrics,
     }
     temporary = REPORT.with_suffix(".tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")

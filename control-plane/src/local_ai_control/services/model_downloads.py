@@ -42,6 +42,12 @@ class QueueConfig:
     reserve_bytes: int
 
 
+@dataclass(frozen=True)
+class StorageBytes:
+    payload_bytes: int
+    partial_cache_bytes: int
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -75,17 +81,28 @@ def load_queue_config(path: Path = DEFAULT_CONFIG, *, models_root: Path = DEFAUL
     return QueueConfig(tuple(models), max_attempts, reserve_bytes)
 
 
-def directory_bytes(path: Path) -> int:
-    total = 0
+def storage_bytes(path: Path) -> StorageBytes:
+    payload = partial = 0
     if not path.exists():
-        return 0
+        return StorageBytes(0,0)
     for item in path.rglob("*"):
         try:
             if item.is_file() and not item.is_symlink():
-                total += item.stat().st_size
+                size=item.stat().st_size; relative=item.relative_to(path)
+                if item.name==".local-ai-download-complete.json":
+                    continue
+                if item.name.endswith(".incomplete"):
+                    partial+=size
+                elif ".cache" not in relative.parts:
+                    payload+=size
         except FileNotFoundError:
             continue
-    return total
+    return StorageBytes(payload,partial)
+
+
+def directory_bytes(path: Path) -> int:
+    """Compatibility helper: completed payload only, never partial cache."""
+    return storage_bytes(path).payload_bytes
 
 
 class ModelDownloadQueue:
@@ -121,6 +138,16 @@ class ModelDownloadQueue:
     def _marker_path(self, spec: DownloadSpec) -> Path:
         return spec.local_dir / ".local-ai-download-complete.json"
 
+    def _payload_manifest(self,spec: DownloadSpec) -> list[dict[str,object]]:
+        files=[]
+        if not spec.local_dir.exists(): return files
+        for item in sorted(spec.local_dir.rglob("*")):
+            if not item.is_file() or item.is_symlink(): continue
+            relative=item.relative_to(spec.local_dir)
+            if ".cache" in relative.parts or item.name.endswith(".incomplete") or item.name==".local-ai-download-complete.json": continue
+            files.append({"path":relative.as_posix(),"size":item.stat().st_size})
+        return files
+
     def _is_complete(self, spec: DownloadSpec) -> bool:
         marker = self._marker_path(spec)
         try:
@@ -129,21 +156,35 @@ class ModelDownloadQueue:
             return False
         if payload.get("repo") != spec.repo or payload.get("revision") != spec.revision or payload.get("expected_bytes") != spec.expected_bytes:
             return False
-        index = spec.local_dir / "model.safetensors.index.json"
-        if index.is_file():
+        manifest=payload.get("files")
+        if not isinstance(manifest,list) or not manifest:
+            return False
+        for entry in manifest:
+            if not isinstance(entry,dict) or set(entry)!={"path","size"} or not isinstance(entry["path"],str) or not isinstance(entry["size"],int):
+                return False
+            candidate=(spec.local_dir/entry["path"]).resolve()
+            if spec.local_dir.resolve() not in candidate.parents or not candidate.is_file() or candidate.stat().st_size!=entry["size"]:
+                return False
+        if manifest!=self._payload_manifest(spec):
+            return False
+        return self._snapshot_valid(spec)
+
+    def _snapshot_valid(self, spec: DownloadSpec) -> bool:
+        indexes=list(spec.local_dir.rglob("*.safetensors.index.json"))
+        for index in indexes:
             try:
                 weight_map = json.loads(index.read_text()).get("weight_map", {})
             except (json.JSONDecodeError, OSError):
                 return False
-            if not weight_map or any(not (spec.local_dir / name).is_file() for name in set(weight_map.values())):
+            if not weight_map or any(not (index.parent / name).is_file() for name in set(weight_map.values())):
                 return False
-        return directory_bytes(spec.local_dir) >= int(spec.expected_bytes * 0.98)
+        return bool(self._payload_manifest(spec)) and storage_bytes(spec.local_dir).payload_bytes >= int(spec.expected_bytes * 0.98)
 
     def _write_marker(self, spec: DownloadSpec) -> None:
-        self._atomic_json(self._marker_path(spec), {"repo": spec.repo, "revision": spec.revision, "expected_bytes": spec.expected_bytes, "completed_at": utc_now()})
+        self._atomic_json(self._marker_path(spec), {"repo": spec.repo, "revision": spec.revision, "expected_bytes": spec.expected_bytes, "completed_at": utc_now(),"files":self._payload_manifest(spec)})
 
     def _disk_ready(self, spec: DownloadSpec) -> bool:
-        current = directory_bytes(spec.local_dir)
+        current = storage_bytes(spec.local_dir).payload_bytes
         remaining = max(spec.expected_bytes - current, 0)
         return shutil.disk_usage(spec.local_dir.parent if spec.local_dir.parent.exists() else DEFAULT_ROOT).free >= remaining + self.config.reserve_bytes
 
@@ -163,7 +204,8 @@ class ModelDownloadQueue:
             "schema_version": "0.1", "state": queue_state, "pid": os.getpid(), "updated_at": utc_now(),
             "current_model": current.id if current else None, "current_repo": current.repo if current else None,
             "current_local_dir": str(current.local_dir) if current else None,
-            "current_downloaded_disk_bytes": directory_bytes(current.local_dir) if current else 0,
+            "current_payload_bytes": storage_bytes(current.local_dir).payload_bytes if current else 0,
+            "current_partial_cache_bytes": storage_bytes(current.local_dir).partial_cache_bytes if current else 0,
             "models": statuses,
             "completed": [key for key, value in statuses.items() if value["status"] == "COMPLETED"],
             "failed": [key for key, value in statuses.items() if value["status"] == "FAILED"],
@@ -203,7 +245,7 @@ class ModelDownloadQueue:
                     code = self.downloader(spec, model_log)
                     item["exit_code"] = code
                     self._snapshot_state(spec, statuses, "RUNNING")
-                    if code == 0 and directory_bytes(spec.local_dir) >= int(spec.expected_bytes * 0.98):
+                    if code == 0 and self._snapshot_valid(spec):
                         self._write_marker(spec)
                         item.update({"status": "COMPLETED", "finished_at": utc_now()})
                         self._log("DOWNLOAD_COMPLETED", spec.id)
@@ -248,7 +290,7 @@ def bounded_status(runtime_dir: Path = DEFAULT_RUNTIME) -> str:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return "MODEL_DOWNLOAD_QUEUE\nstate: NOT_STARTED\npid: -\n"
     current_dir = Path(state["current_local_dir"]) if state.get("current_local_dir") else None
-    live_bytes = directory_bytes(current_dir) if current_dir else 0
+    live_storage = storage_bytes(current_dir) if current_dir else StorageBytes(0,0)
     shard_text = "-"
     if current_dir:
         indexes = list(current_dir.glob("*.safetensors.index.json"))
@@ -259,7 +301,7 @@ def bounded_status(runtime_dir: Path = DEFAULT_RUNTIME) -> str:
                     shard_text = f"{sum((current_dir / name).is_file() for name in expected)}/{len(expected)}"
             except (json.JSONDecodeError, OSError):
                 pass
-    lines = ["MODEL_DOWNLOAD_QUEUE", f"state: {state.get('state')}", f"pid: {state.get('pid')}", "", "CURRENT_MODEL", f"id: {state.get('current_model') or '-'}", f"repo: {state.get('current_repo') or '-'}", f"local_dir: {state.get('current_local_dir') or '-'}", f"downloaded_disk_gib: {live_bytes / 1024**3:.3f}", f"completed_shards: {shard_text}", f"started_at: {next((v.get('started_at') for k, v in state.get('models', {}).items() if k == state.get('current_model')), None) or '-'}", "", f"COMPLETED: {', '.join(state.get('completed', [])) or '-'}", f"FAILED: {', '.join(state.get('failed', [])) or '-'}", f"PENDING: {', '.join(state.get('pending', [])) or '-'}", "", "RECENT_LOG"]
+    lines = ["MODEL_DOWNLOAD_QUEUE", f"state: {state.get('state')}", f"pid: {state.get('pid')}", "", "CURRENT_MODEL", f"id: {state.get('current_model') or '-'}", f"repo: {state.get('current_repo') or '-'}", f"local_dir: {state.get('current_local_dir') or '-'}", f"payload_gib: {live_storage.payload_bytes / 1024**3:.3f}", f"partial_cache_gib: {live_storage.partial_cache_bytes / 1024**3:.3f}", f"completed_shards: {shard_text}", f"started_at: {next((v.get('started_at') for k, v in state.get('models', {}).items() if k == state.get('current_model')), None) or '-'}", "", f"COMPLETED: {', '.join(state.get('completed', [])) or '-'}", f"FAILED: {', '.join(state.get('failed', [])) or '-'}", f"PENDING: {', '.join(state.get('pending', [])) or '-'}", "", "RECENT_LOG"]
     try:
         recent = (runtime_dir / "queue.log").read_text().splitlines()[-5:]
     except OSError:

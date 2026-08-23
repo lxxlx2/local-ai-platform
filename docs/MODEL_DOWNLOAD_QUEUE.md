@@ -21,8 +21,8 @@ Start or resume the one-shot launchd job:
 /Users/jerson/AI/control-plane/scripts/start-model-downloads.sh
 ```
 
-Read a bounded live status (including current bytes on disk and shard count when
-an index is available):
+Read a bounded live status (including completed payload bytes, separate partial
+cache bytes, and shard count when an index is available):
 
 ```sh
 /Users/jerson/AI/control-plane/scripts/status-model-downloads.sh

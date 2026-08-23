@@ -25,10 +25,11 @@ def test_findings_only_close_after_independent_rereview():
 
 
 def test_router_keeps_qwen_fast_only_and_rejects_code_role():
-    router = ModelRouter(ModelRoleRegistry((QWEN36,)))
+    aliases={"MAIN":{"profile":"local-qwen36","status":"VALIDATED"},"FAST":{"profile":"local-qwen36","status":"VALIDATED"},"FALLBACK":{"profile":"local-qwen36","status":"VALIDATED"}}
+    router = ModelRouter(ModelRoleRegistry((QWEN36,),aliases=aliases))
     assert router.route("CHAT").profile_id == "local-qwen36"
     with pytest.raises(LookupError): router.route("CODE")
-    assert QWEN36.roles[ModelRole.CODE] == "NO"
+    assert ModelRole.CODE not in QWEN36.roles
 
 
 def test_provider_registry_blocks_unsafe_urls_and_keeps_credentials_as_aliases():
