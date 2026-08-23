@@ -8,7 +8,7 @@ from .supervisor_codex import (
     CodexCapability, CodexCapabilityProbe, CodexTaskRunner,
     PersistedCodexStageRunner, RealCodexRunner,
 )
-from .local_producer import LocalProducerTaskRunner
+from .local_producer_supervisor import SupervisorLocalProducerTaskRunner
 from .supervisor_round2 import (
     DurableReviewRunner, LeaseKeepingRunner, PersistedReviewSubmission,
     ReviewTaskSpec, ReviewerWorkUnit, Round2SecurityRunner,
@@ -45,11 +45,11 @@ def local_producer_runners(real_validation=True, provider=None):
     validation = LocalValidationRunner() if real_validation else StaticPassRunner("Mock local validation passed")
     return {
         WorkflowStage.INTAKE: StaticPassRunner("Intake schema validated"),
-        WorkflowStage.PRODUCER: PersistedCodexStageRunner(LocalProducerTaskRunner(provider)),
+        WorkflowStage.PRODUCER: PersistedCodexStageRunner(SupervisorLocalProducerTaskRunner(provider)),
         WorkflowStage.VALIDATION: validation,
         WorkflowStage.SELF_ACCEPTANCE: StaticPassRunner("Deterministic self acceptance passed"),
         WorkflowStage.REVIEW: DurableReviewRunner(),
-        WorkflowStage.REVISION: PersistedCodexStageRunner(LocalProducerTaskRunner(provider)),
+        WorkflowStage.REVISION: PersistedCodexStageRunner(SupervisorLocalProducerTaskRunner(provider)),
         WorkflowStage.SECURITY: Round2SecurityRunner(),
         WorkflowStage.GIT_GATE: GitGateRunner(),
     }
