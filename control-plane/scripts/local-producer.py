@@ -12,6 +12,9 @@ sys.path.insert(0, str(CODE_ROOT / "control-plane/src"))
 from local_ai_control.services.local_producer import (  # noqa: E402
     LocalPatchProducer, LocalProducerError, MAX_TASK_BYTES, discover_context_paths, require_safe_worktree,
 )
+from local_ai_control.services.qwen38_runtime import Qwen38Provider, RuntimeUnavailable  # noqa: E402
+
+LOCAL_PRODUCER_TIMEOUT_SECONDS = 360
 
 
 def main() -> int:
@@ -32,7 +35,8 @@ def main() -> int:
             raise LocalProducerError(f"task file exceeds {MAX_TASK_BYTES} bytes")
         task = task_data.decode("utf-8")
         paths = tuple(args.read) if args.read else discover_context_paths(task, root)
-        producer = LocalPatchProducer(repo_root=root)
+        provider = Qwen38Provider(timeout=LOCAL_PRODUCER_TIMEOUT_SECONDS)
+        producer = LocalPatchProducer(provider=provider, repo_root=root)
         proposal = producer.propose(task, paths, attempts=args.attempts)
         payload = {
             "status": "PROPOSED",
@@ -52,7 +56,7 @@ def main() -> int:
             print("\n--- VALIDATED PATCH (NOT APPLIED) ---\n")
             print(proposal.patch)
         return 0
-    except (OSError, UnicodeDecodeError, LocalProducerError) as exc:
+    except (OSError, UnicodeDecodeError, LocalProducerError, RuntimeUnavailable) as exc:
         print(json.dumps({"status": "BLOCKED", "error": type(exc).__name__, "detail": str(exc)[:3000]}, ensure_ascii=False), file=sys.stderr)
         return 2
 
