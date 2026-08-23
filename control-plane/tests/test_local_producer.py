@@ -96,6 +96,7 @@ def test_clean_feature_branch_required(tmp_path):
 
 def test_auto_context_discovers_runtime_files_from_task(tmp_path):
     root=tmp_path
+    (root/"docs").mkdir(parents=True)
     for rel in (
         "control-plane/src/local_ai_control/services/runtime_providers.py",
         "control-plane/src/local_ai_control/services/qwen38_runtime.py",
