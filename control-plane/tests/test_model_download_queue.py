@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from local_ai_control.services.heavy_process_identity import ProcessIdentity,write_identity
+from local_ai_control.services.heavy_process_identity import ProcessIdentity,normalized_spawn_signature,write_identity
 from local_ai_control.services.model_downloads import ModelDownloadQueue,bounded_status,load_queue_config,status_snapshot,storage_bytes,stop_manager,write_launch_plist
 
 
@@ -95,8 +95,8 @@ class FakeProcess:
 
 
 def test_stop_only_terminates_exact_owned_child(tmp_path):
-    config,_=make_config(tmp_path,count=1); spec=config.models[0]; current=ProcessIdentity(22,"/python",("python","hf","download"),"START")
-    runner=ModelDownloadQueue(config,tmp_path/"runtime",snapshot=lambda _pid:current); runner._private_runtime(); write_identity(runner.worker_root/f"{spec.id}.identity.json",current)
+    config,_=make_config(tmp_path,count=1); spec=config.models[0]; runner=ModelDownloadQueue(config,tmp_path/"runtime"); executable,argv=normalized_spawn_signature(runner._command(spec)); current=ProcessIdentity(22,executable,argv,"START")
+    runner.snapshot=lambda _pid:current; runner._private_runtime(); write_identity(runner.worker_root/f"{spec.id}.identity.json",current)
     owned=FakeProcess(); runner._terminate_owned(spec,owned); assert owned.terminated
     reused=ProcessIdentity(22,"/other",("other",),"REUSED"); runner.snapshot=lambda _pid:reused
     unrelated=FakeProcess(); runner._terminate_owned(spec,unrelated); assert not unrelated.terminated and not unrelated.killed

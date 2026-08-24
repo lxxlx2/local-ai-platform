@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from typing import Callable
@@ -21,6 +22,47 @@ class ProcessIdentity:
     executable: str
     argv: tuple[str, ...]
     start_identity: str
+
+
+def normalize_executable(executable: str) -> str:
+    """Normalize one executable without weakening it to a name match.
+
+    macOS reports framework Python processes through the embedded Python.app
+    binary even when they were launched through a venv interpreter symlink.
+    Both paths are normalized to their exact framework *version* root.  All
+    other executables retain their fully-resolved path identity.
+    """
+    resolved=str(Path(executable).resolve())
+    marker="/Python.framework/Versions/"
+    if marker not in resolved:
+        return resolved
+    prefix,version_tail=resolved.split(marker,1)
+    version=version_tail.split("/",1)[0]
+    suffix=version_tail[len(version):]
+    if re.fullmatch(r"/bin/python(?:\d+(?:\.\d+)*)?",suffix) or suffix=="/Resources/Python.app/Contents/MacOS/Python":
+        return f"{prefix}{marker}{version}"
+    return resolved
+
+
+def normalized_spawn_signature(command: tuple[str,...]|list[str]) -> tuple[str,tuple[str,...]]:
+    """Return the exact macOS process signature for a shell=False command."""
+    if not command or not all(isinstance(item,str) and item for item in command):
+        raise ValueError("spawn command must be a nonempty argv")
+    launcher=str(Path(command[0]).resolve())
+    executable=launcher
+    argv=tuple(command)
+    try:
+        with Path(command[0]).open("rb") as handle:
+            first_line=handle.readline(4096).decode("utf-8","strict").rstrip("\r\n")
+    except (FileNotFoundError,OSError,UnicodeError):
+        first_line=""
+    if first_line.startswith("#!"):
+        interpreter=tuple(shlex.split(first_line[2:].strip()))
+        if not interpreter or not Path(interpreter[0]).is_absolute():
+            raise ValueError("worker shebang must use an absolute interpreter")
+        executable=interpreter[0]
+        argv=(*interpreter,str(Path(command[0]).resolve()),*tuple(command[1:]))
+    return normalize_executable(executable),argv
 
 
 def _run_text(argv: list[str]) -> str:
@@ -104,11 +146,17 @@ def listener_pids(port: int) -> tuple[int, ...]:
 
 
 def expected_identity(snapshot: ProcessIdentity, executable: str, argv: tuple[str,...]) -> bool:
-    expected_executable=str(Path(executable).resolve())
+    expected_executable=normalize_executable(executable)
     normalized_argv=list(argv)
     if normalized_argv:
-        normalized_argv[0]=str(Path(normalized_argv[0]).resolve())
+        normalized_argv[0]=normalize_executable(normalized_argv[0])
     actual_argv=list(snapshot.argv)
     if actual_argv:
-        actual_argv[0]=str(Path(actual_argv[0]).resolve())
-    return snapshot.executable==expected_executable and tuple(actual_argv)==tuple(normalized_argv)
+        actual_argv[0]=normalize_executable(actual_argv[0])
+    return normalize_executable(snapshot.executable)==expected_executable and tuple(actual_argv)==tuple(normalized_argv)
+
+
+def expected_spawn_identity(snapshot: ProcessIdentity, command: tuple[str,...]|list[str]) -> bool:
+    """Match a process against the complete normalized shell=False command."""
+    executable,argv=normalized_spawn_signature(command)
+    return expected_identity(snapshot,executable,argv)

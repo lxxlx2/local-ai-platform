@@ -26,6 +26,16 @@ class RuntimeState:
     active_profile_id: str|None
 
 
+@dataclass(frozen=True)
+class HeavyRuntimeEvidence:
+    profile_id: str
+    identity_status: str
+    identity_pid: int|None
+    listener_pids: tuple[int,...]
+    service_present: bool
+    endpoint_healthy: bool
+
+
 def _healthy(provider):
     try: provider.health(); return True
     except Exception: return False
@@ -37,6 +47,7 @@ class LaunchdHeavyRuntimeLifecycle:
         self.runtime_root=Path(runtime_root); self.sleep=sleep; self.uid=str(subprocess.check_output(["id","-u"],text=True).strip())
         self.runner=runner; self.snapshot=snapshot; self.listeners=listeners
         self.labels={"local-qwen38":"local-ai.qwen38-runtime","local-qwen36":"local-ai.omlx-qwen36"}
+        self._start_lock=threading.RLock(); self._authorized_start=None; self._authorized_probes=None
 
     def _launch_args(self,profile_id):
         if profile_id=="local-qwen38": return ["/Users/jerson/AI/runtime/qwen38-venv/bin/python","/Users/jerson/AI/control-plane/scripts/qwen38-sidecar.py","--port","8001"]
@@ -59,6 +70,69 @@ class LaunchdHeavyRuntimeLifecycle:
         result=self.runner(["launchctl","print",f"gui/{self.uid}/{self.labels[profile_id]}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
         return result.returncode==0
 
+    def inspect(self,profile_id,endpoint_healthy):
+        """Collect exact evidence without treating endpoint health as ownership."""
+        status,pid=identity_status(self._identity_path(profile_id),snapshot=self.snapshot)
+        try:
+            listeners=tuple(self.listeners(self._port(profile_id)))
+            service=bool(self._service_present(profile_id))
+            endpoint=bool(endpoint_healthy())
+        except Exception as error:
+            raise HeavyModelConflict("heavy runtime evidence inspection failed") from error
+        return HeavyRuntimeEvidence(profile_id,status,pid,listeners,service,endpoint)
+
+    @staticmethod
+    def _validate_evidence(evidence):
+        if evidence.listener_pids:
+            if evidence.identity_status!="MATCH" or set(evidence.listener_pids)!={evidence.identity_pid}:
+                raise HeavyModelConflict("unknown fixed-port listener; no process was controlled")
+        if evidence.identity_status in {"DEAD","MISMATCH"}:
+            if evidence.endpoint_healthy or evidence.service_present or evidence.listener_pids:
+                raise HeavyModelConflict("stale identity conflicts with live runtime evidence")
+            return
+        if evidence.identity_status in {"MISSING","INVALID"}:
+            if evidence.endpoint_healthy or evidence.service_present or evidence.listener_pids:
+                raise HeavyModelConflict("runtime evidence exists without exact saved ownership")
+            return
+        if evidence.identity_status!="MATCH":
+            raise HeavyModelConflict("unknown heavy runtime identity state")
+
+    def _wait_absent(self,profile_id,endpoint_healthy,attempts=20):
+        for _ in range(attempts):
+            evidence=self.inspect(profile_id,endpoint_healthy)
+            if (evidence.identity_status in {"DEAD","MISMATCH"} and
+                    not evidence.endpoint_healthy and not evidence.service_present and not evidence.listener_pids):
+                return
+            if evidence.identity_status in {"MISSING","INVALID"}:
+                raise HeavyModelConflict("runtime identity became ambiguous while stopping")
+            self.sleep(0.5)
+        raise HeavyModelConflict("owned heavy runtime did not become fully absent")
+
+    def reconcile_before_start(self,target_profile_id,endpoint_probes):
+        """Prove both heavy profiles absent before authorizing one start.
+
+        The first pass validates every profile before any owned label is
+        controlled.  This prevents an unknown listener on one port from being
+        hidden by stopping the other profile first.
+        """
+        if target_profile_id not in self.labels or set(endpoint_probes)!=set(self.labels):
+            raise HeavyModelConflict("complete managed-profile probes are required")
+        with self._start_lock:
+            self._authorized_start=None; self._authorized_probes=None
+            evidence={profile:self.inspect(profile,endpoint_probes[profile]) for profile in self.labels}
+            for item in evidence.values(): self._validate_evidence(item)
+            for profile,item in evidence.items():
+                if item.identity_status=="MATCH":
+                    self.safe_stop(profile,endpoint_probes[profile])
+                    self._wait_absent(profile,endpoint_probes[profile])
+            # Close the observation/control race before issuing bootstrap.
+            final={profile:self.inspect(profile,endpoint_probes[profile]) for profile in self.labels}
+            for item in final.values():
+                self._validate_evidence(item)
+                if item.identity_status=="MATCH":
+                    raise HeavyModelConflict("heavy runtime reappeared before start")
+            self._authorized_start=target_profile_id; self._authorized_probes=dict(endpoint_probes)
+
     def _plist(self,profile_id):
         self.runtime_root.mkdir(parents=True,exist_ok=True)
         self.runtime_root.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.runtime_root,0o700)
@@ -71,8 +145,12 @@ class LaunchdHeavyRuntimeLifecycle:
 
     def safe_stop(self,profile_id,endpoint_healthy):
         """Boot out only when saved ownership is exact; never kill by PID."""
-        path=self._identity_path(profile_id); before,_=identity_status(path,snapshot=self.snapshot)
+        path=self._identity_path(profile_id); before,saved_pid=identity_status(path,snapshot=self.snapshot)
         endpoint_up=bool(endpoint_healthy())
+        try: listeners=tuple(self.listeners(self._port(profile_id)))
+        except Exception as error: raise HeavyModelConflict("listener ownership inspection failed") from error
+        if listeners and (before!="MATCH" or set(listeners)!={saved_pid}):
+            raise HeavyModelConflict("unknown fixed-port listener; no process was controlled")
         if before!="MATCH":
             if endpoint_up or before in {"MISSING","INVALID"} or self._service_present(profile_id):
                 raise HeavyModelConflict("runtime ownership is ambiguous; reconciliation required")
@@ -109,11 +187,20 @@ class LaunchdHeavyRuntimeLifecycle:
         return identity
 
     def start(self,profile_id):
-        path=self._plist(profile_id); label=self.labels[profile_id]
-        result=self.runner(["launchctl","bootstrap",f"gui/{self.uid}",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
-        if result.returncode:
-            kicked=self.runner(["launchctl","kickstart",f"gui/{self.uid}/{label}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
-            if kicked.returncode: raise RuntimeUnavailable("managed runtime start failed")
+        with self._start_lock:
+            probes=self._authorized_probes
+            if self._authorized_start!=profile_id or probes is None:
+                raise HeavyModelConflict("heavy runtime start was not reconciled")
+            self._authorized_start=None; self._authorized_probes=None
+            for managed in self.labels:
+                evidence=self.inspect(managed,probes[managed]); self._validate_evidence(evidence)
+                if evidence.identity_status=="MATCH":
+                    raise HeavyModelConflict("heavy runtime appeared after reconciliation")
+            path=self._plist(profile_id); label=self.labels[profile_id]
+            result=self.runner(["launchctl","bootstrap",f"gui/{self.uid}",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+            if result.returncode:
+                kicked=self.runner(["launchctl","kickstart",f"gui/{self.uid}/{label}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+                if kicked.returncode: raise RuntimeUnavailable("managed runtime start failed")
 
     def stop(self,profile_id):
         raise HeavyModelConflict("unsafe stop API disabled; use safe_stop with endpoint proof")
@@ -155,6 +242,11 @@ class RuntimeProviderFactory:
             self.lifecycle.stop(profile.profile_id); self._wait_down(provider)
 
     def _start_and_capture(self,profile,provider):
+        if hasattr(self.lifecycle,"reconcile_before_start"):
+            self.lifecycle.reconcile_before_start(profile.profile_id,{
+                QWEN38.profile_id:lambda:_healthy(self.main),
+                QWEN36.profile_id:lambda:_healthy(self.fast),
+            })
         self.lifecycle.start(profile.profile_id); self._wait(provider)
         if hasattr(self.lifecycle,"capture_started"):
             self.lifecycle.capture_started(profile.profile_id)

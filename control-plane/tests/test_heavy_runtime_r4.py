@@ -87,7 +87,9 @@ def test_c_and_l_dead_identity_endpoint_down_service_absent_allows_start(tmp_pat
     runner=Runner(present=False); lifecycle=LaunchdHeavyRuntimeLifecycle(tmp_path,sleep=lambda _:None,runner=runner,snapshot=lambda _pid:None,listeners=lambda _port:())
     saved(lifecycle,QWEN38.profile_id)
     assert lifecycle.safe_stop(QWEN38.profile_id,lambda:False)=="ALREADY_STOPPED"
-    lifecycle.wait_stopped(QWEN38.profile_id,lambda:False); lifecycle.start(QWEN36.profile_id)
+    lifecycle.wait_stopped(QWEN38.profile_id,lambda:False)
+    lifecycle.reconcile_before_start(QWEN36.profile_id,{QWEN38.profile_id:lambda:False,QWEN36.profile_id:lambda:False})
+    lifecycle.start(QWEN36.profile_id)
     assert any(event[1]=="bootstrap" for event in runner.events)
 
 

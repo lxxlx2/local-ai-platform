@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Callable
 
-from local_ai_control.services.heavy_process_identity import ProcessIdentity,identity_status,process_snapshot,write_identity
+from local_ai_control.services.heavy_process_identity import ProcessIdentity,expected_spawn_identity,identity_status,process_snapshot,read_identity,write_identity
 
 REVISION_RE=re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_ROOT=Path("/Users/jerson/AI")
@@ -43,6 +43,10 @@ class QueueConfig:
 @dataclass(frozen=True)
 class StorageBytes:
     payload_bytes: int; partial_cache_bytes: int
+
+
+class WorkerIdentityConflict(RuntimeError):
+    """A spawned worker cannot be proven to be the exact fixed command."""
 
 
 def utc_now(): return datetime.now(UTC).isoformat()
@@ -165,8 +169,12 @@ class ModelDownloadQueue:
         return command
 
     def _owned_worker(self,spec,pid):
-        status,saved_pid=identity_status(self.worker_root/f"{spec.id}.identity.json",snapshot=self.snapshot)
-        return status=="MATCH" and saved_pid==pid
+        saved=read_identity(self.worker_root/f"{spec.id}.identity.json")
+        current=self.snapshot(pid)
+        try:
+            return bool(saved and current and saved.pid==pid and current==saved and expected_spawn_identity(current,self._command(spec)))
+        except (OSError,ValueError):
+            return False
 
     def _terminate_owned(self,spec,process):
         if process.poll() is not None: return
@@ -186,9 +194,10 @@ class ModelDownloadQueue:
                 if identity is not None: break
                 if process.poll() is not None: break
                 time.sleep(0.05)
-            if identity is None or process.pid!=identity.pid or spec.repo not in identity.argv or spec.revision not in identity.argv or str(spec.local_dir) not in identity.argv:
-                if process.poll() is None: process.terminate(); process.wait(timeout=5)
-                raise RuntimeError("worker identity validation failed")
+            if identity is None or process.pid!=identity.pid or not expected_spawn_identity(identity,command):
+                # A PID or process signature that is not exact is never safe to
+                # control.  In particular, do not terminate a reused PID.
+                raise WorkerIdentityConflict("worker identity validation failed")
             identity_path=self.worker_root/f"{spec.id}.identity.json"; write_identity(identity_path,identity)
             with self.state_lock:
                 self.active_processes[spec.id]=process; self.statuses[spec.id].update({"worker_pid":process.pid,"worker_identity":str(identity_path)}); self._snapshot_state("RUNNING")
@@ -205,6 +214,9 @@ class ModelDownloadQueue:
                 if self.stop_event.is_set(): self._set(spec,"PAUSED",last_error_category=None); return "PAUSED"
                 self._set(spec,"DOWNLOADING",retry_count=attempt-1,started_at=self.statuses[spec.id].get("started_at") or utc_now(),last_error_category=None)
                 try: code=self.downloader(spec,log_path) if self.downloader else self._download_process(spec,log_path)
+                except WorkerIdentityConflict:
+                    self._set(spec,"FAILED",exit_code=125,finished_at=utc_now(),last_error_category="WORKER_IDENTITY_CONFLICT")
+                    self._log("WORKER_IDENTITY_CONFLICT_NO_RETRY",spec.id); return "FAILED"
                 except Exception as error: code=125; category=type(error).__name__.upper()
                 else: category=None if code==0 else "DOWNLOAD_EXIT"
                 if self.stop_event.is_set(): self._set(spec,"PAUSED",exit_code=code,last_error_category=None); return "PAUSED"
@@ -276,6 +288,19 @@ def _verified_identity(path,snapshot=process_snapshot):
     status,pid=identity_status(Path(path),snapshot=snapshot); return status=="MATCH",status,pid
 
 
+def _verified_worker_identity(path,command,snapshot=process_snapshot):
+    saved=read_identity(Path(path))
+    if saved is None: return False,"MISSING_OR_INVALID",None
+    current=snapshot(saved.pid)
+    if current is None: return False,"DEAD",saved.pid
+    if current!=saved: return False,"MISMATCH",saved.pid
+    try: command_matches=expected_spawn_identity(current,command)
+    except (OSError,ValueError): command_matches=False
+    if not command_matches:
+        return False,"COMMAND_MISMATCH",saved.pid
+    return True,"MATCH",saved.pid
+
+
 def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNTIME,*,snapshot=process_snapshot):
     config=config or load_queue_config(); runtime_dir=Path(runtime_dir); old=_state_file(runtime_dir)
     manager_verified,manager_identity_state,manager_pid=_verified_identity(runtime_dir/"manager.identity.json",snapshot); recorded_state=old.get("state","NOT_STARTED")
@@ -285,7 +310,7 @@ def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNT
     rows=[]; active=[]; verifier=ModelDownloadQueue(config,runtime_dir,snapshot=snapshot)
     for spec in config.models:
         sizes=storage_bytes(spec.local_dir); complete=verifier._is_complete(spec); item=(old.get("models") or {}).get(spec.id,{})
-        worker_path=item.get("worker_identity") or runtime_dir/"workers"/f"{spec.id}.identity.json"; worker_verified,worker_identity_state,worker_pid=_verified_identity(worker_path,snapshot)
+        worker_path=item.get("worker_identity") or runtime_dir/"workers"/f"{spec.id}.identity.json"; worker_verified,worker_identity_state,worker_pid=_verified_worker_identity(worker_path,verifier._command(spec),snapshot)
         requested_state=item.get("state") or item.get("status") or "PENDING"
         if complete: state="COMPLETED"; worker_verified=False
         elif manager_verified and worker_verified and requested_state=="DOWNLOADING": state="DOWNLOADING"; active.append(spec.id)
