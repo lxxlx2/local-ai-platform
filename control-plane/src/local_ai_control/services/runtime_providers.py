@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import plistlib
+import re
+import stat
 import subprocess
 import threading
 import time
@@ -69,6 +71,107 @@ class LaunchdHeavyRuntimeLifecycle:
     def _service_present(self,profile_id):
         result=self.runner(["launchctl","print",f"gui/{self.uid}/{self.labels[profile_id]}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
         return result.returncode==0
+
+    def _service_pid(self,profile_id):
+        """Return one exact launchd job PID or fail closed.
+
+        This parser is used only for initial qwen36 post-title capture.  The
+        queried domain, reported label header, plist path, program, and job PID
+        must all bind to the one platform-owned launchd job.
+        """
+        label=self.labels[profile_id]
+        domain=f"gui/{self.uid}/{label}"
+        result=self.runner(
+            ["launchctl","print",domain],capture_output=True,text=True,check=False,
+        )
+        output=getattr(result,"stdout","")
+        if result.returncode or not isinstance(output,str):
+            raise HeavyModelConflict("managed launchd service details unavailable")
+        lines=output.splitlines()
+        if not lines or lines[0].strip()!=f"{domain} = {{":
+            raise HeavyModelConflict("managed launchd label proof failed")
+        expected_path=self.runtime_root/f"{label}.plist"
+        expected_program=self._launch_args(profile_id)[0]
+        if not re.search(rf"^\s*path = {re.escape(str(expected_path))}\s*$",output,re.MULTILINE):
+            raise HeavyModelConflict("managed launchd plist binding failed")
+        if not re.search(rf"^\s*program = {re.escape(expected_program)}\s*$",output,re.MULTILINE):
+            raise HeavyModelConflict("managed launchd program binding failed")
+        pids=re.findall(r"^\s*pid = ([1-9][0-9]*)\s*$",output,re.MULTILINE)
+        if len(pids)!=1:
+            raise HeavyModelConflict("managed launchd PID proof is ambiguous")
+        return int(pids[0])
+
+    def _validate_managed_plist(self,profile_id):
+        """Validate the exact platform plist without following a symlink."""
+        label=self.labels[profile_id]
+        path=self.runtime_root/f"{label}.plist"
+        try:
+            if path.parent.resolve()!=self.runtime_root.resolve():
+                raise HeavyModelConflict("managed plist escaped runtime root")
+            descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+            try:
+                metadata=os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise HeavyModelConflict("managed plist is not a regular file")
+                with os.fdopen(descriptor,"rb",closefd=False) as handle:
+                    payload=plistlib.load(handle)
+            finally:
+                os.close(descriptor)
+        except HeavyModelConflict:
+            raise
+        except (OSError,ValueError,TypeError,plistlib.InvalidFileException) as error:
+            raise HeavyModelConflict("managed plist validation failed") from error
+        if not isinstance(payload,dict):
+            raise HeavyModelConflict("managed plist payload is invalid")
+        if payload.get("Label")!=label:
+            raise HeavyModelConflict("managed plist label mismatch")
+        if payload.get("ProgramArguments")!=self._launch_args(profile_id):
+            raise HeavyModelConflict("managed plist arguments mismatch")
+        if payload.get("WorkingDirectory")!="/Users/jerson/AI":
+            raise HeavyModelConflict("managed plist working directory mismatch")
+        return path
+
+    def _prove_qwen38_absent_for_omlx_capture(self):
+        if self.listeners(self._port(QWEN38.profile_id)):
+            raise HeavyModelConflict("Qwen3.8 listener conflicts with oMLX capture")
+        qwen38_status,_=identity_status(
+            self._identity_path(QWEN38.profile_id),snapshot=self.snapshot,
+        )
+        if qwen38_status=="MATCH" or self._service_present(QWEN38.profile_id):
+            raise HeavyModelConflict("Qwen3.8 runtime conflicts with oMLX capture")
+
+    def _capture_qwen36_posttitle_identity(self,identity,listener_pid):
+        """Prove and return the exact observed oMLX post-title identity.
+
+        oMLX uses setproctitle after launch, so its observed executable/argv no
+        longer retain the spawn signature.  This one-time capture exception is
+        therefore gated by independent launchd PID and immutable plist proof.
+        Later ownership remains exact saved ProcessIdentity equality.
+        """
+        if identity.pid!=listener_pid or not identity.start_identity:
+            raise HeavyModelConflict("observed oMLX identity is incomplete")
+        self._prove_qwen38_absent_for_omlx_capture()
+        existing_status,existing_pid=identity_status(
+            self._identity_path(QWEN36.profile_id),snapshot=self.snapshot,
+        )
+        if existing_status=="INVALID" or (existing_status=="MATCH" and existing_pid!=listener_pid):
+            raise HeavyModelConflict("conflicting saved oMLX identity")
+        self._validate_managed_plist(QWEN36.profile_id)
+        if self._service_pid(QWEN36.profile_id)!=listener_pid:
+            raise HeavyModelConflict("launchd job PID does not own oMLX listener")
+        # Close the read/validation race before persisting ownership.
+        if self.listeners(self._port(QWEN36.profile_id))!=(listener_pid,):
+            raise HeavyModelConflict("oMLX listener changed during capture")
+        current=self.snapshot(listener_pid)
+        if current!=identity:
+            raise HeavyModelConflict("oMLX process identity changed during capture")
+        # Revalidate all mutable evidence at the commit boundary.  The saved
+        # identity must never outlive the proof that authorized its capture.
+        self._validate_managed_plist(QWEN36.profile_id)
+        if self._service_pid(QWEN36.profile_id)!=listener_pid:
+            raise HeavyModelConflict("launchd job changed during oMLX capture")
+        self._prove_qwen38_absent_for_omlx_capture()
+        return current
 
     def inspect(self,profile_id,endpoint_healthy):
         """Collect exact evidence without treating endpoint health as ownership."""
@@ -181,8 +284,14 @@ class LaunchdHeavyRuntimeLifecycle:
             raise HeavyModelConflict("owned runtime listener is not unique")
         identity=self.snapshot(pids[0])
         executable,argv=self._process_signature(profile_id)
-        if identity is None or not expected_identity(identity,executable,argv):
+        if identity is None:
             raise HeavyModelConflict("listener process does not match managed profile")
+        if profile_id==QWEN36.profile_id:
+            self._prove_qwen38_absent_for_omlx_capture()
+        if not expected_identity(identity,executable,argv):
+            if profile_id!=QWEN36.profile_id:
+                raise HeavyModelConflict("listener process does not match managed profile")
+            identity=self._capture_qwen36_posttitle_identity(identity,pids[0])
         write_identity(self._identity_path(profile_id),identity)
         return identity
 
