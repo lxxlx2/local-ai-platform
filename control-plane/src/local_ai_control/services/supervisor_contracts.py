@@ -56,7 +56,12 @@ class RepoAccessPolicy:
         root = Path(self.repo_root).resolve()
         object.__setattr__(self, "repo_root", root)
         if not self.default_allowed_paths:
-            object.__setattr__(self, "default_allowed_paths", (root / "control-plane", root / "docs"))
+            # The download queue is a versioned production input, but the rest
+            # of config/ remains outside the agent/reviewer boundary.
+            defaults=[root/"control-plane",root/"docs"]
+            queue_config=root/"config/model-download-queue-v0.1.json"
+            if queue_config.is_file(): defaults.append(queue_config)
+            object.__setattr__(self,"default_allowed_paths",tuple(defaults))
 
     def _relative(self, path: Path, *, allow_missing: bool = False) -> tuple[Path, Path]:
         root = self.repo_root.resolve()

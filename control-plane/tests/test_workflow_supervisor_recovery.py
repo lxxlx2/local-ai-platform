@@ -202,6 +202,12 @@ def test_agent_policy_allows_control_plane_and_docs():
     assert result == (CONTROL_PLANE_ROOT.resolve(), (AI_ROOT / "docs").resolve())
 
 
+def test_agent_policy_allows_only_the_versioned_download_config_not_config_directory():
+    queue=AI_ROOT/"config/model-download-queue-v0.1.json"
+    assert RepoAccessPolicy().validate_allowed_paths([queue])==(queue.resolve(),)
+    with pytest.raises(PermissionError): RepoAccessPolicy().validate_allowed_paths([AI_ROOT/"config"])
+
+
 @pytest.mark.parametrize("relative", [
     "runtime", "runtime/secrets", ".env", "private.db", "models", "cache", "logs",
 ])

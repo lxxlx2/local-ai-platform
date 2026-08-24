@@ -1,6 +1,7 @@
 {
   "schema_version": "0.1",
-  "serial_only": true,
+  "serial_only": false,
+  "default_parallel": 3,
   "max_attempts": 3,
   "reserve_bytes": 21474836480,
   "models": [
