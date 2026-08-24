@@ -49,6 +49,10 @@ class WorkerIdentityConflict(RuntimeError):
     """A spawned worker cannot be proven to be the exact fixed command."""
 
 
+class WorkerCleanupUnconfirmed(WorkerIdentityConflict):
+    """An unverifiable spawned child could not be safely stopped and reaped."""
+
+
 def utc_now(): return datetime.now(UTC).isoformat()
 
 
@@ -184,6 +188,43 @@ class ModelDownloadQueue:
         except subprocess.TimeoutExpired:
             if self._owned_worker(spec,process.pid): process.kill(); process.wait(timeout=5)
 
+    @staticmethod
+    def _reap_unverifiable_child(process):
+        """Stop and reap only the direct Popen child, with bounded waits.
+
+        Popen.poll()/wait() use waitpid for this child.  A non-None poll means
+        it has already exited, so no PID signal is issued.  Escalation to kill
+        occurs only after terminate timed out and the same Popen child still
+        reports alive.
+        """
+        def reap_if_exited():
+            try:
+                if process.poll() is None: return False
+                process.wait(timeout=0); return True
+            except (OSError,subprocess.SubprocessError):
+                return False
+
+        if reap_if_exited(): return True
+        try:
+            process.terminate()
+        except OSError:
+            return reap_if_exited()
+        try:
+            process.wait(timeout=10); return True
+        except subprocess.TimeoutExpired:
+            pass
+        except (OSError,subprocess.SubprocessError):
+            return reap_if_exited()
+        if reap_if_exited(): return True
+        try:
+            process.kill()
+        except OSError:
+            return reap_if_exited()
+        try:
+            process.wait(timeout=5); return True
+        except (OSError,subprocess.SubprocessError):
+            return reap_if_exited()
+
     def _download_process(self,spec,log_path):
         command=self._command(spec); environment=os.environ.copy(); environment.update({"HF_HUB_DISABLE_XET":"1","HF_HUB_DOWNLOAD_TIMEOUT":"120","HF_HUB_ETAG_TIMEOUT":"30"})
         spec.local_dir.mkdir(parents=True,exist_ok=True); descriptor=os.open(log_path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
@@ -194,9 +235,11 @@ class ModelDownloadQueue:
                 if identity is not None: break
                 if process.poll() is not None: break
                 time.sleep(0.05)
-            if identity is None or process.pid!=identity.pid or not expected_spawn_identity(identity,command):
-                # A PID or process signature that is not exact is never safe to
-                # control.  In particular, do not terminate a reused PID.
+            try: identity_matches=bool(identity and process.pid==identity.pid and expected_spawn_identity(identity,command))
+            except (OSError,ValueError): identity_matches=False
+            if not identity_matches:
+                if not self._reap_unverifiable_child(process):
+                    raise WorkerCleanupUnconfirmed("unverifiable worker cleanup was not confirmed")
                 raise WorkerIdentityConflict("worker identity validation failed")
             identity_path=self.worker_root/f"{spec.id}.identity.json"; write_identity(identity_path,identity)
             with self.state_lock:
@@ -209,11 +252,16 @@ class ModelDownloadQueue:
 
     def _worker(self,spec):
         log_path=self.runtime_dir/f"{spec.id}.log"
+        release_reservation=True
         try:
             for attempt in range(1,self.config.max_attempts+1):
                 if self.stop_event.is_set(): self._set(spec,"PAUSED",last_error_category=None); return "PAUSED"
                 self._set(spec,"DOWNLOADING",retry_count=attempt-1,started_at=self.statuses[spec.id].get("started_at") or utc_now(),last_error_category=None)
                 try: code=self.downloader(spec,log_path) if self.downloader else self._download_process(spec,log_path)
+                except WorkerCleanupUnconfirmed:
+                    release_reservation=False; self.stop_event.set()
+                    self._set(spec,"PAUSED",exit_code=125,finished_at=None,last_error_category="WORKER_CLEANUP_UNCONFIRMED")
+                    self._log("WORKER_CLEANUP_UNCONFIRMED_MANAGER_STOP",spec.id); return "PAUSED"
                 except WorkerIdentityConflict:
                     self._set(spec,"FAILED",exit_code=125,finished_at=utc_now(),last_error_category="WORKER_IDENTITY_CONFLICT")
                     self._log("WORKER_IDENTITY_CONFLICT_NO_RETRY",spec.id); return "FAILED"
@@ -227,7 +275,8 @@ class ModelDownloadQueue:
                     if self.waiter((30,120,300)[min(attempt-1,2)]): self._set(spec,"PAUSED",last_error_category=None); return "PAUSED"
             self._set(spec,"FAILED",exit_code=code,finished_at=utc_now(),last_error_category=category or "SNAPSHOT_INVALID"); self._log("DOWNLOAD_FAILED",spec.id); return "FAILED"
         finally:
-            with self.state_lock: self.active_reservations.pop(spec.id,None)
+            if release_reservation:
+                with self.state_lock: self.active_reservations.pop(spec.id,None)
 
     def request_stop(self,*_args): self.stop_event.set(); self._log("STOP_REQUESTED")
 
