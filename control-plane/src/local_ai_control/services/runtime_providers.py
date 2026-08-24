@@ -21,6 +21,13 @@ from local_ai_control.services.qwen38_runtime import ContextLimitExceeded,Qwen38
 class HeavyModelConflict(RuntimeError): pass
 
 
+class ResourcePreflightDenied(RuntimeUnavailable):
+    """Deterministic resource-policy failure with a stable transition stage."""
+    def __init__(self,category,reason):
+        self.category=category; self.reason=reason
+        super().__init__(f"{category}: {reason}")
+
+
 @dataclass(frozen=True)
 class RuntimeState:
     main_healthy: bool
@@ -236,6 +243,58 @@ class LaunchdHeavyRuntimeLifecycle:
                     raise HeavyModelConflict("heavy runtime reappeared before start")
             self._authorized_start=target_profile_id; self._authorized_probes=dict(endpoint_probes)
 
+    def admit_owned_transition(self,current_profile_id,endpoint_probes):
+        """Read-only proof that one exact owned runtime may be stopped.
+
+        Admission never authorizes a start.  It proves both managed profiles
+        before the current label is controlled, so an unknown second listener
+        cannot be hidden by stopping the known runtime first.
+        """
+        if current_profile_id not in self.labels or set(endpoint_probes)!=set(self.labels):
+            raise HeavyModelConflict("complete managed-profile probes are required")
+        with self._start_lock:
+            evidence={
+                profile:self.inspect(profile,endpoint_probes[profile])
+                for profile in self.labels
+            }
+            for item in evidence.values(): self._validate_evidence(item)
+            if evidence[current_profile_id].identity_status!="MATCH":
+                raise HeavyModelConflict("current heavy runtime is not exactly owned")
+            other=[item for profile,item in evidence.items() if profile!=current_profile_id]
+            if any(item.identity_status=="MATCH" for item in other):
+                raise HeavyModelConflict("second heavy runtime is live")
+            return evidence
+
+    def transition_source_state(self,current_profile_id,endpoint_probes):
+        """Classify a failed endpoint's exact process state without control."""
+        if current_profile_id not in self.labels or set(endpoint_probes)!=set(self.labels):
+            raise HeavyModelConflict("complete managed-profile probes are required")
+        with self._start_lock:
+            evidence={
+                profile:self.inspect(profile,endpoint_probes[profile])
+                for profile in self.labels
+            }
+            for item in evidence.values(): self._validate_evidence(item)
+            other=[item for profile,item in evidence.items() if profile!=current_profile_id]
+            if any(item.identity_status=="MATCH" for item in other):
+                raise HeavyModelConflict("second heavy runtime is live")
+            return "OWNED" if evidence[current_profile_id].identity_status=="MATCH" else "ABSENT"
+
+    def prove_all_absent(self,endpoint_probes):
+        """Read-only proof that neither managed heavy runtime is resident."""
+        if set(endpoint_probes)!=set(self.labels):
+            raise HeavyModelConflict("complete managed-profile probes are required")
+        with self._start_lock:
+            evidence={
+                profile:self.inspect(profile,endpoint_probes[profile])
+                for profile in self.labels
+            }
+            for item in evidence.values():
+                self._validate_evidence(item)
+                if item.identity_status=="MATCH":
+                    raise HeavyModelConflict("heavy runtime remains live before resource gate")
+            return evidence
+
     def _plist(self,profile_id):
         self.runtime_root.mkdir(parents=True,exist_ok=True)
         self.runtime_root.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.runtime_root,0o700)
@@ -316,12 +375,15 @@ class LaunchdHeavyRuntimeLifecycle:
 
 
 class RuntimeProviderFactory:
-    def __init__(self,registry=None,*,main=None,fast=None,preflight=None,lifecycle=None,sleep=time.sleep):
+    def __init__(self,registry=None,*,main=None,fast=None,preflight=None,lifecycle=None,sleep=time.sleep,
+                 post_stop_preflight_attempts=30,post_stop_preflight_interval=1):
         self.registry=registry or ModelRegistry()
         main_alias=self.registry.alias(ModelRole.MAIN)
         self.main=main or Qwen38Provider(max_context_tokens=main_alias.max_context_tokens)
         self.fast=fast or OmlxProvider()
         self.preflight=preflight or MemoryPreflight(); self.lifecycle=lifecycle or LaunchdHeavyRuntimeLifecycle(); self.sleep=sleep; self.lock=threading.RLock()
+        self.post_stop_preflight_attempts=max(1,int(post_stop_preflight_attempts))
+        self.post_stop_preflight_interval=max(0,float(post_stop_preflight_interval))
 
     def _eligible(self,role,profile_id): return any(profile.profile_id==profile_id for profile in self.registry.eligible(role))
 
@@ -360,18 +422,90 @@ class RuntimeProviderFactory:
         if hasattr(self.lifecycle,"capture_started"):
             self.lifecycle.capture_started(profile.profile_id)
 
-    def _preflight(self,target,current=None):
-        owned=(current.expected_memory_gib or 0) if current else 0
-        return self.preflight.check(target.expected_memory_gib or 0,owned_reclaimable_gib=owned)
+    def _endpoint_probes(self):
+        return {
+            QWEN38.profile_id:lambda:_healthy(self.main),
+            QWEN36.profile_id:lambda:_healthy(self.fast),
+        }
+
+    def _preflight(self,target):
+        # Every start is authorized from a snapshot taken after competing
+        # runtime absence.  Owned memory is never a waiver for a second model.
+        return self.preflight.check(target.expected_memory_gib or 0)
+
+    def _admit_owned_transition(self,current,target):
+        if hasattr(self.lifecycle,"admit_owned_transition"):
+            self.lifecycle.admit_owned_transition(
+                current.profile_id,self._endpoint_probes(),
+            )
+        if hasattr(self.preflight,"admit_owned_transition"):
+            check=self.preflight.admit_owned_transition(target.expected_memory_gib or 0)
+        else:
+            # Legacy dependency-injected test doubles contain no real resource
+            # probe.  Production MemoryPreflight always uses the explicit
+            # admission method above.
+            check=self.preflight.check(target.expected_memory_gib or 0,
+                                       owned_reclaimable_gib=current.expected_memory_gib or 0)
+        if not check.allowed:
+            raise ResourcePreflightDenied("TRANSITION_ADMISSION_DENIED",check.reason)
+
+    def _authorize_cold_start(self,target):
+        check=self._preflight(target)
+        if not check.allowed:
+            raise ResourcePreflightDenied("COLD_START_RESOURCE_PREFLIGHT_DENIED",check.reason)
+
+    def _prove_all_absent(self):
+        if hasattr(self.lifecycle,"prove_all_absent"):
+            self.lifecycle.prove_all_absent(self._endpoint_probes())
+
+    def _wait_for_post_stop_preflight(self,target,*,category="POST_STOP_RESOURCE_PREFLIGHT_DENIED"):
+        last=None
+        for attempt in range(self.post_stop_preflight_attempts):
+            last=self._preflight(target)
+            if last.allowed:
+                return last
+            if last.reason in {"MEMORY_PRESSURE_CRITICAL","SWAP_RUNAWAY"}:
+                break
+            if attempt+1<self.post_stop_preflight_attempts:
+                self.sleep(self.post_stop_preflight_interval)
+        raise ResourcePreflightDenied(category,last.reason if last else "NO_RESOURCE_SNAPSHOT")
+
+    def _restore_previous_after_failure(self,current,current_provider):
+        """Resource-gated non-recursive restore; failure leaves zero-heavy."""
+        self._prove_all_absent()
+        try:
+            self._wait_for_post_stop_preflight(
+                current,category="PREVIOUS_RUNTIME_RESTORE_PREFLIGHT_DENIED",
+            )
+        except ResourcePreflightDenied as error:
+            raise HeavyModelConflict(str(error)) from error
+        restore_started=False
+        try:
+            restore_started=True
+            self._start_and_capture(current,current_provider)
+        except Exception as restore_error:
+            if restore_started:
+                try:
+                    self._stop_and_prove(current,current_provider)
+                except Exception as cleanup_error:
+                    raise HeavyModelConflict(
+                        "previous runtime restore failed and could not be confirmed down"
+                    ) from cleanup_error
+            raise HeavyModelConflict(
+                "previous runtime restore failed safely; zero-heavy-runtime retained"
+            ) from restore_error
 
     def _switch(self,target,provider,*,current=None,current_provider=None):
-        check=self._preflight(target,current)
-        if not check.allowed: raise RuntimeUnavailable(f"resource preflight denied: {check.reason}")
         target_started=False; current_stop_proven=False
         try:
             if current and current_provider:
+                self._admit_owned_transition(current,target)
                 self._stop_and_prove(current,current_provider)
                 current_stop_proven=True
+                self._prove_all_absent()
+                self._wait_for_post_stop_preflight(target)
+            else:
+                self._authorize_cold_start(target)
             # Treat start as potentially partial even when it raises. Cleanup
             # must prove the target down before any rollback is attempted.
             target_started=True; self._start_and_capture(target,provider)
@@ -380,9 +514,8 @@ class RuntimeProviderFactory:
                 try: self._stop_and_prove(target,provider)
                 except Exception as cleanup_error:
                     raise HeavyModelConflict("failed target could not be confirmed down") from cleanup_error
-            if current and current_provider and current_stop_proven:
-                if not _healthy(current_provider):
-                    self._start_and_capture(current,current_provider)
+            if current and current_provider and current_stop_proven and not _healthy(current_provider):
+                self._restore_previous_after_failure(current,current_provider)
             raise
 
     def _fallback_target(self,state):
@@ -445,14 +578,21 @@ class RuntimeProviderFactory:
         with self.lock:
             if not self._eligible(ModelRole.FALLBACK,QWEN36.profile_id):
                 raise RuntimeUnavailable("FALLBACK is not eligible")
-            # MAIN may be unhealthy while its managed process still owns Metal
-            # resources. Stop the exact owned label and confirm its endpoint down.
-            self._stop_and_prove(QWEN38,self.main)
-            state=self.state()
-            provider=self.fast if state.fast_healthy else None
-            if provider is None:
+            # MAIN may be unhealthy while its exact managed process still owns
+            # Metal resources.  Use the same owned transition admission, stop,
+            # reclaim-settle, and fresh final start gate as every other switch.
+            source_state="OWNED"
+            if hasattr(self.lifecycle,"transition_source_state"):
+                source_state=self.lifecycle.transition_source_state(
+                    QWEN38.profile_id,self._endpoint_probes(),
+                )
+            if source_state=="OWNED":
+                self._switch(QWEN36,self.fast,current=QWEN38,current_provider=self.main)
+            elif source_state=="ABSENT":
                 self._switch(QWEN36,self.fast)
-                provider=self.fast
+            else:
+                raise HeavyModelConflict("unknown failover source state")
+            provider=self.fast
             yield provider
 
     def generate(self,task_type,prompt,max_output_tokens=1024):

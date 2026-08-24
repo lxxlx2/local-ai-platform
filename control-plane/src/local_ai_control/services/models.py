@@ -269,6 +269,25 @@ class MemoryPreflight:
             reason="OK" if allowed else "INSUFFICIENT_RECLAIMABLE_MEMORY"
         return MemoryPreflightResult(allowed,required_gib,snapshot.available_gib,reason,snapshot)
 
+    def admit_owned_transition(self, required_gib):
+        """Allow an exact-owned runtime to be stopped before the final gate.
+
+        This is deliberately not start authorization.  A resident managed
+        model can keep macOS swap above the absolute start ceiling even though
+        stopping that exact model will reclaim the resources needed by the
+        replacement.  Admission therefore checks only the system condition
+        that makes an orderly transition itself unsafe.  The normal ``check``
+        method remains mandatory after the old runtime is proven absent and
+        retains every start policy, including the 6 GiB absolute swap limit.
+        """
+        snapshot=self.probe()
+        self._last_swap_used_gib=snapshot.swap_used_gib
+        allowed=snapshot.pressure!="CRITICAL"
+        reason="OK" if allowed else "MEMORY_PRESSURE_CRITICAL"
+        return MemoryPreflightResult(
+            allowed,required_gib,snapshot.available_gib,reason,snapshot,
+        )
+
 
 @dataclass(frozen=True)
 class ModelHealth: healthy: bool; detail: str=""
