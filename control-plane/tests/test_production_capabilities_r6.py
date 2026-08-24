@@ -80,7 +80,7 @@ def test_unreaped_identity_conflict_stops_manager_and_blocks_more_scheduling(mon
     first,second=spec(tmp_path,0),spec(tmp_path,1); process=FakePopen("stuck"); calls=install_popen(monkeypatch,[process])
     usage=lambda _path:type("Usage",(),{"free":15})()
     queue=queue_for(tmp_path,[first,second],snapshot=lambda pid:mismatch(pid) if pid==process.pid else None,disk_usage=usage)
-    assert queue.run()=="PAUSED"
+    assert queue.run()=="BLOCKED_WORKER_QUARANTINE"
     assert len(calls)==1 and process.terminate_calls==1 and process.kill_calls==1
     assert queue.stop_event.is_set() and first.id in queue.active_reservations
     assert queue.statuses[first.id]["last_error_category"]=="WORKER_CLEANUP_UNCONFIRMED"

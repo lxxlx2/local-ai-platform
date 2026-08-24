@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future,ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict,dataclass
 from datetime import UTC,datetime
 import fcntl
 import json
@@ -12,6 +12,7 @@ import plistlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -27,6 +28,9 @@ DEFAULT_RUNTIME=DEFAULT_ROOT/"runtime/model-downloads"
 DEFAULT_MODELS=DEFAULT_ROOT/"models"
 LABEL="local-ai.model-download-queue"
 HF_EXECUTABLE=Path("/Users/jerson/AI/runtime/qwen38-venv/bin/hf")
+QUARANTINE_SCHEMA_VERSION="0.1"
+QUARANTINE_REASON="WORKER_CLEANUP_UNCONFIRMED"
+SAFE_MODEL_ID_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,13 @@ class WorkerCleanupUnconfirmed(WorkerIdentityConflict):
 def utc_now(): return datetime.now(UTC).isoformat()
 
 
+def exact_pid_exists(pid):
+    """Read-only existence probe for one PID; never sends a signal."""
+    result=subprocess.run(["/bin/ps","-p",str(int(pid)),"-o","pid="],capture_output=True,text=True,shell=False,timeout=5,check=False)
+    if result.returncode not in {0,1}: raise RuntimeError("exact PID existence check failed")
+    return result.returncode==0 and result.stdout.strip()==str(int(pid))
+
+
 def load_queue_config(path: Path=DEFAULT_CONFIG,*,models_root: Path=DEFAULT_MODELS) -> QueueConfig:
     payload=json.loads(path.read_text())
     if payload.get("serial_only") not in {False,None}: raise ValueError("parallel download manager required")
@@ -65,7 +76,7 @@ def load_queue_config(path: Path=DEFAULT_CONFIG,*,models_root: Path=DEFAULT_MODE
     for raw in payload.get("models",[]):
         local_dir=Path(raw["local_dir"]).resolve()
         if local_dir==root or root not in local_dir.parents: raise ValueError("model local_dir escapes models root")
-        if raw["id"] in seen or not REVISION_RE.fullmatch(raw["revision"]): raise ValueError("duplicate id or unpinned revision")
+        if raw["id"] in seen or not SAFE_MODEL_ID_RE.fullmatch(raw["id"]) or not REVISION_RE.fullmatch(raw["revision"]): raise ValueError("invalid id, duplicate id, or unpinned revision")
         if "/" not in raw["repo"] or int(raw["expected_bytes"])<=0: raise ValueError("invalid model metadata")
         includes=tuple(raw.get("include",()))
         if any(not item or item.startswith("/") or ".." in item for item in includes): raise ValueError("unsafe include pattern")
@@ -92,24 +103,102 @@ def directory_bytes(path: Path) -> int: return storage_bytes(path).payload_bytes
 
 
 class ModelDownloadQueue:
-    def __init__(self,config: QueueConfig,runtime_dir: Path=DEFAULT_RUNTIME,*,parallel_limit: int|None=None,downloader: Callable[[DownloadSpec,Path],int]|None=None,sleeper: Callable[[float],None]=time.sleep,waiter: Callable[[float],bool]|None=None,snapshot=process_snapshot,disk_usage=shutil.disk_usage):
+    def __init__(self,config: QueueConfig,runtime_dir: Path=DEFAULT_RUNTIME,*,parallel_limit: int|None=None,downloader: Callable[[DownloadSpec,Path],int]|None=None,sleeper: Callable[[float],None]=time.sleep,waiter: Callable[[float],bool]|None=None,snapshot=process_snapshot,process_exists=exact_pid_exists,disk_usage=shutil.disk_usage):
         self.config=config; self.runtime_dir=Path(runtime_dir); self.parallel_limit=parallel_limit or config.default_parallel
         if not 2<=self.parallel_limit<=5: raise ValueError("parallel limit must be 2..5")
         self.state_path=self.runtime_dir/"state.json"; self.log_path=self.runtime_dir/"manager.log"; self.lock_path=self.runtime_dir/"manager.lock"
-        self.pid_path=self.runtime_dir/"manager.pid"; self.identity_path=self.runtime_dir/"manager.identity.json"; self.worker_root=self.runtime_dir/"workers"
-        self.downloader=downloader; self.sleeper=sleeper; self.snapshot=snapshot; self.disk_usage=disk_usage
+        self.pid_path=self.runtime_dir/"manager.pid"; self.identity_path=self.runtime_dir/"manager.identity.json"; self.worker_root=self.runtime_dir/"workers"; self.quarantine_root=self.runtime_dir/"quarantine"
+        self.downloader=downloader; self.sleeper=sleeper; self.snapshot=snapshot; self.process_exists=process_exists; self.disk_usage=disk_usage
         self.stop_event=threading.Event(); self.state_lock=threading.RLock(); self.statuses={}; self.active_processes={}; self.active_reservations={}; self.state={}
+        self.quarantine_status={"quarantine_count":0,"quarantined_model_ids":[]}
         self.waiter=waiter or self.stop_event.wait
 
     def _private_runtime(self):
         self.runtime_dir.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.runtime_dir,0o700)
         self.worker_root.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.worker_root,0o700)
+        self.quarantine_root.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.quarantine_root,0o700)
 
     def _atomic_json(self,path,payload):
         self._private_runtime(); temporary=Path(path).with_name(f".{Path(path).name}.{os.getpid()}.{threading.get_ident()}.tmp")
         descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(descriptor,"w") as handle: json.dump(payload,handle,ensure_ascii=False,indent=2); handle.write("\n")
         os.replace(temporary,path); os.chmod(path,0o600)
+
+    def _quarantine_path(self,model_id):
+        if not isinstance(model_id,str) or not SAFE_MODEL_ID_RE.fullmatch(model_id):
+            raise ValueError("unsafe quarantine model id")
+        return self.quarantine_root/f"{model_id}.json"
+
+    def _write_quarantine(self,spec,pid,observed_identity):
+        observed=None
+        if observed_identity is not None:
+            observed=asdict(observed_identity); observed["argv"]=list(observed_identity.argv)
+        payload={
+            "schema_version":QUARANTINE_SCHEMA_VERSION,
+            "model_id":spec.id,
+            "pid":int(pid),
+            "created_at":utc_now(),
+            "reason":QUARANTINE_REASON,
+            "identity_state":"OBSERVED" if observed_identity is not None else "UNAVAILABLE",
+            "observed_identity":observed,
+        }
+        self._atomic_json(self._quarantine_path(spec.id),payload)
+        with self.state_lock:
+            model_ids=set(self.quarantine_status["quarantined_model_ids"]); model_ids.add(spec.id)
+            self.quarantine_status={"quarantine_count":len(model_ids),"quarantined_model_ids":sorted(model_ids)}
+
+    def _validated_quarantine(self,path):
+        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode)!=0o600:
+            raise ValueError("unsafe quarantine record file")
+        raw=json.loads(path.read_text())
+        expected={"schema_version","model_id","pid","created_at","reason","identity_state","observed_identity"}
+        if not isinstance(raw,dict) or set(raw)!=expected:
+            raise ValueError("invalid quarantine schema")
+        model_ids={spec.id for spec in self.config.models}
+        if (raw["schema_version"]!=QUARANTINE_SCHEMA_VERSION or raw["reason"]!=QUARANTINE_REASON or
+                raw["model_id"] not in model_ids or not SAFE_MODEL_ID_RE.fullmatch(raw["model_id"]) or
+                path.name!=f"{raw['model_id']}.json" or not isinstance(raw["pid"],int) or isinstance(raw["pid"],bool) or raw["pid"]<=0):
+            raise ValueError("invalid quarantine metadata")
+        created=datetime.fromisoformat(raw["created_at"])
+        if created.tzinfo is None or created.utcoffset() is None:
+            raise ValueError("quarantine timestamp must include timezone")
+        if raw["identity_state"]=="UNAVAILABLE":
+            if raw["observed_identity"] is not None: raise ValueError("unavailable identity must be null")
+            observed=None
+        elif raw["identity_state"]=="OBSERVED":
+            item=raw["observed_identity"]
+            if not isinstance(item,dict) or set(item)!={"pid","executable","argv","start_identity"}:
+                raise ValueError("invalid observed identity schema")
+            if (item["pid"]!=raw["pid"] or not isinstance(item["executable"],str) or not Path(item["executable"]).is_absolute() or
+                    not isinstance(item["argv"],list) or not item["argv"] or not all(isinstance(value,str) and value for value in item["argv"]) or
+                    not isinstance(item["start_identity"],str) or not item["start_identity"]):
+                raise ValueError("invalid observed process identity")
+            observed=ProcessIdentity(item["pid"],item["executable"],tuple(item["argv"]),item["start_identity"])
+        else:
+            raise ValueError("invalid quarantine identity state")
+        return raw,observed
+
+    def _scan_quarantine(self,*,clear_resolved=False):
+        if not self.quarantine_root.exists():
+            return {"quarantine_count":0,"quarantined_model_ids":[]}
+        blocked=[]
+        try: entries=sorted(self.quarantine_root.iterdir())
+        except OSError: return {"quarantine_count":1,"quarantined_model_ids":["UNKNOWN"]}
+        for path in entries:
+            try:
+                raw,observed=self._validated_quarantine(path)
+                current=self.snapshot(raw["pid"])
+                if current is not None and not isinstance(current,ProcessIdentity):
+                    raise ValueError("invalid current process snapshot")
+                unresolved=((current is not None or self.process_exists(raw["pid"])) if observed is None else (current==observed))
+                if unresolved:
+                    blocked.append(raw["model_id"]); continue
+                if clear_resolved:
+                    path.unlink()
+            except Exception:
+                candidate=path.stem if SAFE_MODEL_ID_RE.fullmatch(path.stem) else "UNKNOWN"
+                blocked.append(candidate)
+        return {"quarantine_count":len(blocked),"quarantined_model_ids":sorted(blocked)}
 
     def _log(self,event,model_id="-"):
         self._private_runtime(); descriptor=os.open(self.log_path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
@@ -164,7 +253,7 @@ class ModelDownloadQueue:
     def _snapshot_state(self,manager_state):
         with self.state_lock:
             models={key:dict(value) for key,value in self.statuses.items()}; active=[key for key,value in models.items() if value.get("state")=="DOWNLOADING"]
-            payload={"schema_version":"0.2","state":manager_state,"manager_pid":os.getpid(),"pid":os.getpid(),"updated_at":utc_now(),"parallel_limit":self.parallel_limit,"active_count":len(active),"active_model_ids":active,"models":models,"completed":[key for key,value in models.items() if value.get("state")=="COMPLETED"],"failed":[key for key,value in models.items() if value.get("state")=="FAILED"],"pending":[key for key,value in models.items() if value.get("state") in {"PENDING","RETRY_WAIT","PAUSED"}]}
+            payload={"schema_version":"0.2","state":manager_state,"manager_pid":os.getpid(),"pid":os.getpid(),"updated_at":utc_now(),"parallel_limit":self.parallel_limit,"active_count":len(active),"active_model_ids":active,"models":models,"completed":[key for key,value in models.items() if value.get("state")=="COMPLETED"],"failed":[key for key,value in models.items() if value.get("state")=="FAILED"],"pending":[key for key,value in models.items() if value.get("state") in {"PENDING","RETRY_WAIT","PAUSED"}],**self.quarantine_status}
             self.state=payload; self._atomic_json(self.state_path,payload)
 
     def _command(self,spec):
@@ -239,6 +328,12 @@ class ModelDownloadQueue:
             except (OSError,ValueError): identity_matches=False
             if not identity_matches:
                 if not self._reap_unverifiable_child(process):
+                    try: self._write_quarantine(spec,process.pid,identity)
+                    except Exception as error:
+                        with self.state_lock:
+                            model_ids=set(self.quarantine_status["quarantined_model_ids"]); model_ids.add(spec.id)
+                            self.quarantine_status={"quarantine_count":len(model_ids),"quarantined_model_ids":sorted(model_ids)}
+                        raise WorkerCleanupUnconfirmed("quarantine persistence failed") from error
                     raise WorkerCleanupUnconfirmed("unverifiable worker cleanup was not confirmed")
                 raise WorkerIdentityConflict("worker identity validation failed")
             identity_path=self.worker_root/f"{spec.id}.identity.json"; write_identity(identity_path,identity)
@@ -291,12 +386,16 @@ class ModelDownloadQueue:
         try: fcntl.flock(lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: self._log("SINGLETON_ALREADY_RUNNING"); lock.close(); return "ALREADY_RUNNING"
         previous_handlers={}
-        if threading.current_thread() is threading.main_thread():
-            for signum in (signal.SIGTERM,signal.SIGINT): previous_handlers[signum]=signal.signal(signum,self.request_stop)
-        self._manager_identity()
-        self.statuses={spec.id:{"state":"COMPLETED" if self._is_complete(spec) else "PENDING","status":"COMPLETED" if self._is_complete(spec) else "PENDING","repo":spec.repo,"local_dir":str(spec.local_dir),"worker_pid":None,"worker_identity":None,"retry_count":0,"exit_code":None,"started_at":None,"finished_at":None,"last_error_category":None} for spec in self.config.models}
-        self._snapshot_state("RUNNING"); self._log("MANAGER_STARTED"); futures: dict[Future,DownloadSpec]={}
         try:
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGTERM,signal.SIGINT): previous_handlers[signum]=signal.signal(signum,self.request_stop)
+            self.statuses={spec.id:{"state":"COMPLETED" if self._is_complete(spec) else "PENDING","status":"COMPLETED" if self._is_complete(spec) else "PENDING","repo":spec.repo,"local_dir":str(spec.local_dir),"worker_pid":None,"worker_identity":None,"retry_count":0,"exit_code":None,"started_at":None,"finished_at":None,"last_error_category":None} for spec in self.config.models}
+            self.quarantine_status=self._scan_quarantine(clear_resolved=True)
+            if self.quarantine_status["quarantine_count"]:
+                self._snapshot_state("BLOCKED_WORKER_QUARANTINE"); self._log("BLOCKED_WORKER_QUARANTINE")
+                return "BLOCKED_WORKER_QUARANTINE"
+            self._manager_identity()
+            self._snapshot_state("RUNNING"); self._log("MANAGER_STARTED"); futures: dict[Future,DownloadSpec]={}
             with ThreadPoolExecutor(max_workers=self.parallel_limit,thread_name_prefix="model-download") as pool:
                 while True:
                     for future,spec in list(futures.items()):
@@ -320,7 +419,8 @@ class ModelDownloadQueue:
                         for spec in pending: self._set(spec,"FAILED",finished_at=utc_now(),last_error_category="INSUFFICIENT_DISK")
                         break
                     time.sleep(0.1)
-            final="PAUSED" if self.stop_event.is_set() else ("COMPLETED_WITH_FAILURES" if any(value["state"]=="FAILED" for value in self.statuses.values()) else "COMPLETED")
+            final=("BLOCKED_WORKER_QUARANTINE" if self.quarantine_status["quarantine_count"] else
+                   ("PAUSED" if self.stop_event.is_set() else ("COMPLETED_WITH_FAILURES" if any(value["state"]=="FAILED" for value in self.statuses.values()) else "COMPLETED")))
             self._snapshot_state(final); self._log(final); return final
         finally:
             self.pid_path.unlink(missing_ok=True)
@@ -352,11 +452,13 @@ def _verified_worker_identity(path,command,snapshot=process_snapshot):
 
 def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNTIME,*,snapshot=process_snapshot):
     config=config or load_queue_config(); runtime_dir=Path(runtime_dir); old=_state_file(runtime_dir)
+    verifier=ModelDownloadQueue(config,runtime_dir,snapshot=snapshot); quarantine=verifier._scan_quarantine(clear_resolved=False)
     manager_verified,manager_identity_state,manager_pid=_verified_identity(runtime_dir/"manager.identity.json",snapshot); recorded_state=old.get("state","NOT_STARTED")
-    if manager_verified: manager_state="RUNNING" if recorded_state not in {"STOPPING","PAUSED"} else recorded_state
+    if quarantine["quarantine_count"]: manager_state="BLOCKED_WORKER_QUARANTINE"
+    elif manager_verified: manager_state="RUNNING" if recorded_state not in {"STOPPING","PAUSED"} else recorded_state
     elif recorded_state in {"RUNNING","STOPPING"}: manager_state="STALE"
     else: manager_state=recorded_state
-    rows=[]; active=[]; verifier=ModelDownloadQueue(config,runtime_dir,snapshot=snapshot)
+    rows=[]; active=[]
     for spec in config.models:
         sizes=storage_bytes(spec.local_dir); complete=verifier._is_complete(spec); item=(old.get("models") or {}).get(spec.id,{})
         worker_path=item.get("worker_identity") or runtime_dir/"workers"/f"{spec.id}.identity.json"; worker_verified,worker_identity_state,worker_pid=_verified_worker_identity(worker_path,verifier._command(spec),snapshot)
@@ -369,11 +471,11 @@ def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNT
         else: state="PENDING"
         downloaded=sizes.payload_bytes+sizes.partial_cache_bytes; progress=100.0 if complete else min(downloaded/spec.expected_bytes*100,99.9)
         rows.append({"id":spec.id,"repo":spec.repo,"state":state,"worker_pid":worker_pid if worker_verified else None,"worker_pid_verified":worker_verified,"worker_identity_state":worker_identity_state,"local_dir":str(spec.local_dir),"payload_bytes":sizes.payload_bytes,"partial_cache_bytes":sizes.partial_cache_bytes,"downloaded_bytes":downloaded,"expected_bytes":spec.expected_bytes,"progress_pct":round(progress,2),"retry_count":int(item.get("retry_count",0)),"last_error_category":item.get("last_error_category")})
-    return {"manager_state":manager_state,"manager_pid":manager_pid,"manager_pid_verified":manager_verified,"manager_identity_state":manager_identity_state,"parallel_limit":int(old.get("parallel_limit",config.default_parallel)),"active_count":len(active),"active_model_ids":active,"models":rows}
+    return {"manager_state":manager_state,"manager_pid":manager_pid,"manager_pid_verified":manager_verified,"manager_identity_state":manager_identity_state,"parallel_limit":int(old.get("parallel_limit",config.default_parallel)),"active_count":len(active),"active_model_ids":active,**quarantine,"models":rows}
 
 
 def bounded_status(runtime_dir: Path=DEFAULT_RUNTIME,config: QueueConfig|None=None,snapshot=process_snapshot):
-    state=status_snapshot(config,runtime_dir,snapshot=snapshot); lines=["MODEL_DOWNLOAD_MANAGER",f"state: {state['manager_state']}",f"manager_pid: {state['manager_pid'] or '-'}",f"manager_pid_verified: {'YES' if state['manager_pid_verified'] else 'NO'}",f"parallel_limit: {state['parallel_limit']}",f"active_count: {state['active_count']}"]
+    state=status_snapshot(config,runtime_dir,snapshot=snapshot); lines=["MODEL_DOWNLOAD_MANAGER",f"state: {state['manager_state']}",f"manager_pid: {state['manager_pid'] or '-'}",f"manager_pid_verified: {'YES' if state['manager_pid_verified'] else 'NO'}",f"parallel_limit: {state['parallel_limit']}",f"active_count: {state['active_count']}",f"quarantine_count: {state['quarantine_count']}",f"quarantined_model_ids: {','.join(state['quarantined_model_ids']) or '-'}"]
     for row in state["models"]:
         lines.extend(["",f"MODEL {row['id']}",f"repo: {row['repo']}",f"state: {row['state']}",f"worker_pid: {row['worker_pid'] or '-'}",f"worker_pid_verified: {'YES' if row['worker_pid_verified'] else 'NO'}",f"local_dir: {row['local_dir']}",f"payload_gib: {row['payload_bytes']/1024**3:.3f}",f"partial_cache_gib: {row['partial_cache_bytes']/1024**3:.3f}",f"downloaded_gib: {row['downloaded_bytes']/1024**3:.3f}",f"expected_gib: {row['expected_bytes']/1024**3:.3f}",f"progress_pct: {row['progress_pct']:.2f}",f"retry_count: {row['retry_count']}",f"last_error_category: {row['last_error_category'] or '-'}"])
     return "\n".join(lines)+"\n"
