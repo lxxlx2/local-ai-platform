@@ -29,7 +29,7 @@
 
 `Qwen38Provider` talks only to a localhost sidecar on port 8001. Normal chat and Owner-private JPEG understanding use this provider; `/fast` and deterministic fallback use the existing localhost-only Qwen3.6 oMLX provider. A bounded async executor admits one heavy operation and runs the complete synchronous lifecycle plus inference in one dedicated worker, so the Telegram event loop remains responsive without holding a thread lock across an `await`. If an already-selected MAIN dies for an infrastructure reason, the factory stops and confirms MAIN down, then retries exactly once on FALLBACK. Context, validation, authorization, secret-firewall, and cancellation failures are never failover candidates, and one `ChatService` invocation owns history persistence.
 
-The lifecycle owns only its two exact launchd labels, refuses simultaneous healthy heavy runtimes, performs both a 6 GiB absolute swap ceiling and a 2 GiB sampled-delta guard, and restores MAIN after a temporary FAST session. Partial starts are cleaned up and confirmed down before rollback. It never terminates unknown user processes.
+The lifecycle owns only its two exact launchd labels, refuses simultaneous healthy heavy runtimes, performs both a 6 GiB absolute swap ceiling and a 2 GiB sampled-delta guard, and restores MAIN after a temporary FAST session (including a cold FAST request). Each owned launch records a mode-0600 identity binding PID, executable, exact argv, and start identity. Before a switch or inference failover, both that process identity becoming DEAD/MISMATCH and the fixed localhost endpoint becoming unavailable are required. A bootout error, unknown listener, invalid identity, or still-live partial start fails closed before the target or rollback runtime can start. PID reuse is unrelated and is never killed.
 
 Owner Telegram images are downloaded and validated before heavy-runtime admission, bounded to 20 MB, checked by MIME, magic bytes, exact size, and symlink policy, then copied with mode 0600 into an ignored mode-0700 TTL spool. Each request spool file is deleted immediately after success, failure, or cancellation; TTL cleanup is crash recovery only. The provider accepts only paths below that spool root. Public image inference remains disabled and performs no download.
 
@@ -42,3 +42,14 @@ Qwen3.8 applies the 16,384-token ceiling to `chat_template(prompt) + output`. Th
 ## Deployment status
 
 The Telegram navigation and deterministic routing are code-ready but are not deployed by this branch. Existing Bot and oMLX processes are not restarted as part of this work.
+
+## Manual model downloads
+
+The pinned download queue is a manual, resumable manager with a default concurrency of three. It reserves disk globally across active models, gives each model an independent bounded retry, validates the exact revision snapshot before writing a completion marker, and never deletes Hugging Face partial cache. It is not launchd, cron, RunAtLoad, KeepAlive, or an automation.
+
+- Start/resume: `control-plane/scripts/start-model-downloads.sh --parallel 3`
+- Status once: `control-plane/scripts/status-model-downloads.sh`
+- Watch interactively: `control-plane/scripts/watch-model-downloads.sh 5`
+- Graceful stop: `control-plane/scripts/stop-model-downloads.sh`
+
+The manager and each `hf download` child have private exact process identities. Stop signals only the verified manager; that manager stops only its own still-matching children and preserves every `.incomplete` file.

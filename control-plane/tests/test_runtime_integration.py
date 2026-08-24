@@ -128,12 +128,9 @@ def test_client_uses_coarse_dos_bound_not_character_token_guess():
 
 def test_lifecycle_only_controls_owned_launchd_labels_and_never_kills_unknown(monkeypatch,tmp_path):
     import local_ai_control.services.runtime_providers as runtime_module
-    calls=[]
     monkeypatch.setattr(runtime_module.subprocess,"check_output",lambda *a,**k:"501\n")
-    monkeypatch.setattr(runtime_module.subprocess,"run",lambda argv,**kwargs: calls.append(argv) or SimpleNamespace(returncode=0))
-    lifecycle=LaunchdHeavyRuntimeLifecycle(tmp_path)
-    lifecycle.stop(QWEN38.profile_id)
-    assert calls==[["launchctl","bootout","gui/501/local-ai.qwen38-runtime"]]
+    lifecycle=LaunchdHeavyRuntimeLifecycle(tmp_path,runner=lambda argv,**kwargs:SimpleNamespace(returncode=0))
+    with pytest.raises(HeavyModelConflict): lifecycle.stop(QWEN38.profile_id)
     source=Path(runtime_module.__file__).read_text()
     assert "os.kill" not in source and "pkill" not in source and "killall" not in source
 

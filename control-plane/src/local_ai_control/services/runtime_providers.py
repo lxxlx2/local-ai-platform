@@ -2,6 +2,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -9,6 +10,7 @@ import threading
 import time
 import urllib.error
 
+from local_ai_control.services.heavy_process_identity import expected_identity,identity_status,listener_pids,process_snapshot,write_identity
 from local_ai_control.services.models import MemoryPreflight,ModelRegistry,ModelRole,QWEN36,QWEN38
 from local_ai_control.services.omlx import OmlxProvider
 from local_ai_control.services.qwen38_runtime import ContextLimitExceeded,Qwen38Provider,RuntimeUnavailable
@@ -30,34 +32,91 @@ def _healthy(provider):
 
 
 class LaunchdHeavyRuntimeLifecycle:
-    """Switches only the two model services owned by this platform."""
-    def __init__(self,runtime_root=Path("/Users/jerson/AI/runtime/model-services"),sleep=time.sleep):
+    """Switches exact labels and proves the owned process actually exited."""
+    def __init__(self,runtime_root=Path("/Users/jerson/AI/runtime/model-services"),sleep=time.sleep,*,runner=subprocess.run,snapshot=process_snapshot,listeners=listener_pids):
         self.runtime_root=Path(runtime_root); self.sleep=sleep; self.uid=str(subprocess.check_output(["id","-u"],text=True).strip())
+        self.runner=runner; self.snapshot=snapshot; self.listeners=listeners
         self.labels={"local-qwen38":"local-ai.qwen38-runtime","local-qwen36":"local-ai.omlx-qwen36"}
+
+    def _launch_args(self,profile_id):
+        if profile_id=="local-qwen38": return ["/Users/jerson/AI/runtime/qwen38-venv/bin/python","/Users/jerson/AI/control-plane/scripts/qwen38-sidecar.py","--port","8001"]
+        if profile_id=="local-qwen36": return ["/Users/jerson/AI/runtime/omlx-venv/bin/omlx","serve","--model-dir","/Users/jerson/AI/models","--host","127.0.0.1","--port","8000","--max-concurrent-requests","1","--memory-guard-gb","28","--no-cache","--initial-cache-blocks","64"]
+        raise ValueError("unknown managed profile")
+
+    def _process_signature(self,profile_id):
+        launch=self._launch_args(profile_id)
+        if profile_id=="local-qwen36":
+            interpreter="/Users/jerson/AI/runtime/omlx-venv/bin/python"
+            argv=(interpreter,launch[0],*launch[1:])
+        else:
+            interpreter=launch[0]; argv=tuple(launch)
+        return str(Path(interpreter).resolve()),tuple(argv)
+
+    def _port(self,profile_id): return 8001 if profile_id=="local-qwen38" else 8000
+    def _identity_path(self,profile_id): return self.runtime_root/f"{profile_id}.identity.json"
+
+    def _service_present(self,profile_id):
+        result=self.runner(["launchctl","print",f"gui/{self.uid}/{self.labels[profile_id]}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+        return result.returncode==0
 
     def _plist(self,profile_id):
         self.runtime_root.mkdir(parents=True,exist_ok=True)
-        if profile_id=="local-qwen38": args=["/Users/jerson/AI/runtime/qwen38-venv/bin/python","/Users/jerson/AI/control-plane/scripts/qwen38-sidecar.py","--port","8001"]
-        elif profile_id=="local-qwen36": args=["/Users/jerson/AI/runtime/omlx-venv/bin/omlx","serve","--model-dir","/Users/jerson/AI/models","--host","127.0.0.1","--port","8000","--max-concurrent-requests","1","--memory-guard-gb","28","--no-cache","--initial-cache-blocks","64"]
-        else: raise ValueError("unknown managed profile")
+        self.runtime_root.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(self.runtime_root,0o700)
+        args=self._launch_args(profile_id)
         label=self.labels[profile_id]; path=self.runtime_root/f"{label}.plist"
         payload={"Label":label,"ProgramArguments":args,"WorkingDirectory":"/Users/jerson/AI","KeepAlive":True,"RunAtLoad":True,"ProcessType":"Interactive","StandardOutPath":str(self.runtime_root/f"{label}.stdout.log"),"StandardErrorPath":str(self.runtime_root/f"{label}.stderr.log")}
         temporary=path.with_suffix(".tmp")
         with temporary.open("wb") as handle: plistlib.dump(payload,handle)
         temporary.replace(path); return path
 
-    def stop(self,profile_id):
-        label=self.labels[profile_id]
-        subprocess.run(["launchctl","bootout",f"gui/{self.uid}/{label}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+    def safe_stop(self,profile_id,endpoint_healthy):
+        """Boot out only when saved ownership is exact; never kill by PID."""
+        path=self._identity_path(profile_id); before,_=identity_status(path,snapshot=self.snapshot)
+        endpoint_up=bool(endpoint_healthy())
+        if before!="MATCH":
+            if endpoint_up or before in {"MISSING","INVALID"} or self._service_present(profile_id):
+                raise HeavyModelConflict("runtime ownership is ambiguous; reconciliation required")
+            if before in {"DEAD","MISMATCH"}:
+                return "ALREADY_STOPPED"
+            raise HeavyModelConflict("runtime identity is not controllable")
+        result=self.runner(["launchctl","bootout",f"gui/{self.uid}/{self.labels[profile_id]}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+        if result.returncode:
+            after,_=identity_status(path,snapshot=self.snapshot)
+            if self._service_present(profile_id) or bool(endpoint_healthy()) or after not in {"DEAD","MISMATCH"}:
+                raise HeavyModelConflict("launchctl bootout failed while owned runtime may be live")
+        return "STOP_REQUESTED"
+
+    def wait_stopped(self,profile_id,endpoint_healthy,attempts=20):
+        path=self._identity_path(profile_id)
+        for _ in range(attempts):
+            status,_pid=identity_status(path,snapshot=self.snapshot)
+            if status in {"DEAD","MISMATCH"} and not endpoint_healthy():
+                return
+            if status in {"MISSING","INVALID"}:
+                raise HeavyModelConflict("runtime identity became ambiguous")
+            self.sleep(0.5)
+        raise HeavyModelConflict("owned heavy process did not exit")
+
+    def capture_started(self,profile_id):
+        pids=self.listeners(self._port(profile_id))
+        if len(pids)!=1:
+            raise HeavyModelConflict("owned runtime listener is not unique")
+        identity=self.snapshot(pids[0])
+        executable,argv=self._process_signature(profile_id)
+        if identity is None or not expected_identity(identity,executable,argv):
+            raise HeavyModelConflict("listener process does not match managed profile")
+        write_identity(self._identity_path(profile_id),identity)
+        return identity
 
     def start(self,profile_id):
         path=self._plist(profile_id); label=self.labels[profile_id]
-        result=subprocess.run(["launchctl","bootstrap",f"gui/{self.uid}",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
-        if result.returncode: subprocess.run(["launchctl","kickstart",f"gui/{self.uid}/{label}"],check=True)
+        result=self.runner(["launchctl","bootstrap",f"gui/{self.uid}",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+        if result.returncode:
+            kicked=self.runner(["launchctl","kickstart",f"gui/{self.uid}/{label}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+            if kicked.returncode: raise RuntimeUnavailable("managed runtime start failed")
 
-    def activate(self,profile_id):
-        other="local-qwen36" if profile_id=="local-qwen38" else "local-qwen38"
-        self.stop(other); self.start(profile_id)
+    def stop(self,profile_id):
+        raise HeavyModelConflict("unsafe stop API disabled; use safe_stop with endpoint proof")
 
 
 class RuntimeProviderFactory:
@@ -87,6 +146,19 @@ class RuntimeProviderFactory:
             self.sleep(1)
         raise RuntimeUnavailable("owned previous runtime did not stop; target was not started")
 
+    def _stop_and_prove(self,profile,provider):
+        if hasattr(self.lifecycle,"safe_stop"):
+            self.lifecycle.safe_stop(profile.profile_id,lambda:_healthy(provider))
+            self.lifecycle.wait_stopped(profile.profile_id,lambda:_healthy(provider))
+        else:
+            # Dependency-injected legacy test doubles never control real PIDs.
+            self.lifecycle.stop(profile.profile_id); self._wait_down(provider)
+
+    def _start_and_capture(self,profile,provider):
+        self.lifecycle.start(profile.profile_id); self._wait(provider)
+        if hasattr(self.lifecycle,"capture_started"):
+            self.lifecycle.capture_started(profile.profile_id)
+
     def _preflight(self,target,current=None):
         owned=(current.expected_memory_gib or 0) if current else 0
         return self.preflight.check(target.expected_memory_gib or 0,owned_reclaimable_gib=owned)
@@ -94,22 +166,22 @@ class RuntimeProviderFactory:
     def _switch(self,target,provider,*,current=None,current_provider=None):
         check=self._preflight(target,current)
         if not check.allowed: raise RuntimeUnavailable(f"resource preflight denied: {check.reason}")
-        target_started=False
+        target_started=False; current_stop_proven=False
         try:
             if current and current_provider:
-                self.lifecycle.stop(current.profile_id); self._wait_down(current_provider)
+                self._stop_and_prove(current,current_provider)
+                current_stop_proven=True
             # Treat start as potentially partial even when it raises. Cleanup
             # must prove the target down before any rollback is attempted.
-            target_started=True; self.lifecycle.start(target.profile_id); self._wait(provider)
+            target_started=True; self._start_and_capture(target,provider)
         except Exception:
             if target_started:
-                self.lifecycle.stop(target.profile_id)
-                try: self._wait_down(provider)
+                try: self._stop_and_prove(target,provider)
                 except Exception as cleanup_error:
                     raise HeavyModelConflict("failed target could not be confirmed down") from cleanup_error
-            if current and current_provider:
+            if current and current_provider and current_stop_proven:
                 if not _healthy(current_provider):
-                    self.lifecycle.start(current.profile_id); self._wait(current_provider)
+                    self._start_and_capture(current,current_provider)
             raise
 
     def _fallback_target(self,state):
@@ -127,11 +199,11 @@ class RuntimeProviderFactory:
             restore_main=False
             if explicit_fast:
                 if not self._eligible(ModelRole.FAST,QWEN36.profile_id): raise RuntimeUnavailable("FAST is not eligible")
+                restore_main=self._eligible(ModelRole.MAIN,QWEN38.profile_id)
                 if state.fast_healthy:
                     provider=self.fast
                 elif state.main_healthy:
                     self._switch(QWEN36,self.fast,current=QWEN38,current_provider=self.main)
-                    restore_main=self._eligible(ModelRole.MAIN,QWEN38.profile_id)
                     provider=self.fast
                 else:
                     self._switch(QWEN36,self.fast)
@@ -157,7 +229,14 @@ class RuntimeProviderFactory:
             try: yield provider
             finally:
                 if restore_main:
-                    self._switch(QWEN38,self.main,current=QWEN36,current_provider=self.fast)
+                    try:
+                        self._switch(QWEN38,self.main,current=QWEN36,current_provider=self.fast)
+                    except HeavyModelConflict:
+                        raise
+                    except Exception:
+                        state=self.state()
+                        if state.main_healthy or not state.fast_healthy:
+                            raise HeavyModelConflict("MAIN restore did not preserve exactly one fallback")
 
     @contextmanager
     def failover_session(self):
@@ -167,7 +246,7 @@ class RuntimeProviderFactory:
                 raise RuntimeUnavailable("FALLBACK is not eligible")
             # MAIN may be unhealthy while its managed process still owns Metal
             # resources. Stop the exact owned label and confirm its endpoint down.
-            self.lifecycle.stop(QWEN38.profile_id); self._wait_down(self.main)
+            self._stop_and_prove(QWEN38,self.main)
             state=self.state()
             provider=self.fast if state.fast_healthy else None
             if provider is None:
