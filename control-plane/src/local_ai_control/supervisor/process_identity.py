@@ -13,6 +13,7 @@ from pathlib import Path
 from local_ai_control.services.supervisor import (
     CONTROL_PLANE_PYTHON, SUPERVISOR_RUNTIME, ensure_private_directory, ensure_private_file,
 )
+from local_ai_control.services.heavy_process_identity import expected_spawn_identity
 
 EXPECTED_ARGV = (
     str(CONTROL_PLANE_PYTHON),
@@ -31,22 +32,33 @@ class ProcessIdentity:
     start_identity: str
 
 
-def _ps(pid: int, field: str) -> str | None:
+def _process_text(argv: list[str]) -> str | None:
     try:
         result = subprocess.run(
-            ["ps", "-p", str(int(pid)), "-o", f"{field}="],
+            argv,
             capture_output=True, text=True, shell=False, timeout=3, check=False,
         )
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError):
         return None
     value = result.stdout.strip()
     return value if result.returncode == 0 and value else None
 
 
 def process_snapshot(pid: int) -> ProcessIdentity | None:
-    command = _ps(pid, "command")
-    start = _ps(pid, "lstart")
-    if not command or not start:
+    if isinstance(pid, bool):
+        return None
+    try:
+        exact_pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if exact_pid <= 0:
+        return None
+    command = _process_text(["/bin/ps", "-ww", "-p", str(exact_pid), "-o", "command="])
+    start = _process_text(["/bin/ps", "-p", str(exact_pid), "-o", "lstart="])
+    executable = _process_text(["/usr/bin/proc_pidpath", str(exact_pid)])
+    if executable is None:
+        executable = _process_text(["/bin/ps", "-p", str(exact_pid), "-o", "comm="])
+    if not command or not start or not executable:
         return None
     try:
         argv = tuple(shlex.split(command))
@@ -54,12 +66,17 @@ def process_snapshot(pid: int) -> ProcessIdentity | None:
         return None
     if not argv:
         return None
-    return ProcessIdentity(int(pid), argv[0], argv, start)
+    return ProcessIdentity(exact_pid, str(Path(executable).resolve()), argv, start)
+
+
+def _matches_expected_spawn(identity: ProcessIdentity) -> bool:
+    """Match only the exact Supervisor spawn under reviewed path normalization."""
+    return expected_spawn_identity(identity, EXPECTED_ARGV)
 
 
 def expected_snapshot(pid: int) -> ProcessIdentity | None:
     snapshot = process_snapshot(pid)
-    if snapshot is None or snapshot.argv != EXPECTED_ARGV or snapshot.executable != str(CONTROL_PLANE_PYTHON):
+    if snapshot is None or not _matches_expected_spawn(snapshot):
         return None
     return snapshot
 
@@ -92,11 +109,16 @@ def read_identity(path: Path) -> ProcessIdentity:
     target = Path(path)
     ensure_private_file(target)
     data = json.loads(target.read_text(encoding="utf-8"))
-    if set(data) != {"pid", "executable", "argv", "start_identity"}:
+    if not isinstance(data, dict) or set(data) != {"pid", "executable", "argv", "start_identity"}:
         raise ValueError("invalid process identity schema")
-    identity = ProcessIdentity(int(data["pid"]), str(data["executable"]),
-                               tuple(str(item) for item in data["argv"]), str(data["start_identity"]))
-    if identity.pid <= 0 or not identity.start_identity or identity.argv != EXPECTED_ARGV or identity.executable != str(CONTROL_PLANE_PYTHON):
+    if (not isinstance(data["pid"], int) or isinstance(data["pid"], bool) or data["pid"] <= 0
+            or not isinstance(data["executable"], str) or not data["executable"]
+            or not isinstance(data["argv"], list) or not data["argv"]
+            or not all(isinstance(item, str) and item for item in data["argv"])
+            or not isinstance(data["start_identity"], str) or not data["start_identity"]):
+        raise ValueError("invalid process identity schema")
+    identity = ProcessIdentity(data["pid"], data["executable"], tuple(data["argv"]), data["start_identity"])
+    if not _matches_expected_spawn(identity):
         raise ValueError("process identity does not match supervisor signature")
     return identity
 
@@ -129,7 +151,7 @@ def classify_started_process(pid: int) -> tuple[str, str | None]:
     snapshot = process_snapshot(pid)
     if snapshot is None:
         return "DEAD", None
-    if snapshot.argv != EXPECTED_ARGV or snapshot.executable != str(CONTROL_PLANE_PYTHON):
+    if not _matches_expected_spawn(snapshot):
         return "MISMATCH", None
     return "EXPECTED", snapshot.start_identity
 
@@ -146,8 +168,7 @@ def cleanup_started_process(pid: int, expected_start_identity: str, path: Path, 
     if current is None:
         Path(path).unlink(missing_ok=True)
         return "ALREADY_DEAD"
-    if (current.argv != EXPECTED_ARGV or current.executable != str(CONTROL_PLANE_PYTHON)
-            or current.start_identity != expected_start_identity):
+    if not _matches_expected_spawn(current) or current.start_identity != expected_start_identity:
         return "ORPHAN_RECONCILIATION_REQUIRED"
     try:
         saved = read_identity(path) if Path(path).exists() else None
