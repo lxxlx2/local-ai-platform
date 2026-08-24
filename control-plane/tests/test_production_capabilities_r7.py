@@ -66,7 +66,7 @@ def test_restart_with_exact_observed_identity_blocks_all_workers(tmp_path):
 
 def test_restart_with_dead_pid_clears_quarantine_and_schedules(tmp_path):
     spec=model(tmp_path); first=ModelDownloadQueue(config(spec),tmp_path/"runtime"); write_record(first,spec,observed())
-    restarted=ModelDownloadQueue(config(spec),tmp_path/"runtime",downloader=complete,snapshot=lambda _pid:None,waiter=lambda _delay:False)
+    restarted=ModelDownloadQueue(config(spec),tmp_path/"runtime",downloader=complete,snapshot=lambda _pid:None,process_exists=lambda _pid:False,waiter=lambda _delay:False)
     assert restarted.run()=="COMPLETED"
     assert not list(restarted.quarantine_root.iterdir()) and (spec.local_dir/"weights.bin").exists()
 

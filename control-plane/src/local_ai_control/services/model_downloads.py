@@ -57,6 +57,10 @@ class WorkerCleanupUnconfirmed(WorkerIdentityConflict):
     """An unverifiable spawned child could not be safely stopped and reaped."""
 
 
+class WorkerQuarantinePersistenceFailure(RuntimeError):
+    """No durable cleanup evidence could be written; manager must fail hard."""
+
+
 def utc_now(): return datetime.now(UTC).isoformat()
 
 
@@ -110,7 +114,7 @@ class ModelDownloadQueue:
         self.pid_path=self.runtime_dir/"manager.pid"; self.identity_path=self.runtime_dir/"manager.identity.json"; self.worker_root=self.runtime_dir/"workers"; self.quarantine_root=self.runtime_dir/"quarantine"
         self.downloader=downloader; self.sleeper=sleeper; self.snapshot=snapshot; self.process_exists=process_exists; self.disk_usage=disk_usage
         self.stop_event=threading.Event(); self.state_lock=threading.RLock(); self.statuses={}; self.active_processes={}; self.active_reservations={}; self.state={}
-        self.quarantine_status={"quarantine_count":0,"quarantined_model_ids":[]}
+        self.quarantine_status={"quarantine_count":0,"quarantined_model_ids":[]}; self.cleanup_blockers=[]
         self.waiter=waiter or self.stop_event.wait
 
     def _private_runtime(self):
@@ -129,11 +133,11 @@ class ModelDownloadQueue:
             raise ValueError("unsafe quarantine model id")
         return self.quarantine_root/f"{model_id}.json"
 
-    def _write_quarantine(self,spec,pid,observed_identity):
+    def _quarantine_payload(self,spec,pid,observed_identity):
         observed=None
         if observed_identity is not None:
             observed=asdict(observed_identity); observed["argv"]=list(observed_identity.argv)
-        payload={
+        return {
             "schema_version":QUARANTINE_SCHEMA_VERSION,
             "model_id":spec.id,
             "pid":int(pid),
@@ -142,22 +146,23 @@ class ModelDownloadQueue:
             "identity_state":"OBSERVED" if observed_identity is not None else "UNAVAILABLE",
             "observed_identity":observed,
         }
+
+    def _write_quarantine(self,spec,pid,observed_identity):
+        payload=self._quarantine_payload(spec,pid,observed_identity)
         self._atomic_json(self._quarantine_path(spec.id),payload)
         with self.state_lock:
             model_ids=set(self.quarantine_status["quarantined_model_ids"]); model_ids.add(spec.id)
             self.quarantine_status={"quarantine_count":len(model_ids),"quarantined_model_ids":sorted(model_ids)}
 
-    def _validated_quarantine(self,path):
-        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode)!=0o600:
-            raise ValueError("unsafe quarantine record file")
-        raw=json.loads(path.read_text())
+    def _validated_quarantine_payload(self,raw,*,filename=None):
         expected={"schema_version","model_id","pid","created_at","reason","identity_state","observed_identity"}
         if not isinstance(raw,dict) or set(raw)!=expected:
             raise ValueError("invalid quarantine schema")
         model_ids={spec.id for spec in self.config.models}
         if (raw["schema_version"]!=QUARANTINE_SCHEMA_VERSION or raw["reason"]!=QUARANTINE_REASON or
                 raw["model_id"] not in model_ids or not SAFE_MODEL_ID_RE.fullmatch(raw["model_id"]) or
-                path.name!=f"{raw['model_id']}.json" or not isinstance(raw["pid"],int) or isinstance(raw["pid"],bool) or raw["pid"]<=0):
+                (filename is not None and filename!=f"{raw['model_id']}.json") or
+                not isinstance(raw["pid"],int) or isinstance(raw["pid"],bool) or raw["pid"]<=0):
             raise ValueError("invalid quarantine metadata")
         created=datetime.fromisoformat(raw["created_at"])
         if created.tzinfo is None or created.utcoffset() is None:
@@ -178,19 +183,34 @@ class ModelDownloadQueue:
             raise ValueError("invalid quarantine identity state")
         return raw,observed
 
+    def _validated_quarantine(self,path):
+        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode)!=0o600:
+            raise ValueError("unsafe quarantine record file")
+        return self._validated_quarantine_payload(json.loads(path.read_text()),filename=path.name)
+
+    def _quarantine_is_unresolved(self,raw,observed):
+        current=self.snapshot(raw["pid"])
+        if current is not None and not isinstance(current,ProcessIdentity):
+            raise ValueError("invalid current process snapshot")
+        if current is None:
+            return bool(self.process_exists(raw["pid"]))
+        if observed is None:
+            return True
+        return current==observed
+
     def _scan_quarantine(self,*,clear_resolved=False):
-        if not self.quarantine_root.exists():
-            return {"quarantine_count":0,"quarantined_model_ids":[]}
-        blocked=[]
-        try: entries=sorted(self.quarantine_root.iterdir())
-        except OSError: return {"quarantine_count":1,"quarantined_model_ids":["UNKNOWN"]}
+        blocked=[]; fallback_blockers=[]
+        if self.quarantine_root.exists():
+            try: entries=sorted(self.quarantine_root.iterdir())
+            except OSError: entries=None
+        else: entries=[]
+        if entries is None:
+            blocked.append("UNKNOWN")
+            entries=[]
         for path in entries:
             try:
                 raw,observed=self._validated_quarantine(path)
-                current=self.snapshot(raw["pid"])
-                if current is not None and not isinstance(current,ProcessIdentity):
-                    raise ValueError("invalid current process snapshot")
-                unresolved=((current is not None or self.process_exists(raw["pid"])) if observed is None else (current==observed))
+                unresolved=self._quarantine_is_unresolved(raw,observed)
                 if unresolved:
                     blocked.append(raw["model_id"]); continue
                 if clear_resolved:
@@ -198,7 +218,31 @@ class ModelDownloadQueue:
             except Exception:
                 candidate=path.stem if SAFE_MODEL_ID_RE.fullmatch(path.stem) else "UNKNOWN"
                 blocked.append(candidate)
-        return {"quarantine_count":len(blocked),"quarantined_model_ids":sorted(blocked)}
+        try:
+            state=json.loads(self.state_path.read_text())
+            if not isinstance(state,dict): raise ValueError("invalid manager state")
+        except FileNotFoundError:
+            state={}
+        except (OSError,json.JSONDecodeError,TypeError,ValueError):
+            blocked.append("UNKNOWN"); state={"cleanup_blockers":[{"invalid":True}]}
+        raw_blockers=state.get("cleanup_blockers",[])
+        if not isinstance(raw_blockers,list):
+            blocked.append("UNKNOWN"); fallback_blockers=[{"invalid":True}]
+        else:
+            for raw in raw_blockers:
+                try:
+                    payload,observed=self._validated_quarantine_payload(raw)
+                    if self._quarantine_is_unresolved(payload,observed):
+                        blocked.append(payload["model_id"]); fallback_blockers.append(payload)
+                except Exception:
+                    candidate=raw.get("model_id") if isinstance(raw,dict) and isinstance(raw.get("model_id"),str) and SAFE_MODEL_ID_RE.fullmatch(raw["model_id"]) else "UNKNOWN"
+                    blocked.append(candidate); fallback_blockers.append(raw if isinstance(raw,dict) else {"invalid":True})
+        prior_count=state.get("quarantine_count",0)
+        if (state.get("state")=="BLOCKED_WORKER_QUARANTINE" and isinstance(prior_count,int) and not isinstance(prior_count,bool) and prior_count>0 and
+                not raw_blockers and not entries):
+            blocked.append("UNKNOWN"); fallback_blockers.append({"invalid":True})
+        status={"quarantine_count":len(blocked),"quarantined_model_ids":sorted(set(blocked))}
+        return status,fallback_blockers
 
     def _log(self,event,model_id="-"):
         self._private_runtime(); descriptor=os.open(self.log_path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
@@ -253,7 +297,7 @@ class ModelDownloadQueue:
     def _snapshot_state(self,manager_state):
         with self.state_lock:
             models={key:dict(value) for key,value in self.statuses.items()}; active=[key for key,value in models.items() if value.get("state")=="DOWNLOADING"]
-            payload={"schema_version":"0.2","state":manager_state,"manager_pid":os.getpid(),"pid":os.getpid(),"updated_at":utc_now(),"parallel_limit":self.parallel_limit,"active_count":len(active),"active_model_ids":active,"models":models,"completed":[key for key,value in models.items() if value.get("state")=="COMPLETED"],"failed":[key for key,value in models.items() if value.get("state")=="FAILED"],"pending":[key for key,value in models.items() if value.get("state") in {"PENDING","RETRY_WAIT","PAUSED"}],**self.quarantine_status}
+            payload={"schema_version":"0.2","state":manager_state,"manager_pid":os.getpid(),"pid":os.getpid(),"updated_at":utc_now(),"parallel_limit":self.parallel_limit,"active_count":len(active),"active_model_ids":active,"models":models,"completed":[key for key,value in models.items() if value.get("state")=="COMPLETED"],"failed":[key for key,value in models.items() if value.get("state")=="FAILED"],"pending":[key for key,value in models.items() if value.get("state") in {"PENDING","RETRY_WAIT","PAUSED"}],"cleanup_blockers":self.cleanup_blockers,**self.quarantine_status}
             self.state=payload; self._atomic_json(self.state_path,payload)
 
     def _command(self,spec):
@@ -328,12 +372,17 @@ class ModelDownloadQueue:
             except (OSError,ValueError): identity_matches=False
             if not identity_matches:
                 if not self._reap_unverifiable_child(process):
+                    payload=self._quarantine_payload(spec,process.pid,identity)
                     try: self._write_quarantine(spec,process.pid,identity)
                     except Exception as error:
                         with self.state_lock:
                             model_ids=set(self.quarantine_status["quarantined_model_ids"]); model_ids.add(spec.id)
                             self.quarantine_status={"quarantine_count":len(model_ids),"quarantined_model_ids":sorted(model_ids)}
-                        raise WorkerCleanupUnconfirmed("quarantine persistence failed") from error
+                            self.cleanup_blockers=[*self.cleanup_blockers,payload]
+                        try: self._snapshot_state("BLOCKED_WORKER_QUARANTINE")
+                        except Exception as fallback_error:
+                            raise WorkerQuarantinePersistenceFailure("no durable worker cleanup blocker could be written") from fallback_error
+                        raise WorkerCleanupUnconfirmed("primary quarantine failed; durable state blocker persisted") from error
                     raise WorkerCleanupUnconfirmed("unverifiable worker cleanup was not confirmed")
                 raise WorkerIdentityConflict("worker identity validation failed")
             identity_path=self.worker_root/f"{spec.id}.identity.json"; write_identity(identity_path,identity)
@@ -353,6 +402,11 @@ class ModelDownloadQueue:
                 if self.stop_event.is_set(): self._set(spec,"PAUSED",last_error_category=None); return "PAUSED"
                 self._set(spec,"DOWNLOADING",retry_count=attempt-1,started_at=self.statuses[spec.id].get("started_at") or utc_now(),last_error_category=None)
                 try: code=self.downloader(spec,log_path) if self.downloader else self._download_process(spec,log_path)
+                except WorkerQuarantinePersistenceFailure:
+                    release_reservation=False; self.stop_event.set()
+                    with self.state_lock:
+                        self.statuses[spec.id].update({"state":"BLOCKED_WORKER_QUARANTINE","status":"BLOCKED_WORKER_QUARANTINE","exit_code":125,"finished_at":None,"last_error_category":"QUARANTINE_PERSISTENCE_FAILURE"})
+                    raise
                 except WorkerCleanupUnconfirmed:
                     release_reservation=False; self.stop_event.set()
                     self._set(spec,"PAUSED",exit_code=125,finished_at=None,last_error_category="WORKER_CLEANUP_UNCONFIRMED")
@@ -390,7 +444,7 @@ class ModelDownloadQueue:
             if threading.current_thread() is threading.main_thread():
                 for signum in (signal.SIGTERM,signal.SIGINT): previous_handlers[signum]=signal.signal(signum,self.request_stop)
             self.statuses={spec.id:{"state":"COMPLETED" if self._is_complete(spec) else "PENDING","status":"COMPLETED" if self._is_complete(spec) else "PENDING","repo":spec.repo,"local_dir":str(spec.local_dir),"worker_pid":None,"worker_identity":None,"retry_count":0,"exit_code":None,"started_at":None,"finished_at":None,"last_error_category":None} for spec in self.config.models}
-            self.quarantine_status=self._scan_quarantine(clear_resolved=True)
+            self.quarantine_status,self.cleanup_blockers=self._scan_quarantine(clear_resolved=True)
             if self.quarantine_status["quarantine_count"]:
                 self._snapshot_state("BLOCKED_WORKER_QUARANTINE"); self._log("BLOCKED_WORKER_QUARANTINE")
                 return "BLOCKED_WORKER_QUARANTINE"
@@ -450,9 +504,9 @@ def _verified_worker_identity(path,command,snapshot=process_snapshot):
     return True,"MATCH",saved.pid
 
 
-def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNTIME,*,snapshot=process_snapshot):
+def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNTIME,*,snapshot=process_snapshot,process_exists=exact_pid_exists):
     config=config or load_queue_config(); runtime_dir=Path(runtime_dir); old=_state_file(runtime_dir)
-    verifier=ModelDownloadQueue(config,runtime_dir,snapshot=snapshot); quarantine=verifier._scan_quarantine(clear_resolved=False)
+    verifier=ModelDownloadQueue(config,runtime_dir,snapshot=snapshot,process_exists=process_exists); quarantine,_fallback=verifier._scan_quarantine(clear_resolved=False)
     manager_verified,manager_identity_state,manager_pid=_verified_identity(runtime_dir/"manager.identity.json",snapshot); recorded_state=old.get("state","NOT_STARTED")
     if quarantine["quarantine_count"]: manager_state="BLOCKED_WORKER_QUARANTINE"
     elif manager_verified: manager_state="RUNNING" if recorded_state not in {"STOPPING","PAUSED"} else recorded_state
@@ -474,8 +528,8 @@ def status_snapshot(config: QueueConfig|None=None,runtime_dir: Path=DEFAULT_RUNT
     return {"manager_state":manager_state,"manager_pid":manager_pid,"manager_pid_verified":manager_verified,"manager_identity_state":manager_identity_state,"parallel_limit":int(old.get("parallel_limit",config.default_parallel)),"active_count":len(active),"active_model_ids":active,**quarantine,"models":rows}
 
 
-def bounded_status(runtime_dir: Path=DEFAULT_RUNTIME,config: QueueConfig|None=None,snapshot=process_snapshot):
-    state=status_snapshot(config,runtime_dir,snapshot=snapshot); lines=["MODEL_DOWNLOAD_MANAGER",f"state: {state['manager_state']}",f"manager_pid: {state['manager_pid'] or '-'}",f"manager_pid_verified: {'YES' if state['manager_pid_verified'] else 'NO'}",f"parallel_limit: {state['parallel_limit']}",f"active_count: {state['active_count']}",f"quarantine_count: {state['quarantine_count']}",f"quarantined_model_ids: {','.join(state['quarantined_model_ids']) or '-'}"]
+def bounded_status(runtime_dir: Path=DEFAULT_RUNTIME,config: QueueConfig|None=None,snapshot=process_snapshot,process_exists=exact_pid_exists):
+    state=status_snapshot(config,runtime_dir,snapshot=snapshot,process_exists=process_exists); lines=["MODEL_DOWNLOAD_MANAGER",f"state: {state['manager_state']}",f"manager_pid: {state['manager_pid'] or '-'}",f"manager_pid_verified: {'YES' if state['manager_pid_verified'] else 'NO'}",f"parallel_limit: {state['parallel_limit']}",f"active_count: {state['active_count']}",f"quarantine_count: {state['quarantine_count']}",f"quarantined_model_ids: {','.join(state['quarantined_model_ids']) or '-'}"]
     for row in state["models"]:
         lines.extend(["",f"MODEL {row['id']}",f"repo: {row['repo']}",f"state: {row['state']}",f"worker_pid: {row['worker_pid'] or '-'}",f"worker_pid_verified: {'YES' if row['worker_pid_verified'] else 'NO'}",f"local_dir: {row['local_dir']}",f"payload_gib: {row['payload_bytes']/1024**3:.3f}",f"partial_cache_gib: {row['partial_cache_bytes']/1024**3:.3f}",f"downloaded_gib: {row['downloaded_bytes']/1024**3:.3f}",f"expected_gib: {row['expected_bytes']/1024**3:.3f}",f"progress_pct: {row['progress_pct']:.2f}",f"retry_count: {row['retry_count']}",f"last_error_category: {row['last_error_category'] or '-'}"])
     return "\n".join(lines)+"\n"
