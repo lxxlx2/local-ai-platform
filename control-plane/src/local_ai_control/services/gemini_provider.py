@@ -11,8 +11,9 @@ from .provider_router import PrivacyMode
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash")
 MIN_GEMINI_SDK_MAJOR = 2
-DEFAULT_GEMINI_TIMEOUT_MS = 90_000
+DEFAULT_GEMINI_TIMEOUT_MS = 60_000
 
 
 class GeminiProviderError(RuntimeError):
@@ -121,16 +122,24 @@ def _require_supported_sdk() -> str:
 
 
 class GeminiReviewerProvider:
-    """Read-only Gemini reviewer using the stable Generate Content API.
+    """Read-only Gemini reviewer using Generate Content.
 
-    Interactions is useful for agentic/stateful Gemini workflows, but this provider is
-    deliberately a bounded stateless reviewer. It accepts only already-minimized /
-    sanitized review material and exposes no filesystem, shell, Git, deployment or
-    service-control surface. PRIVATE requests are rejected before cloud egress.
+    The normal path prefers Gemini 3.7 Flash, but free-tier/server saturation must not
+    block the workflow. Transient timeout/504/429/model-unavailable errors fall back
+    to other stable Flash models that also have a free tier. Authentication, privacy,
+    schema and bad-request errors fail closed and are never masked by fallback.
     """
 
-    def __init__(self, *, model: str = DEFAULT_GEMINI_MODEL, transport: Transport | None = None):
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_GEMINI_MODEL,
+        fallback_models: tuple[str, ...] = DEFAULT_GEMINI_FALLBACK_MODELS,
+        transport: Transport | None = None,
+    ):
         self.model = model
+        self.fallback_models = tuple(item for item in fallback_models if item != model)
+        self._uses_official_transport = transport is None
         self.transport = transport or self._official_transport
 
     @staticmethod
@@ -156,7 +165,9 @@ class GeminiReviewerProvider:
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_json_schema=dict(schema),
-                    max_output_tokens=2048,
+                    max_output_tokens=1536,
+                    temperature=0,
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
                 ),
             )
             text = response.text
@@ -165,7 +176,13 @@ class GeminiReviewerProvider:
         except Exception as error:
             message = _safe_remote_error(error, key)
             lowered = message.lower()
-            if "timeout" in lowered or "timed out" in lowered:
+            if (
+                "timeout" in lowered
+                or "timed out" in lowered
+                or "504" in lowered
+                or "deadline_exceeded" in lowered
+                or "deadline expired" in lowered
+            ):
                 raise GeminiTimeoutError(message) from error
             if "429" in lowered or "resource_exhausted" in lowered or "rate limit" in lowered:
                 raise GeminiRateLimitError(message) from error
@@ -176,6 +193,12 @@ class GeminiReviewerProvider:
             if "400" in lowered or "badrequest" in lowered or "invalid_argument" in lowered or "validation error" in lowered:
                 raise GeminiBadRequestError(message) from error
             raise GeminiProviderError(f"{type(error).__name__}: {message}") from error
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
         try:
             payload = json.loads(text)
         except (TypeError, json.JSONDecodeError) as error:
@@ -230,13 +253,25 @@ class GeminiReviewerProvider:
             "Do not assume shell, filesystem, Git, deployment or secret access. Return findings grounded in the material.\n\n"
             + material
         )
+
+        models = (self.model, *self.fallback_models) if self._uses_official_transport else (self.model,)
         started = time.monotonic()
-        payload = self.transport(self.model, prompt, REVIEW_SCHEMA)
-        verdict, summary, findings = self._validate_payload(payload)
-        return GeminiReviewResult(
-            verdict=verdict,
-            summary=summary,
-            findings=findings,
-            model=self.model,
-            latency_seconds=round(time.monotonic() - started, 3),
-        )
+        last_transient: Exception | None = None
+        for model in models:
+            try:
+                payload = self.transport(model, prompt, REVIEW_SCHEMA)
+                verdict, summary, findings = self._validate_payload(payload)
+                return GeminiReviewResult(
+                    verdict=verdict,
+                    summary=summary,
+                    findings=findings,
+                    model=model,
+                    latency_seconds=round(time.monotonic() - started, 3),
+                )
+            except (GeminiTimeoutError, GeminiRateLimitError, GeminiModelUnavailableError) as error:
+                last_transient = error
+                continue
+
+        if last_transient is not None:
+            raise last_transient
+        raise GeminiProviderError("Gemini reviewer exhausted provider candidates")
