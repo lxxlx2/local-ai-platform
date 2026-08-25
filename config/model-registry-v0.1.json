@@ -14,14 +14,68 @@
     "VIDEO_HIGH": {"profile": "longcat-video", "status": "REGISTERED_NOT_QUALIFIED"},
     "EMBED": {"profile": "qwen3-embedding", "status": "REGISTERED_NOT_QUALIFIED"},
     "RERANK": {"profile": "qwen3-reranker", "status": "REGISTERED_NOT_QUALIFIED"},
-    "RAW": {"profile": "owner-qwen38-raw", "status": "REGISTERED_NOT_QUALIFIED"}
+    "RAW": {
+      "profile": "owner-qwen38-raw-q6k",
+      "status": "REGISTERED_NOT_DOWNLOADED",
+      "owner_only": true,
+      "host_permission_profile": "OWNER_RAW_RESEARCH"
+    },
+    "CLOUD_REVIEW": {
+      "profile": "gemini-3.7-flash-free",
+      "status": "REGISTERED_NOT_QUALIFIED",
+      "provider": "google-gemini-developer-api",
+      "tier": "FREE",
+      "privacy": {"PUBLIC": "ALLOW", "RESTRICTED": "EGRESS_GATE", "PRIVATE": "DENY"}
+    },
+    "PREMIUM_PLAN_ACCEPT": {
+      "profile": "openai-codex-premium",
+      "status": "POLICY_REGISTERED",
+      "quota_class": "CODEX",
+      "purposes": ["PLANNING", "ACCEPTANCE", "ESCALATION"]
+    }
+  },
+  "profiles": {
+    "owner-qwen38-raw-q6k": {
+      "repo": "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
+      "artifact": "Qwen3.8-27B-Uncensored-Q6_K.gguf",
+      "revision": "dee0a3164d9e11bbbebf5b63f52ba99443d14fc3",
+      "sha256": "a50aa1478295b58ee3d93eabe02c17f6d5fcf6cb787fd8a0ab07ac629a46cae6",
+      "runtime": "llama.cpp-metal",
+      "role": "OWNER_RAW_RESEARCH",
+      "public": false,
+      "auto_download": false,
+      "shell": false,
+      "credential_access": false,
+      "document_command_execution": false
+    },
+    "gemini-3.7-flash-free": {
+      "model": "gemini-3.7-flash",
+      "provider": "google-gemini-developer-api",
+      "tier": "FREE",
+      "local": false,
+      "billing_auto_upgrade": false,
+      "role": "CLOUD_REVIEWER_MULTIMODAL",
+      "free_tier_data_use_warning": true,
+      "search_grounding_required": false,
+      "own_search_browser_layer": true
+    }
   },
   "runtime_isolation": {
     "qwen38": "/Users/jerson/AI/runtime/qwen38-venv",
+    "owner_raw": "/Users/jerson/AI/runtime/owner-raw",
     "audio": "/Users/jerson/AI/runtime/audio-venv",
     "image": "/Users/jerson/AI/runtime/image-venv",
     "video": "/Users/jerson/AI/runtime/video-venv",
     "rag": "/Users/jerson/AI/runtime/rag-venv"
   },
-  "policy": {"one_heavy_model_resident": true, "registered_is_not_ready": true, "raw_owner_only": true, "public_privilege_expansion": false}
+  "policy": {
+    "one_heavy_model_resident": true,
+    "registered_is_not_ready": true,
+    "raw_owner_only": true,
+    "public_privilege_expansion": false,
+    "routine_codex_model_quota": false,
+    "gemini_free_by_default": true,
+    "gemini_private_egress": false,
+    "silent_paid_upgrade": false
+  }
 }
