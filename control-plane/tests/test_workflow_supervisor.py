@@ -330,7 +330,17 @@ def test_security_and_git_gate_are_read_only(tmp_path):
         "idempotency_key": "gate", "timeout_seconds": 30, "repository": repository,
     })()
     assert SecurityRunner().run(context).status is StageResultStatus.PASS
-    assert GitGateRunner().run(context).status is StageResultStatus.BLOCKED
+
+    feature_repo = tmp_path / "git-gate-feature"
+    feature_repo.mkdir()
+    feature_init = subprocess.run(
+        ["git", "init", "-b", "feat/test-git-gate"], cwd=feature_repo,
+        capture_output=True, text=True, shell=False, timeout=10, check=False,
+    )
+    assert feature_init.returncode == 0
+    feature_gate = GitGateRunner(feature_repo)
+    assert feature_gate.run(context).status is StageResultStatus.BLOCKED
+
     with repository.db:
         for index, stage in enumerate((WorkflowStage.VALIDATION, WorkflowStage.REVIEW, WorkflowStage.SECURITY)):
             repository.db.execute(
@@ -339,7 +349,22 @@ def test_security_and_git_gate_are_read_only(tmp_path):
                    VALUES(?,?,?,?,?,?,?,?)""",
                 (f"gate-{index}", job.job_id, stage.value, 1, "PASS", "now", "now", f"gate-key-{index}"),
             )
-    assert GitGateRunner().run(context).status is StageResultStatus.PASS
+
+    main_repo = tmp_path / "git-gate-main"
+    main_repo.mkdir()
+    main_init = subprocess.run(
+        ["git", "init", "-b", "main"], cwd=main_repo,
+        capture_output=True, text=True, shell=False, timeout=10, check=False,
+    )
+    assert main_init.returncode == 0
+    main_result = GitGateRunner(main_repo).run(context)
+    assert main_result.status is StageResultStatus.BLOCKED
+    assert main_result.error == "MAIN_BRANCH_DENIED"
+
+    feature_result = feature_gate.run(context)
+    assert feature_result.status is StageResultStatus.PASS
+    assert feature_result.metrics["branch"] == "feat/test-git-gate"
+    assert feature_result.metrics["git_mutation"] is False
     repository.close()
 
 
