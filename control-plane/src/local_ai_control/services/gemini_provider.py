@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import os
 import time
@@ -10,6 +11,7 @@ from .provider_router import PrivacyMode
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+MIN_GEMINI_SDK_MAJOR = 2
 
 
 class GeminiProviderError(RuntimeError):
@@ -42,6 +44,10 @@ class GeminiPrivacyDenied(GeminiProviderError):
 
 class GeminiBadRequestError(GeminiProviderError):
     category = "BAD_REQUEST"
+
+
+class GeminiSdkVersionError(GeminiProviderError):
+    category = "SDK_VERSION"
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,22 @@ def _safe_remote_error(error: Exception, api_key: str) -> str:
     return message[:500] or type(error).__name__
 
 
+def _require_supported_sdk() -> str:
+    try:
+        installed = package_version("google-genai")
+    except PackageNotFoundError as error:
+        raise GeminiProviderError("google-genai SDK is not installed") from error
+    try:
+        major = int(installed.split(".", 1)[0])
+    except (TypeError, ValueError) as error:
+        raise GeminiSdkVersionError(f"unrecognized google-genai version: {installed}") from error
+    if major < MIN_GEMINI_SDK_MAJOR:
+        raise GeminiSdkVersionError(
+            f"google-genai>={MIN_GEMINI_SDK_MAJOR}.0.0 required for current Interactions API; installed={installed}"
+        )
+    return installed
+
+
 class GeminiReviewerProvider:
     """Read-only Gemini reviewer.
 
@@ -115,6 +137,7 @@ class GeminiReviewerProvider:
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
             raise GeminiAuthError("GEMINI_API_KEY is not configured")
+        _require_supported_sdk()
         try:
             from google import genai  # type: ignore
         except ImportError as error:
