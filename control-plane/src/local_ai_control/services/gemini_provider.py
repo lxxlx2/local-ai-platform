@@ -12,6 +12,7 @@ from .provider_router import PrivacyMode
 
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 MIN_GEMINI_SDK_MAJOR = 2
+DEFAULT_GEMINI_TIMEOUT_MS = 60_000
 
 
 class GeminiProviderError(RuntimeError):
@@ -143,7 +144,7 @@ class GeminiReviewerProvider:
         except ImportError as error:
             raise GeminiProviderError("google-genai SDK is not installed") from error
 
-        client = genai.Client(api_key=key)
+        client = genai.Client(api_key=key, http_options={"timeout": DEFAULT_GEMINI_TIMEOUT_MS})
         try:
             interaction = client.interactions.create(
                 model=model,
@@ -170,6 +171,8 @@ class GeminiReviewerProvider:
                 raise GeminiModelUnavailableError(message) from error
             if "400" in lowered or "badrequest" in lowered or "invalid_argument" in lowered:
                 raise GeminiBadRequestError(message) from error
+            if "timeout" in lowered or "timed out" in lowered:
+                raise GeminiTimeoutError(message) from error
             raise GeminiProviderError(f"{type(error).__name__}: {message}") from error
         try:
             payload = json.loads(text)
