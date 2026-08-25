@@ -1,14 +1,17 @@
 # Master AI Platform Roadmap
 
-Source of truth: GitHub Issue #14.
+Status: subordinate to `docs/LOCAL_FIRST_PRODUCT_AND_MODEL_PLAN.md`.
+
+The Local-First Product and Model Plan is the active source of truth approved on 2026-08-25. This roadmap summarizes the architecture and phase order. If this file conflicts with the approved master plan, the master plan wins.
 
 ## Objective
-Build one multi-provider local AI workstation rather than a sequence of disconnected POCs. Supervisor/Operator must sit above stable provider interfaces so local Qwen, Gemini, future local specialists, image generation, retrieval and speech can be added without rewriting task orchestration.
+Build one local-first, multi-provider AI production workstation rather than disconnected POCs. Routine revenue work runs on local models and deterministic tools. Gemini Free API supplies independent cloud review when privacy permits. OpenAI Codex model quota is reserved for premium planning, difficult escalation and final acceptance.
 
 ## Platform layers
 
 ### 1. Capability interfaces
 - ReasoningProvider
+- PlanningProvider
 - ReviewerProvider
 - MultimodalProvider
 - ImageProvider
@@ -16,125 +19,135 @@ Build one multi-provider local AI workstation rather than a sequence of disconne
 - RerankerProvider
 - SpeechToTextProvider
 - TextToSpeechProvider
+- VideoUnderstandingProvider
+- ResearchProvider
+- ExecutionBackend
 
 ### 2. Router
-Inputs: task type, privacy class, provider health, explicit user override, cost/latency policy and local resource pressure.
+Inputs: capability, purpose, privacy class, owner/public permissions, provider health, explicit override, cost/quota policy and local resource pressure.
 
 Privacy classes:
 - PUBLIC
 - RESTRICTED
 - PRIVATE
 
+Purposes:
+- ROUTINE
+- PLANNING
+- REVIEW
+- ACCEPTANCE
+- ESCALATION
+- OWNER_RAW_RESEARCH
+
+Hard policy:
+- ROUTINE work defaults local and does not consume OpenAI Codex-model quota.
+- PRIVATE work never egresses to cloud models.
+- RESTRICTED cloud work requires minimization + egress gate.
+- OWNER_RAW_RESEARCH is owner-only and local.
+
 ### 3. Model registry
-Every model/provider records:
-- downloaded
-- qualified
-- enabled
-- role/capabilities
-- memory/resource profile
-- benchmark evidence
-- current version/hash
-- fallback order
+Every model/provider records download/qualification/enabled state, role, capabilities, runtime, memory profile, benchmark evidence, hash/version, fallback, quota class, privacy class and permission profile.
 
 ### 4. Resource scheduler
-Heavy local workloads are mutually coordinated. Profiles include:
-- MAIN inference
-- FAST inference
+Coordinate heavy local workloads:
+- LOCAL_MAIN inference
+- LOCAL_FAST inference
+- OWNER_RAW inference
 - model download
 - image generation
 - training
 - model qualification
 
+Default heavy workload concurrency = 1 unless a measured safe profile allows overlap.
+
 ### 5. Supervisor/operator
-Generic task lifecycle remains:
-submit -> producer -> validation -> review -> revision or security -> git gate -> done.
-The selected provider is supplied by the Router, not hard-wired into workflow logic.
+Generic task lifecycle remains submit -> execute -> validate -> review -> revision or security -> git gate -> done. Provider selection comes from Router; workflow logic must not hard-code a model.
 
-## Provider roles
+## Provider/model roles
 
-### Local Qwen
-- Qwen3.8 MAIN/private producer/reasoner
-- Qwen3.6 FAST/FALLBACK
-- future local LoRA specialists
+### Qwen3.8 MAIN
+Primary local routine worker for coding, novels, research synthesis, X/content, commerce, task decomposition and tool planning.
 
-### Gemini
-First-class secondary provider:
-- independent code and architecture review
-- large-context analysis
-- image/PDF/video/audio multimodal analysis
-- diagnosis after repeated producer failures
-- optional explicit planner mode later
+### Qwen3.6 FAST/FALLBACK
+Fast local fallback/classifier/background worker.
 
-Gemini has no direct shell, Git write, merge, deploy or service-control authority. Cloud egress passes the privacy gate.
+### OWNER_RAW Qwen
+`JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`, initial target `Q6_K`, owner-only. Reduced-refusal research role with *less* host authority than MAIN: no shell, arbitrary downloads, credentials, installer execution or service control by default.
 
-### Codex
-Execution/tool shell and mutation agent. External findings must be checked against repository source/tests/docs.
+### Gemini Free API
+Cloud reviewer, not local model.
+- default: `gemini-3.7-flash`
+- official `google-genai`
+- free Developer API tier by default
+- no silent billing upgrade
+- PUBLIC allowed
+- RESTRICTED only after egress sanitization
+- PRIVATE denied
+- free-tier rate-limit failure falls back local when possible
+- own Search/Browser provider remains primary web retrieval layer
 
-## Gemini implementation
-- official google-genai SDK
-- structured output contract
-- direct Gemini provider in platform
-- ReviewerProvider + MultimodalProvider
-- privacy/egress gate
-- Codex-facing MCP STDIO adapter
-- timeout/rate limit/model unavailable/content blocked error mapping
-- optional provider override from operator
+Important privacy fact: free-tier Gemini API content may be used by Google to improve products; this is why PRIVATE is hard-denied and RESTRICTED is minimized before egress.
 
-## Generic project support
-- explicit authorized local Git repo or clone source
-- isolated non-main worktree per task
-- bounded project profile (test command, allowed paths, privacy class)
-- provider selection via Router
-- stop at REVIEW_RESULT_PENDING by default
+### OpenAI Codex model
+Premium provider only:
+- PLANNING
+- ACCEPTANCE
+- ESCALATION
 
-## Model fleet
-Last known state before live verification:
-- Qwen3.8 MAIN: qualified/running
-- Qwen3.6 FAST: qualified, normally stopped
-- Whisper: downloaded, qualification pending
-- TTS: downloaded, qualification pending
-- FLUX: ~60.09%
-- Embedding: ~40.66%
-- Reranker: ~55.65%
-- LongCat/raw auxiliary Qwen3.8 items: 0%
-- downloads paused, active=0
+Not default implementation worker. Codex CLI configured against local Qwen is an execution harness and must be accounted separately from Codex-model quota.
 
-Image targets:
-- FLUX near-term backend
-- Qwen-Image and Qwen-Image-Edit family
-- Qwen Code Canvas for editable/code-generated visual assets
-- Gemini vision review loop
+## Media stack
 
-## Retrieval
-Finish embedding and reranker downloads, then add local RAG/document/repository retrieval. Do not index secrets or uncontrolled runtime state.
+### Images
+- FLUX: general local generative backend
+- Qwen Code Canvas: constrained p5.js/p5.brush -> AST/API policy -> sandbox render -> PNG + editable source
+- Qwen-Image/Qwen-Image-Edit: text-heavy generation/editing candidate
+- Gemini/local visual review loop
 
-## Speech
-Qualify Whisper and TTS and expose STT/TTS providers to operator/Telegram.
+### Audio
+- Whisper STT
+- Qwen TTS / VoiceDesign
 
-## Local training
-Build the pipeline now, train later when clean data exists:
-1. collect accepted task/revision/review trajectories
-2. privacy filter, dedupe, quality score
-3. fixed eval corpus
-4. MLX LoRA path for smaller specialist models
-5. register candidate
-6. A/B benchmark vs base
-7. safety regression
-8. promote/rollback
+### Video
+Near-term tool-first editing: ingest -> Whisper -> local highlight reasoning -> ffmpeg -> cover/assets -> review -> Telegram preview.
 
-Do not destabilize the 27B MAIN model by fine-tuning it without evidence. First targets should be smaller specialist/router/reviewer models.
+## Retrieval/memory
+Finish Embedding + Reranker, then local RAG for repositories, novel Canon/history, product evidence and task history. Git/Canon remains source of truth. Never index raw secrets.
 
-## Execution phases
-- P0 provider interfaces + router + registry + resource scheduler
-- P1 Gemini direct provider + privacy gate + MCP reviewer
-- P2 Generic Project Adapter
-- P3 resume/download/qualify remaining model fleet
-- P4 multimodal: FLUX + Qwen-Image evaluation + Canvas + Gemini vision review
-- P5 embedding/reranker/RAG
-- P6 Whisper/TTS
-- P7 training pipeline + first specialist LoRA
-- P8 daemon/service management + Telegram UI
-- P9 final integrated regression/E2E + review before main merge
+## Training/adaptation
+Collect governed accepted/rejected trajectories, privacy-filter/dedupe/score them, maintain fixed evals, train small MLX LoRA specialists first, A/B against base, safety-regress, then promote/rollback through Model Registry. Do not prematurely fine-tune MAIN 27B.
 
-## Efficiency rule
-During implementation, run focused tests only. Each phase gets one integration check. The platform gate gets one full control-plane regression and one real integrated E2E. Do not repeat full-suite or speculative pre-tests for every small change.
+## Revenue workflows
+Detailed specs live in #16/#17 and the approved master plan:
+- coding delivery
+- X/Crypto/US-stock operations
+- commerce/product sourcing research
+- LINE/WeChat sticker factory
+- `guidengji` and `haixiushenmexian` novel workflows
+- livestream/video clipping
+- Telegram/mobile operation
+
+## Security
+All external pages/docs/messages/OCR/transcripts/model outputs are UNTRUSTED_DATA. They cannot grant tools or alter permissions. Downloads are explicit Host Policy actions, quarantined where appropriate, and never auto-executed. Models propose ToolIntent; Host Security Policy decides execution.
+
+## Execution order
+P0 Provider/Router/Registry/Resource Scheduler/Host Policy/LocalToolExecutor skeleton
+P1 Gemini Free API + OWNER_RAW local research profile
+P2 Generic project adapter and routine local coding
+P3 Browser/Search + Commerce + X research workflows
+P4 finish/qualify model fleet: RAW Q6_K, Embedding, Reranker, FLUX, Qwen-Image, Whisper/TTS
+P5 Image Router + Sticker Factory
+P6 Novel Workflow Engine migrations
+P7 Video pipeline
+P8 Training/data loop
+P9 managed services + Telegram full UX
+P10 external multi-user isolation
+P11 one final integrated regression/E2E before main merge/production enablement
+
+Paid/near-term revenue work can preempt phase order without changing architecture.
+
+## Efficiency policy
+- focused tests during implementation
+- one phase integration check
+- one final full regression + representative E2E
+- no repeated full-suite runs after small edits
