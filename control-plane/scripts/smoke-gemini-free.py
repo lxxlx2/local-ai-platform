@@ -13,13 +13,17 @@ from local_ai_control.services.provider_credentials import read_keychain_secret
 from local_ai_control.services.provider_router import PrivacyMode
 
 
+SMOKE_TIMEOUT_MS = 30_000
+
+
 def _plain_connectivity_smoke(api_key: str) -> str:
     from google import genai  # type: ignore
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"timeout": SMOKE_TIMEOUT_MS})
     interaction = client.interactions.create(
         model=DEFAULT_GEMINI_MODEL,
         input="Reply with exactly GEMINI_CONNECTIVITY_OK",
+        generation_config={"thinking_level": "low"},
     )
     return str(interaction.output_text or "")[:120]
 
