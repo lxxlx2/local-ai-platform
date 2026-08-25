@@ -7,6 +7,7 @@ CONTROL_PLANE_ROOT=${SCRIPT_DIR:h}
 LOCAL_AI_ROOT=${LOCAL_AI_ROOT:-/Users/jerson/AI}
 PYTHON=${LOCAL_AI_CONTROL_PYTHON:-$LOCAL_AI_ROOT/runtime/control-plane-venv/bin/python}
 export PYTHONPATH="$CONTROL_PLANE_ROOT/src"
+export PATH="$LOCAL_AI_ROOT/runtime/control-plane-venv/bin:$PATH"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 <feature-worktree-root> [codex args...]" >&2
