@@ -129,7 +129,7 @@ def test_production_like_framework_capture_and_pid_reuse(monkeypatch, tmp_path):
     assert process_identity.classify_started_process(PID) == ("EXPECTED", START)
     assert process_identity.start_identity(PID) == START
     target = tmp_path / "supervisor.identity.json"
-    captured = process_identity.capture(PID, target)
+    captured = process_identity.capture(PID, target, START)
     assert captured == current
     assert process_identity.read_identity(target) == current
     assert process_identity.identity_status(target) == ("MATCH", PID)
@@ -208,11 +208,34 @@ def test_read_identity_rejects_schema_type_coercion(tmp_path, mutation):
         process_identity.read_identity(path)
 
 
+def test_capture_rejects_start_identity_change_before_persist(monkeypatch, tmp_path):
+    reused = observed(start="Mon Aug 24 21:00:00 2026")
+    monkeypatch.setattr(process_identity, "process_snapshot", lambda _pid: reused)
+    target = tmp_path / "identity.json"
+
+    with pytest.raises(RuntimeError, match="start identity changed"):
+        process_identity.capture(PID, target, START)
+
+    assert not target.exists()
+
+
+def test_capture_requires_nonempty_expected_start_identity(monkeypatch, tmp_path):
+    current = observed()
+    monkeypatch.setattr(process_identity, "process_snapshot", lambda _pid: current)
+    target = tmp_path / "identity.json"
+
+    for invalid in ("", None):
+        with pytest.raises(RuntimeError, match="expected start identity is required"):
+            process_identity.capture(PID, target, invalid)
+
+    assert not target.exists()
+
+
 def test_capture_atomic_private_file_persists_actual_observation(monkeypatch, tmp_path):
     current = observed()
     monkeypatch.setattr(process_identity, "process_snapshot", lambda _pid: current)
     target = tmp_path / "private" / "identity.json"
-    assert process_identity.capture(PID, target) == current
+    assert process_identity.capture(PID, target, START) == current
     assert process_identity.read_identity(target) == current
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700

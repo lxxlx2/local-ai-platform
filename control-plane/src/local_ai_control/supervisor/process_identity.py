@@ -139,10 +139,14 @@ def identity_status(path: Path) -> tuple[str, int | None]:
     return "MISMATCH", saved.pid
 
 
-def capture(pid: int, path: Path) -> ProcessIdentity:
+def capture(pid: int, path: Path, expected_start_identity: str) -> ProcessIdentity:
+    if not isinstance(expected_start_identity, str) or not expected_start_identity:
+        raise RuntimeError("expected start identity is required")
     snapshot = expected_snapshot(pid)
     if snapshot is None:
         raise RuntimeError("process does not match exact supervisor argv/executable identity")
+    if snapshot.start_identity != expected_start_identity:
+        raise RuntimeError("process start identity changed before capture")
     write_identity(path, snapshot)
     return snapshot
 
@@ -195,6 +199,7 @@ def cli() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     capture_parser = sub.add_parser("capture")
     capture_parser.add_argument("--pid", type=int, required=True)
+    capture_parser.add_argument("--start-identity", required=True)
     capture_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
     start_parser = sub.add_parser("start-identity")
     start_parser.add_argument("--pid", type=int, required=True)
@@ -208,7 +213,7 @@ def cli() -> int:
     pid_parser.add_argument("--file", type=Path, default=IDENTITY_FILE)
     args = parser.parse_args()
     if args.command == "capture":
-        capture(args.pid, args.file)
+        capture(args.pid, args.file, args.start_identity)
         return 0
     if args.command == "start-identity":
         status, identity = classify_started_process(args.pid)

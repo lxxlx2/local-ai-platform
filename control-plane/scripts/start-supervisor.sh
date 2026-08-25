@@ -42,7 +42,7 @@ if [[ $START_RC -ne 0 || -z "$START_ID" ]]; then
   echo "ORPHAN_RECONCILIATION_REQUIRED PID=$PID"
   exit 1
 fi
-if ! "$PYTHON" -m local_ai_control.supervisor.process_identity capture --pid "$PID" --file "$IDENTITY"; then
+if ! "$PYTHON" -m local_ai_control.supervisor.process_identity capture --pid "$PID" --start-identity "$START_ID" --file "$IDENTITY"; then
   set +e
   CLEANUP=$("$PYTHON" -m local_ai_control.supervisor.process_identity cleanup-start --pid "$PID" --start-identity "$START_ID" --file "$IDENTITY" 2>/dev/null)
   CLEANUP_RC=$?
