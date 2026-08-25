@@ -76,15 +76,15 @@
       "runtime": "MLX video; 48 GB qualification required"
     },
     {
-      "id": "raw-qwen38-27b-8bit",
+      "id": "raw-qwen38-27b-q6k",
       "role": "RAW_OWNER_ONLY",
-      "repo": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
-      "revision": "b4603df5fd2a51e7fed2560ee7090caa4e13e4b7",
-      "local_dir": "/Users/jerson/AI/models/qwen38-27b-raw-8bit",
-      "expected_bytes": 29528165982,
+      "repo": "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
+      "revision": "dee0a3164d9e11bbbebf5b63f52ba99443d14fc3",
+      "local_dir": "/Users/jerson/AI/models/qwen38-owner-raw-q6k",
+      "expected_bytes": 22400000000,
       "license": "apache-2.0",
-      "runtime": "MLX 8-bit subfolder; owner-only; system safety remains mandatory",
-      "include": ["8-bit/*"]
+      "runtime": "llama.cpp + Metal; owner-only research; host RAW sandbox mandatory; SHA256 a50aa1478295b58ee3d93eabe02c17f6d5fcf6cb787fd8a0ab07ac629a46cae6",
+      "include": ["Qwen3.8-27B-Uncensored-Q6_K.gguf"]
     }
   ]
 }
