@@ -129,14 +129,13 @@ if [[ -n "$BOT_PID_BEFORE" ]]; then
   kill -0 "$BOT_PID_AFTER" 2>/dev/null || fail "Telegram Bot stopped"
 fi
 
-echo "[7/7] Obvious credential literal scan on Local Producer files"
+echo "[7/7] Obvious credential literal scan on Local Producer implementation"
 SCAN_FILES=(
   "$CONTROL_PLANE_ROOT/src/local_ai_control/services/codex_qwen_bridge.py"
   "$CONTROL_PLANE_ROOT/src/local_ai_control/services/codex_qwen_workspace.py"
   "$CONTROL_PLANE_ROOT/tests/test_codex_qwen_bridge.py"
   "$CONTROL_PLANE_ROOT/tests/test_codex_qwen_workspace.py"
   "$SCRIPT_DIR/run-codex-qwen-local.sh"
-  "$SCRIPT_DIR/qualify-codex-qwen-local.sh"
 )
 if grep -En '(sk-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|seed phrase|mnemonic[[:space:]]*=|password[[:space:]]*=[[:space:]]*[^"'"'"'[:space:]]+)' "${SCAN_FILES[@]}"; then
   fail "credential-like literal detected"
