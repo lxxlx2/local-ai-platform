@@ -13,7 +13,7 @@ from .provider_router import PrivacyMode
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 DEFAULT_GEMINI_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash")
 MIN_GEMINI_SDK_MAJOR = 2
-DEFAULT_GEMINI_TIMEOUT_MS = 60_000
+DEFAULT_GEMINI_TIMEOUT_MS = 35_000
 
 
 class GeminiProviderError(RuntimeError):
