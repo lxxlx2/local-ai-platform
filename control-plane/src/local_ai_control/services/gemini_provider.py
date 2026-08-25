@@ -40,6 +40,10 @@ class GeminiPrivacyDenied(GeminiProviderError):
     category = "PRIVACY_DENIED"
 
 
+class GeminiBadRequestError(GeminiProviderError):
+    category = "BAD_REQUEST"
+
+
 @dataclass(frozen=True)
 class GeminiReviewFinding:
     severity: str
@@ -87,6 +91,12 @@ REVIEW_SCHEMA: dict[str, Any] = {
 }
 
 
+def _safe_remote_error(error: Exception, api_key: str) -> str:
+    message = str(error).replace(api_key, "<redacted>")
+    message = " ".join(message.split())
+    return message[:500] or type(error).__name__
+
+
 class GeminiReviewerProvider:
     """Read-only Gemini reviewer.
 
@@ -115,24 +125,29 @@ class GeminiReviewerProvider:
             interaction = client.interactions.create(
                 model=model,
                 input=prompt,
-                response_format={
-                    "type": "text",
-                    "mime_type": "application/json",
-                    "schema": dict(schema),
-                },
+                response_format=[
+                    {
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": dict(schema),
+                    }
+                ],
             )
             text = interaction.output_text
         except TimeoutError as error:
             raise GeminiTimeoutError("Gemini request timed out") from error
-        except Exception as error:  # mapped more precisely once live API smoke evidence exists
-            message = str(error).lower()
-            if "429" in message or "rate" in message:
-                raise GeminiRateLimitError("Gemini rate limited") from error
-            if "401" in message or "403" in message or "auth" in message:
-                raise GeminiAuthError("Gemini authentication failed") from error
-            if "404" in message or "model" in message and "unavailable" in message:
-                raise GeminiModelUnavailableError("Gemini model unavailable") from error
-            raise GeminiProviderError(type(error).__name__) from error
+        except Exception as error:
+            message = _safe_remote_error(error, key)
+            lowered = message.lower()
+            if "429" in lowered or "resource_exhausted" in lowered or "rate" in lowered:
+                raise GeminiRateLimitError(message) from error
+            if "401" in lowered or "403" in lowered or "unauth" in lowered or "api key" in lowered and "invalid" in lowered:
+                raise GeminiAuthError(message) from error
+            if "404" in lowered or "not found" in lowered or "model" in lowered and "unavailable" in lowered:
+                raise GeminiModelUnavailableError(message) from error
+            if "400" in lowered or "badrequest" in lowered or "invalid_argument" in lowered:
+                raise GeminiBadRequestError(message) from error
+            raise GeminiProviderError(f"{type(error).__name__}: {message}") from error
         try:
             payload = json.loads(text)
         except (TypeError, json.JSONDecodeError) as error:
