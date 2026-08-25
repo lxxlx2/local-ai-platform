@@ -15,4 +15,4 @@ PYTHON=${LOCAL_AI_CONTROL_PYTHON:-$LOCAL_AI_ROOT/runtime/control-plane-venv/bin/
 export PYTHONPATH="$CONTROL_PLANE_ROOT/src"
 export PATH="$LOCAL_AI_ROOT/runtime/control-plane-venv/bin:$PATH"
 
-exec "$PYTHON" -m local_ai_control.services.supervisor_local_qwen_operator "$@"
+exec "$PYTHON" -m local_ai_control.services.supervisor_local_qwen_gemini_operator "$@"
