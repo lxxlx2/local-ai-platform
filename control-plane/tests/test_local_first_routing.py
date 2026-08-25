@@ -5,6 +5,7 @@ import pytest
 from local_ai_control.services.execution_backend import ExecutionPolicy, ToolIntent
 from local_ai_control.services.provider_router import (
     Capability,
+    HostPermissionProfile,
     InvocationPurpose,
     PrivacyMode,
     ProviderRequest,
@@ -74,6 +75,7 @@ def test_gemini_is_preferred_for_public_independent_review():
     )
     assert selection.provider.provider_id == "gemini"
     assert selection.quota_class is QuotaClass.GEMINI
+    assert selection.host_permission_profile is HostPermissionProfile.CLOUD_REVIEW_ONLY
 
 
 def test_restricted_review_uses_local_until_egress_gate_passes():
@@ -111,6 +113,45 @@ def test_private_review_never_egresses():
     )
     assert selection.provider.provider_id == "local-qwen"
     assert selection.quota_class is QuotaClass.NONE
+
+
+def test_owner_raw_requires_explicit_owner_authorization():
+    router = default_provider_router()
+    with pytest.raises(LookupError):
+        router.route(
+            ProviderRequest(
+                capability=Capability.RESEARCH,
+                privacy=PrivacyMode.PRIVATE,
+                purpose=InvocationPurpose.OWNER_RAW_RESEARCH,
+                owner_authorized=False,
+            )
+        )
+
+    selection = router.route(
+        ProviderRequest(
+            capability=Capability.RESEARCH,
+            privacy=PrivacyMode.PRIVATE,
+            purpose=InvocationPurpose.OWNER_RAW_RESEARCH,
+            owner_authorized=True,
+        )
+    )
+    assert selection.provider.provider_id == "local-qwen-owner-raw"
+    assert selection.quota_class is QuotaClass.NONE
+    assert selection.consumes_codex_quota is False
+    assert selection.host_permission_profile is HostPermissionProfile.OWNER_RAW_RESEARCH
+
+
+def test_owner_raw_cannot_be_selected_for_routine_work():
+    with pytest.raises(PermissionError):
+        default_provider_router().route(
+            ProviderRequest(
+                capability=Capability.REASONING,
+                privacy=PrivacyMode.PRIVATE,
+                purpose=InvocationPurpose.ROUTINE,
+                explicit_provider="local-qwen-owner-raw",
+                owner_authorized=True,
+            )
+        )
 
 
 def test_usage_ledger_counts_only_codex_quota_events(tmp_path):
