@@ -46,10 +46,13 @@ def _run_git(root: Path, *args: str, runner=subprocess.run) -> str:
 
 def validate_workspace(path: str | Path, *, runner=subprocess.run) -> WorkspaceEvidence:
     raw = Path(path).expanduser()
+    lexical = raw.absolute()
     try:
         resolved = raw.resolve(strict=True)
     except OSError as error:
         raise WorkspacePolicyError("workspace does not exist") from error
+    if lexical != resolved:
+        raise WorkspacePolicyError("symlinked workspace path denied")
     if not resolved.is_dir():
         raise WorkspacePolicyError("workspace must be a directory")
 
