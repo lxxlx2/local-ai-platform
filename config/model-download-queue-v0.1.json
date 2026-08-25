@@ -66,16 +66,6 @@
       "runtime": "Transformers snapshot; Apple Silicon qualification required"
     },
     {
-      "id": "video-longcat-q8",
-      "role": "VIDEO_HIGH",
-      "repo": "mlx-community/LongCat-Video-q8",
-      "revision": "87131df610609966db29734b399694ee3ebd6463",
-      "local_dir": "/Users/jerson/AI/models/longcat-video-q8",
-      "expected_bytes": 33624123487,
-      "license": "mit",
-      "runtime": "MLX video; 48 GB qualification required"
-    },
-    {
       "id": "raw-qwen38-27b-q6k",
       "role": "RAW_OWNER_ONLY",
       "repo": "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
@@ -85,6 +75,16 @@
       "license": "apache-2.0",
       "runtime": "llama.cpp + Metal; owner-only research; host RAW sandbox mandatory; SHA256 a50aa1478295b58ee3d93eabe02c17f6d5fcf6cb787fd8a0ab07ac629a46cae6",
       "include": ["Qwen3.8-27B-Uncensored-Q6_K.gguf"]
+    },
+    {
+      "id": "video-longcat-q8",
+      "role": "VIDEO_HIGH",
+      "repo": "mlx-community/LongCat-Video-q8",
+      "revision": "87131df610609966db29734b399694ee3ebd6463",
+      "local_dir": "/Users/jerson/AI/models/longcat-video-q8",
+      "expected_bytes": 33624123487,
+      "license": "mit",
+      "runtime": "MLX video; 48 GB qualification required"
     }
   ]
 }
