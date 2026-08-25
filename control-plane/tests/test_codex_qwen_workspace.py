@@ -44,6 +44,14 @@ def test_main_and_subdirectory_are_denied(tmp_path):
         validate_workspace(sub)
 
 
+def test_symlinked_workspace_is_denied(tmp_path):
+    repo = make_repo(tmp_path / "real")
+    link = tmp_path / "linked-workspace"
+    link.symlink_to(repo, target_is_directory=True)
+    with pytest.raises(WorkspacePolicyError, match="symlinked"):
+        validate_workspace(link)
+
+
 def test_bridge_url_must_be_loopback_v1():
     assert (
         validate_bridge_url("http://127.0.0.1:8010/v1")
