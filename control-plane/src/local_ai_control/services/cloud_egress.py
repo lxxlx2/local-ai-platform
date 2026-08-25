@@ -46,7 +46,7 @@ class CloudEgressGate:
     with conservative PII/path redaction before it may be routed to cloud review.
     """
 
-    _email = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
+    _email = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w-])", re.I)
     _mac_user_path = re.compile(r"/Users/[^/\s]+")
     _windows_user_path = re.compile(r"[A-Za-z]:\\Users\\[^\\\s]+", re.I)
     _phone_candidate = re.compile(r"(?<!\w)\+?\d[\d\s().-]{7,}\d(?!\w)")
