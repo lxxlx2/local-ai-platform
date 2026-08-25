@@ -6,7 +6,7 @@ dependencies = ["aiogram>=3.0,<4.0"]
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
-gemini = ["google-genai>=1,<2"]
+gemini = ["google-genai>=2,<3"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
