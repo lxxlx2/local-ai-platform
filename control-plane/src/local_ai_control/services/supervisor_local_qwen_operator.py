@@ -57,13 +57,21 @@ def safe_job_payload(job: WorkflowJob, repository: LocalWorktreeSupervisorReposi
     return payload
 
 
+def _regular_input_file(path: str, label: str) -> Path:
+    raw = Path(path).expanduser()
+    if raw.is_symlink():
+        raise ValueError(f"{label} must not be a symlink")
+    candidate = raw.resolve(strict=True)
+    if not candidate.is_file():
+        raise ValueError(f"{label} must be a regular file")
+    return candidate
+
+
 def _load_prompt(path: str) -> str:
     if path == "-":
         data = sys.stdin.read()
     else:
-        candidate = Path(path).expanduser().resolve(strict=True)
-        if not candidate.is_file() or candidate.is_symlink():
-            raise ValueError("prompt file must be a regular non-symlink file")
+        candidate = _regular_input_file(path, "prompt file")
         data = candidate.read_text(encoding="utf-8")
     if not data.strip():
         raise ValueError("task prompt is empty")
@@ -82,9 +90,7 @@ def _review_unit(repository: LocalWorktreeSupervisorRepository, job: WorkflowJob
 
 
 def _parse_findings(path: str) -> tuple[ReviewFinding, ...]:
-    candidate = Path(path).expanduser().resolve(strict=True)
-    if not candidate.is_file() or candidate.is_symlink():
-        raise ValueError("findings file must be a regular non-symlink JSON file")
+    candidate = _regular_input_file(path, "findings file")
     payload = json.loads(candidate.read_text(encoding="utf-8"))
     raw_findings = payload.get("findings") if isinstance(payload, dict) else payload
     if not isinstance(raw_findings, list) or not raw_findings:
@@ -266,7 +272,10 @@ def command_review_show(args) -> dict:
             "db": str(db),
         }
         if args.output:
-            output = Path(args.output).expanduser().resolve()
+            raw_output = Path(args.output).expanduser()
+            if raw_output.is_symlink():
+                raise ValueError("review output must not be a symlink")
+            output = raw_output.resolve()
             output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             output.write_text(patch, encoding="utf-8")
             os.chmod(output, 0o600)
