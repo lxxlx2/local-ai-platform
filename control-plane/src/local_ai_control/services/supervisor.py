@@ -14,6 +14,21 @@ from .supervisor_round2 import (
     Round2SupervisorRepository, Round2WorkflowSupervisor,
     TaskObjective, recursive_private_sanitize,
 )
+from .supervisor_local_qwen import (
+    LOCAL_QWEN_SUPERVISOR_DB,
+    LocalProducerExecutionUncertain,
+    LocalQwenCodexRunner,
+    LocalWorktreeCodexTaskSpec,
+    LocalWorktreeDurableReviewRunner,
+    LocalWorktreeGitGateRunner,
+    LocalWorktreeReviewTaskSpec,
+    LocalWorktreeSecurityRunner,
+    LocalWorktreeSupervisorRepository,
+    LocalWorktreeValidationRunner,
+    LocalWorktreeWorkflowSupervisor,
+    create_local_qwen_job,
+    local_qwen_runners,
+)
 
 SupervisorRepository = Round2SupervisorRepository
 WorkflowSupervisor = Round2WorkflowSupervisor
