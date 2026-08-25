@@ -17,6 +17,7 @@ class Capability(StrEnum):
     STT = "STT"
     TTS = "TTS"
     VIDEO = "VIDEO"
+    RESEARCH = "RESEARCH"
 
 
 class InvocationPurpose(StrEnum):
@@ -25,6 +26,7 @@ class InvocationPurpose(StrEnum):
     REVIEW = "REVIEW"
     ACCEPTANCE = "ACCEPTANCE"
     ESCALATION = "ESCALATION"
+    OWNER_RAW_RESEARCH = "OWNER_RAW_RESEARCH"
 
 
 class PrivacyMode(StrEnum):
@@ -44,8 +46,21 @@ class QuotaClass(StrEnum):
     CODEX = "CODEX"
 
 
+class HostPermissionProfile(StrEnum):
+    STANDARD_LOCAL = "STANDARD_LOCAL"
+    OWNER_RAW_RESEARCH = "OWNER_RAW_RESEARCH"
+    CLOUD_REVIEW_ONLY = "CLOUD_REVIEW_ONLY"
+    PREMIUM_REVIEW_ONLY = "PREMIUM_REVIEW_ONLY"
+
+
 ALL_PURPOSES = frozenset(InvocationPurpose)
-LOCAL_DEFAULT_PURPOSES = ALL_PURPOSES
+LOCAL_DEFAULT_PURPOSES = frozenset({
+    InvocationPurpose.ROUTINE,
+    InvocationPurpose.PLANNING,
+    InvocationPurpose.REVIEW,
+    InvocationPurpose.ACCEPTANCE,
+    InvocationPurpose.ESCALATION,
+})
 GEMINI_PURPOSES = frozenset({
     InvocationPurpose.PLANNING,
     InvocationPurpose.REVIEW,
@@ -57,6 +72,7 @@ CODEX_PREMIUM_PURPOSES = frozenset({
     InvocationPurpose.ACCEPTANCE,
     InvocationPurpose.ESCALATION,
 })
+RAW_PURPOSES = frozenset({InvocationPurpose.OWNER_RAW_RESEARCH})
 
 
 @dataclass(frozen=True)
@@ -71,6 +87,8 @@ class ProviderProfile:
     allows_restricted_egress: bool = False
     requires_egress_gate: bool = False
     priority: int = 100
+    owner_only: bool = False
+    host_permission_profile: HostPermissionProfile = HostPermissionProfile.STANDARD_LOCAL
 
 
 @dataclass(frozen=True)
@@ -81,6 +99,7 @@ class ProviderRequest:
     explicit_provider: str | None = None
     sanitized_for_egress: bool = False
     premium_codex_allowed: bool = False
+    owner_authorized: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,6 +108,7 @@ class ProviderSelection:
     reason: str
     consumes_codex_quota: bool
     quota_class: QuotaClass
+    host_permission_profile: HostPermissionProfile
 
 
 class ProviderHealth(Protocol):
@@ -98,8 +118,8 @@ class ProviderHealth(Protocol):
 class ProviderRouter:
     """Local-first cross-provider router.
 
-    The router chooses a model/provider. It never grants filesystem, shell, Git,
-    network, deployment, download or service-control authority.
+    The router chooses a model/provider only. It never grants filesystem, shell,
+    Git, network, download, deployment or service-control authority.
 
     Policy invariants:
     - ROUTINE work never routes to the OpenAI Codex model.
@@ -107,6 +127,8 @@ class ProviderRouter:
     - PRIVATE work never routes to cloud providers.
     - RESTRICTED cloud work requires an explicit completed egress gate.
     - Gemini is preferred for independent review when privacy permits.
+    - OWNER_RAW_RESEARCH is local, owner-only, and receives a narrower host
+      permission profile than normal local work.
     - local providers remain the default workers for routine production.
     """
 
@@ -143,6 +165,12 @@ class ProviderRouter:
             and request.purpose in CODEX_PREMIUM_PURPOSES
         )
 
+    @staticmethod
+    def _owner_allows(provider: ProviderProfile, request: ProviderRequest) -> bool:
+        if not provider.owner_only:
+            return True
+        return request.owner_authorized
+
     def _eligible(self, provider: ProviderProfile, request: ProviderRequest) -> bool:
         return bool(
             provider.enabled
@@ -150,16 +178,16 @@ class ProviderRouter:
             and request.purpose in provider.allowed_purposes
             and self._privacy_allows(provider, request)
             and self._quota_allows(provider, request)
+            and self._owner_allows(provider, request)
             and self.health(provider)
         )
 
     @staticmethod
     def _sort_key(provider: ProviderProfile, request: ProviderRequest) -> tuple[int, int, str]:
-        # Independent review prefers Gemini when privacy permits.
-        if request.purpose is InvocationPurpose.REVIEW and provider.provider_id == "gemini":
+        if request.purpose is InvocationPurpose.OWNER_RAW_RESEARCH:
+            tier = 0 if provider.provider_id == "local-qwen-owner-raw" else 9
+        elif request.purpose is InvocationPurpose.REVIEW and provider.provider_id == "gemini":
             tier = 0
-        # Premium Codex is used only when the caller explicitly opens the budget
-        # gate for planning/acceptance/escalation.
         elif (
             request.premium_codex_allowed
             and request.purpose in CODEX_PREMIUM_PURPOSES
@@ -184,11 +212,12 @@ class ProviderRouter:
                 reason="explicit_provider",
                 consumes_codex_quota=provider.quota_class is QuotaClass.CODEX,
                 quota_class=provider.quota_class,
+                host_permission_profile=provider.host_permission_profile,
             )
 
         candidates = [item for item in self.providers.values() if self._eligible(item, request)]
         if not candidates:
-            raise LookupError("no healthy provider satisfies capability/privacy/purpose policy")
+            raise LookupError("no healthy provider satisfies capability/privacy/purpose/owner policy")
         candidates.sort(key=lambda item: self._sort_key(item, request))
         provider = candidates[0]
         return ProviderSelection(
@@ -196,6 +225,7 @@ class ProviderRouter:
             reason="local_first_policy",
             consumes_codex_quota=provider.quota_class is QuotaClass.CODEX,
             quota_class=provider.quota_class,
+            host_permission_profile=provider.host_permission_profile,
         )
 
 
@@ -209,15 +239,32 @@ LOCAL_QWEN_PROVIDER = ProviderProfile(
         Capability.CODE,
         Capability.REVIEW,
         Capability.MULTIMODAL,
+        Capability.RESEARCH,
     }),
     allowed_purposes=LOCAL_DEFAULT_PURPOSES,
     quota_class=QuotaClass.NONE,
     priority=20,
+    host_permission_profile=HostPermissionProfile.STANDARD_LOCAL,
+)
+
+OWNER_RAW_QWEN_PROVIDER = ProviderProfile(
+    provider_id="local-qwen-owner-raw",
+    display_name="Local Qwen Owner RAW Research",
+    kind=ProviderKind.LOCAL,
+    capabilities=frozenset({
+        Capability.REASONING,
+        Capability.RESEARCH,
+    }),
+    allowed_purposes=RAW_PURPOSES,
+    quota_class=QuotaClass.NONE,
+    priority=5,
+    owner_only=True,
+    host_permission_profile=HostPermissionProfile.OWNER_RAW_RESEARCH,
 )
 
 GEMINI_PROVIDER = ProviderProfile(
     provider_id="gemini",
-    display_name="Gemini Cloud",
+    display_name="Gemini Cloud Free API",
     kind=ProviderKind.CLOUD,
     capabilities=frozenset({
         Capability.REASONING,
@@ -230,6 +277,7 @@ GEMINI_PROVIDER = ProviderProfile(
     allows_restricted_egress=True,
     requires_egress_gate=True,
     priority=20,
+    host_permission_profile=HostPermissionProfile.CLOUD_REVIEW_ONLY,
 )
 
 OPENAI_CODEX_PROVIDER = ProviderProfile(
@@ -246,11 +294,12 @@ OPENAI_CODEX_PROVIDER = ProviderProfile(
     allows_restricted_egress=True,
     requires_egress_gate=True,
     priority=10,
+    host_permission_profile=HostPermissionProfile.PREMIUM_REVIEW_ONLY,
 )
 
 
 def default_provider_router(*, health: ProviderHealth | None = None) -> ProviderRouter:
     return ProviderRouter(
-        (LOCAL_QWEN_PROVIDER, GEMINI_PROVIDER, OPENAI_CODEX_PROVIDER),
+        (LOCAL_QWEN_PROVIDER, OWNER_RAW_QWEN_PROVIDER, GEMINI_PROVIDER, OPENAI_CODEX_PROVIDER),
         health=health,
     )
