@@ -34,7 +34,7 @@ import sys
 path, expression = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as handle:
     payload = json.load(handle)
-if not eval(expression, {"__builtins__": {}}, {"p": payload}):
+if not eval(expression, {"__builtins__": {}}, {"p": payload, "bool": bool}):
     raise SystemExit(f"JSON assertion failed: {expression}; payload={payload}")
 PY
 }
