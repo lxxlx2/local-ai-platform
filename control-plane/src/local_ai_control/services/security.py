@@ -15,11 +15,21 @@ class SecretFirewall:
         ("telegram_token", re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{25,}\b")),
         ("github_pat", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", re.I)),
         ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
+        ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+        ("openai_api_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b", re.I)),
+        ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b", re.I)),
         ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._-]{20,}\b", re.I)),
         ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
         ("evm_private_key", re.compile(r"\b0x[a-fA-F0-9]{64}\b")),
         ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
         ("password", re.compile(r"\b(?:password|passwd|密码)\s*[:=]\s*\S+", re.I)),
+        (
+            "generic_secret_assignment",
+            re.compile(
+                r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9._/-]{16,}",
+                re.I,
+            ),
+        ),
     )
     _bip39_common = {"abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd", "abuse", "access", "accident", "account", "accuse", "achieve", "acid", "acoustic", "acquire", "across", "act", "action", "actor", "actress", "actual", "adapt", "add", "address", "adjust", "admit", "adult", "advance", "advice", "aerobic", "affair", "afford", "afraid", "again", "age", "agent", "agree", "ahead", "aim", "air", "airport", "aisle", "alarm", "album", "alcohol", "alert", "alien", "all", "alley", "allow", "almost", "alone", "alpha", "already", "also", "alter", "always", "amateur", "amazing", "among", "amount", "amused", "analyst", "anchor", "ancient", "anger", "angle", "angry", "animal", "ankle", "announce", "annual", "another", "answer", "antenna", "antique", "anxiety", "any", "apart", "apology", "appear", "apple", "approve", "april", "arch", "arctic", "area", "arena", "argue", "arm", "armed", "armor", "army", "around", "arrange", "arrest", "arrive", "arrow", "art", "article", "artist", "artwork", "ask", "aspect", "assault", "asset", "assist", "assume", "asthma", "athlete", "atom", "attack", "attend", "attitude", "attract", "auction", "audit", "august", "aunt", "author", "auto", "autumn", "average", "avocado", "avoid", "awake", "aware", "away", "awesome", "awful", "awkward", "axis"}
 
