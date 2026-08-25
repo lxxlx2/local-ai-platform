@@ -21,7 +21,7 @@
       "host_permission_profile": "OWNER_RAW_RESEARCH"
     },
     "CLOUD_REVIEW": {
-      "profile": "gemini-3.7-flash-free",
+      "profile": "gemini-free-review-chain",
       "status": "REGISTERED_NOT_QUALIFIED",
       "provider": "google-gemini-developer-api",
       "tier": "FREE",
@@ -48,13 +48,15 @@
       "credential_access": false,
       "document_command_execution": false
     },
-    "gemini-3.7-flash-free": {
-      "model": "gemini-3.7-flash",
+    "gemini-free-review-chain": {
+      "models": ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"],
       "provider": "google-gemini-developer-api",
       "tier": "FREE",
       "local": false,
       "billing_auto_upgrade": false,
       "role": "CLOUD_REVIEWER_MULTIMODAL",
+      "thinking_level": "low",
+      "fallback_on": ["TIMEOUT", "DEADLINE_EXCEEDED", "RATE_LIMIT", "MODEL_UNAVAILABLE"],
       "free_tier_data_use_warning": true,
       "search_grounding_required": false,
       "own_search_browser_layer": true
