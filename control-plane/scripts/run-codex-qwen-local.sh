@@ -23,8 +23,8 @@ if ! command -v codex >/dev/null 2>&1; then
 fi
 
 VERSION=$(codex --version 2>/dev/null || true)
-if [[ "$VERSION" != *"0.146.0"* ]]; then
-  echo "CODEX_VERSION_UNQUALIFIED expected=0.146.0 actual=$VERSION" >&2
+if [[ "$VERSION" != *"0.148.0"* ]]; then
+  echo "CODEX_VERSION_UNQUALIFIED expected=0.148.0 actual=$VERSION" >&2
   exit 1
 fi
 
