@@ -12,7 +12,7 @@ from .provider_router import PrivacyMode
 
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 MIN_GEMINI_SDK_MAJOR = 2
-DEFAULT_GEMINI_TIMEOUT_MS = 60_000
+DEFAULT_GEMINI_TIMEOUT_MS = 90_000
 
 
 class GeminiProviderError(RuntimeError):
@@ -115,18 +115,18 @@ def _require_supported_sdk() -> str:
         raise GeminiSdkVersionError(f"unrecognized google-genai version: {installed}") from error
     if major < MIN_GEMINI_SDK_MAJOR:
         raise GeminiSdkVersionError(
-            f"google-genai>={MIN_GEMINI_SDK_MAJOR}.0.0 required for current Interactions API; installed={installed}"
+            f"google-genai>={MIN_GEMINI_SDK_MAJOR}.0.0 required; installed={installed}"
         )
     return installed
 
 
 class GeminiReviewerProvider:
-    """Read-only Gemini reviewer.
+    """Read-only Gemini reviewer using the stable Generate Content API.
 
-    The provider accepts only already-minimized/sanitized review material. It has no
-    filesystem, shell, Git or deployment surface. PRIVATE requests are rejected.
-    A transport can be injected for tests; production transport lazily imports the
-    official google-genai SDK and reads GEMINI_API_KEY only from process environment.
+    Interactions is useful for agentic/stateful Gemini workflows, but this provider is
+    deliberately a bounded stateless reviewer. It accepts only already-minimized /
+    sanitized review material and exposes no filesystem, shell, Git, deployment or
+    service-control surface. PRIVATE requests are rejected before cloud egress.
     """
 
     def __init__(self, *, model: str = DEFAULT_GEMINI_MODEL, transport: Transport | None = None):
@@ -144,25 +144,32 @@ class GeminiReviewerProvider:
         except ImportError as error:
             raise GeminiProviderError("google-genai SDK is not installed") from error
 
-        client = genai.Client(api_key=key, http_options={"timeout": DEFAULT_GEMINI_TIMEOUT_MS})
+        client = genai.Client(
+            api_key=key,
+            http_options={"timeout": DEFAULT_GEMINI_TIMEOUT_MS},
+        )
         try:
-            interaction = client.interactions.create(
+            response = client.models.generate_content(
                 model=model,
-                input=prompt,
-                response_format=[
-                    {
-                        "type": "text",
-                        "mime_type": "application/json",
-                        "schema": dict(schema),
-                    }
-                ],
+                contents=prompt,
+                config={
+                    "response_format": {
+                        "text": {
+                            "mime_type": "application/json",
+                            "schema": dict(schema),
+                        }
+                    },
+                    "max_output_tokens": 2048,
+                },
             )
-            text = interaction.output_text
+            text = response.text
         except TimeoutError as error:
             raise GeminiTimeoutError("Gemini request timed out") from error
         except Exception as error:
             message = _safe_remote_error(error, key)
             lowered = message.lower()
+            if "timeout" in lowered or "timed out" in lowered:
+                raise GeminiTimeoutError(message) from error
             if "429" in lowered or "resource_exhausted" in lowered or "rate" in lowered:
                 raise GeminiRateLimitError(message) from error
             if "401" in lowered or "403" in lowered or "unauth" in lowered or "api key" in lowered and "invalid" in lowered:
@@ -171,8 +178,6 @@ class GeminiReviewerProvider:
                 raise GeminiModelUnavailableError(message) from error
             if "400" in lowered or "badrequest" in lowered or "invalid_argument" in lowered:
                 raise GeminiBadRequestError(message) from error
-            if "timeout" in lowered or "timed out" in lowered:
-                raise GeminiTimeoutError(message) from error
             raise GeminiProviderError(f"{type(error).__name__}: {message}") from error
         try:
             payload = json.loads(text)
