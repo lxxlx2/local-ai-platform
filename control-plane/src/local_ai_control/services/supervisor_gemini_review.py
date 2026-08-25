@@ -223,12 +223,13 @@ class GeminiAdvisoryReviewRunner(LocalWorktreeDurableReviewRunner):
                 }
             )
         return StageResult(
-            result.status,
-            result.summary,
-            error=result.error,
-            retryable=result.retryable,
-            metrics=metrics,
+            status=result.status,
+            summary=result.summary,
             artifacts=result.artifacts,
+            error=result.error,
+            metrics=metrics,
+            next_hint=result.next_hint,
+            review_findings=result.review_findings,
         )
 
 
