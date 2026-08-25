@@ -84,7 +84,7 @@ REVIEW_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "severity": {"type": "string", "enum": ["BLOCKING", "HIGH", "MEDIUM", "LOW"]},
                     "scope": {"type": "string", "enum": ["FILE", "WORKFLOW"]},
-                    "file": {"type": ["string", "null"]},
+                    "file": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                     "evidence": {"type": "string"},
                     "recommended_fix": {"type": "string"},
                 },
@@ -141,6 +141,7 @@ class GeminiReviewerProvider:
         _require_supported_sdk()
         try:
             from google import genai  # type: ignore
+            from google.genai import types  # type: ignore
         except ImportError as error:
             raise GeminiProviderError("google-genai SDK is not installed") from error
 
@@ -152,15 +153,11 @@ class GeminiReviewerProvider:
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config={
-                    "response_format": {
-                        "text": {
-                            "mime_type": "application/json",
-                            "schema": dict(schema),
-                        }
-                    },
-                    "max_output_tokens": 2048,
-                },
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=dict(schema),
+                    max_output_tokens=2048,
+                ),
             )
             text = response.text
         except TimeoutError as error:
@@ -170,13 +167,13 @@ class GeminiReviewerProvider:
             lowered = message.lower()
             if "timeout" in lowered or "timed out" in lowered:
                 raise GeminiTimeoutError(message) from error
-            if "429" in lowered or "resource_exhausted" in lowered or "rate" in lowered:
+            if "429" in lowered or "resource_exhausted" in lowered or "rate limit" in lowered:
                 raise GeminiRateLimitError(message) from error
-            if "401" in lowered or "403" in lowered or "unauth" in lowered or "api key" in lowered and "invalid" in lowered:
+            if "401" in lowered or "403" in lowered or "unauth" in lowered or ("api key" in lowered and "invalid" in lowered):
                 raise GeminiAuthError(message) from error
-            if "404" in lowered or "not found" in lowered or "model" in lowered and "unavailable" in lowered:
+            if "404" in lowered or "not found" in lowered or ("model" in lowered and "unavailable" in lowered):
                 raise GeminiModelUnavailableError(message) from error
-            if "400" in lowered or "badrequest" in lowered or "invalid_argument" in lowered:
+            if "400" in lowered or "badrequest" in lowered or "invalid_argument" in lowered or "validation error" in lowered:
                 raise GeminiBadRequestError(message) from error
             raise GeminiProviderError(f"{type(error).__name__}: {message}") from error
         try:
