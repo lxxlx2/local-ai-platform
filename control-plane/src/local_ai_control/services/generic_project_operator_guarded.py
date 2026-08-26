@@ -8,6 +8,31 @@ from .supervisor_contracts import JobStatus, WorkflowStage
 from .supervisor_generic_project import GenericProjectWorkflowSupervisor
 
 
+def _review_result_is_ready(repository, job) -> bool:
+    if not (
+        job.current_stage is WorkflowStage.REVIEW
+        and job.status is JobStatus.WAITING
+        and job.resume_state == "REVIEW_RESULT_PENDING"
+    ):
+        return False
+    round_number = job.review_round + 1
+    try:
+        unit = repository.review_work_unit_for_round(
+            job.job_id,
+            job.owner_id,
+            round_number,
+        )
+        repository.submitted_review_result(
+            job.job_id,
+            job.owner_id,
+            round_number,
+            unit.review_work_unit_id,
+        )
+    except KeyError:
+        return False
+    return True
+
+
 def _run_enabled(repository, job_id: str, test_profile: TestProfile):
     runners = guarded_generic_project_runners(
         repository.repo_root,
@@ -22,6 +47,10 @@ def _run_enabled(repository, job_id: str, test_profile: TestProfile):
     if not supervisor.acquire_singleton():
         raise RuntimeError("another generic project Supervisor consumer owns this task DB")
     try:
+        current = repository.get_job(job_id)
+        if _review_result_is_ready(repository, current):
+            supervisor.run_job_once(job_id)
+
         job = base._run_until_boundary(supervisor, repository, job_id)
         if (
             job.current_stage is WorkflowStage.REVIEW
