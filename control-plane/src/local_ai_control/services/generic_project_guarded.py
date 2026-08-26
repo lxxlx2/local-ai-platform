@@ -30,6 +30,14 @@ class GuardedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
         super().__init__(enabled=enabled, provider=provider, test_profile=test_profile)
         self.quota_guard = quota_guard or CodexQuotaGuard()
 
+    @staticmethod
+    def _probe_error_metrics(error: Exception) -> dict[str, str | bool]:
+        return {
+            "category": type(error).__name__,
+            "quota_probe_error": str(error).replace("\n", " ")[:400],
+            "codex_cli_invoked": False,
+        }
+
     def run_task(self, spec, execution_id: str) -> StageResult:
         try:
             before = self.quota_guard.before()
@@ -38,7 +46,7 @@ class GuardedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
                 StageResultStatus.BLOCKED,
                 "Codex quota telemetry unavailable before local-only execution",
                 error="CODEX_QUOTA_PRECHECK_UNAVAILABLE",
-                metrics={"category": type(error).__name__, "codex_cli_invoked": False},
+                metrics=self._probe_error_metrics(error),
             )
 
         result = super().run_task(spec, execution_id)
@@ -50,10 +58,9 @@ class GuardedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
                 StageResultStatus.BLOCKED,
                 "Codex quota telemetry unavailable after local-only execution",
                 error="CODEX_QUOTA_POSTCHECK_UNAVAILABLE",
-                metrics=(result.metrics or {}) | before.metrics("quota_before") | {
-                    "category": type(error).__name__,
-                    "codex_cli_invoked": False,
-                },
+                metrics=(result.metrics or {})
+                | before.metrics("quota_before")
+                | self._probe_error_metrics(error),
             )
 
         quota_metrics = (
