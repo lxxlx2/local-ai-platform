@@ -4,7 +4,6 @@ umask 077
 
 SCRIPT_DIR=${0:A:h}
 CONTROL_PLANE_ROOT=${SCRIPT_DIR:h}
-SOURCE_ROOT=${CONTROL_PLANE_ROOT:h}
 LOCAL_AI_ROOT=${LOCAL_AI_ROOT:-/Users/jerson/AI}
 PYTHON=${LOCAL_AI_CONTROL_PYTHON:-$LOCAL_AI_ROOT/runtime/control-plane-venv/bin/python}
 STAMP=$(date +%Y%m%d-%H%M%S)-$$
@@ -23,10 +22,11 @@ LAUNCHER=$SCRIPT_DIR/local-qwen-project.sh
 mkdir -p "$ROOT" "$EXTERNAL_REPO"
 chmod 700 "$ROOT"
 
-printf '[1/8] Focused Generic Project + quota guard checks\n'
+printf '[1/8] Focused Generic Project + direct-Qwen + quota guard checks\n'
 PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q \
   "$CONTROL_PLANE_ROOT/tests/test_generic_project_adapter.py" \
-  "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py"
+  "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py" \
+  "$CONTROL_PLANE_ROOT/tests/test_direct_local_qwen_agent.py"
 
 printf '[2/8] Create real second Git project outside local-ai-platform\n'
 git -C "$EXTERNAL_REPO" init -b main >/dev/null
@@ -62,7 +62,7 @@ chmod 600 "$PROMPT"
 printf '[3/8] Register external project\n'
 /bin/zsh "$LAUNCHER" --runtime "$OPERATOR_RUNTIME" register --repo "$EXTERNAL_REPO" --project-id "$PROJECT_ID" >/dev/null
 
-printf '[4/8] Run guarded Local Qwen/Codex task to durable Gemini Review boundary\n'
+printf '[4/8] Run direct Local Qwen task to durable Gemini Review boundary\n'
 /bin/zsh "$LAUNCHER" --runtime "$OPERATOR_RUNTIME" task \
   --project "$PROJECT_ID" \
   --task-id "$TASK_ID" \
@@ -145,5 +145,6 @@ printf 'candidate_uncommitted=PASS\n'
 printf 'protected_test_unchanged=PASS\n'
 printf 'owner_review_binding=PASS\n'
 printf 'codex_quota_guard=ENFORCED\n'
-printf 'bounded_timeout_cleanup=ENFORCED\n'
+printf 'codex_cli_invoked=NO\n'
+printf 'local_executor=DIRECT_QWEN_TOOLS\n'
 printf 'artifacts=%s\n' "$ROOT"
