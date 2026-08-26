@@ -76,6 +76,23 @@ class VerifiedDirectProjectToolbox(DirectProjectToolbox):
                 self.last_test_return_code = code
         return result
 
+    def ensure_controller_postconditions(self) -> tuple[str, ...]:
+        """Run deterministic postconditions after a mutation without model discretion.
+
+        The model may choose git_diff/run_tests itself, but FINAL correctness must
+        not depend on the model remembering those fixed, owner-approved checks.
+        The controller therefore performs any missing diff inspection and selected
+        fixed test profile after the latest successful write.
+        """
+        if self.successful_writes < 1:
+            return ()
+        evidence: list[str] = []
+        if self.last_diff_generation != self.write_generation or not self.last_diff_nonempty:
+            evidence.append("git_diff=" + _bounded(self.git_diff(), 4000))
+        if self.test_profile is not TestProfile.NONE and self.last_test_generation != self.write_generation:
+            evidence.append("run_tests=" + _bounded(self.run_tests(), 5000))
+        return tuple(evidence)
+
     def finalization_reasons(self) -> tuple[str, ...]:
         reasons: list[str] = []
         if self.successful_writes < 1:
@@ -137,9 +154,14 @@ class VerifiedDirectLocalQwenAgent(DirectLocalQwenAgent):
                 continue
 
             if action.kind == "FINAL":
+                controller_evidence = toolbox.ensure_controller_postconditions()
                 reasons = toolbox.finalization_reasons()
                 if reasons:
                     finalization_denials += 1
+                    if controller_evidence:
+                        transcript.append(
+                            "controller_finalization_evidence:\n" + "\n".join(controller_evidence)
+                        )
                     transcript.append(
                         "finalization_denied: "
                         + json.dumps(
@@ -163,6 +185,7 @@ class VerifiedDirectLocalQwenAgent(DirectLocalQwenAgent):
                     "malformed_actions": malformed,
                     "finalization_denials": finalization_denials,
                     "finalization_verified": True,
+                    "controller_postconditions_enforced": True,
                     "executor": "direct-local-qwen-verified",
                     "codex_cli_invoked": False,
                     "network_access": False,
@@ -228,6 +251,7 @@ class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
         toolbox = VerifiedDirectProjectToolbox(root, self.test_profile)
         try:
             summary, metrics = VerifiedDirectLocalQwenAgent(self.provider).run(spec.task_prompt, toolbox)
+            toolbox.ensure_controller_postconditions()
             remaining = toolbox.finalization_reasons()
             if remaining:
                 raise DirectLocalQwenProtocolError(
@@ -238,6 +262,7 @@ class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
             evidence_metrics: dict[str, Any] = {}
             evidence_error: Exception | None = None
             try:
+                toolbox.ensure_controller_postconditions()
                 remaining = toolbox.finalization_reasons()
                 evidence_metrics = toolbox.finalization_metrics()
             except Exception as finalization_error:
@@ -250,6 +275,7 @@ class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
                     "detail": detail,
                     "finalization_verified": True,
                     "finalization_salvaged_after_agent_error": True,
+                    "controller_postconditions_enforced": True,
                     "agent_protocol_completion": "SYNTHETIC_FROM_DETERMINISTIC_EVIDENCE",
                     "codex_cli_invoked": False,
                     "network_access": False,
@@ -266,6 +292,7 @@ class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
                 "codex_cli_invoked": False,
                 "network_access": False,
                 "finalization_verified": False,
+                "controller_postconditions_enforced": True,
                 "finalization_reasons": list(remaining),
             }
             metrics.update(evidence_metrics)
