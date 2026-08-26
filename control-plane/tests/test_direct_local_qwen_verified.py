@@ -82,6 +82,22 @@ class VerifiedThenMalformedProvider:
         return ModelReply(next(self.responses), "completed", None, 10, max_output_tokens)
 
 
+class WriteThenFinalProvider:
+    def __init__(self):
+        self.responses = iter(
+            [
+                '<TOOL>{"name":"write_file","path":"app.py","content":"def value():\\n    return 2\\n"}</TOOL>',
+                "<FINAL>Updated app.py.</FINAL>",
+            ]
+        )
+
+    def health(self):
+        return {"status": "healthy", "model": "fake"}
+
+    def generate(self, prompt, max_output_tokens=1024):
+        return ModelReply(next(self.responses), "completed", None, 10, max_output_tokens)
+
+
 def task_spec(root: Path) -> GenericProjectCodexTaskSpec:
     return GenericProjectCodexTaskSpec(
         root,
@@ -149,4 +165,29 @@ def test_protocol_failure_after_complete_deterministic_evidence_is_salvaged(tmp_
     assert result.metrics["candidate_diff_nonempty"] is True
     assert result.metrics["diff_verified_after_latest_write"] is True
     assert result.metrics["detail"] == "malformed direct-agent action"
+    assert (root / "app.py").read_text(encoding="utf-8") == "def value():\n    return 2\n"
+
+
+def test_controller_runs_fixed_pytest_after_latest_write(tmp_path):
+    root = make_repo(tmp_path)
+    (root / "test_app.py").write_text(
+        "from app import value\n\n\ndef test_value():\n    assert value() == 2\n",
+        encoding="utf-8",
+    )
+    git(root, "add", "test_app.py")
+    git(root, "commit", "-m", "add fixture test")
+    runner = VerifiedDirectGenericProjectQwenRunner(
+        enabled=True,
+        provider=WriteThenFinalProvider(),
+        test_profile=TestProfile.PYTEST,
+    )
+
+    result = runner.run_task(task_spec(root), "00000000-0000-4000-8000-000000000014")
+
+    assert result.status.value == "PASS"
+    assert result.metrics["controller_postconditions_enforced"] is True
+    assert result.metrics["tests_verified_after_latest_write"] is True
+    assert result.metrics["diff_verified_after_latest_write"] is True
+    assert result.metrics["candidate_diff_nonempty"] is True
+    assert not (root / ".pytest_cache").exists()
     assert (root / "app.py").read_text(encoding="utf-8") == "def value():\n    return 2\n"
