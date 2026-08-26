@@ -156,7 +156,7 @@ def _review_material(repository, job, review_round: int) -> str:
 
 
 class GeminiAdvisoryReviewRunner(LocalWorktreeDurableReviewRunner):
-    """Run Gemini once per immutable patch, then preserve the human review boundary."""
+    """Run Gemini once per immutable patch while preserving the human review boundary."""
 
     def __init__(self, gateway: GeminiReviewGateway | None = None):
         self.gateway = gateway or GeminiReviewGateway()
@@ -174,26 +174,34 @@ class GeminiAdvisoryReviewRunner(LocalWorktreeDurableReviewRunner):
             if inserted:
                 os.environ.pop("GEMINI_API_KEY", None)
 
-    def _ensure_advisory(self, context: StageContext, review_round: int, unit) -> dict | None:
-        existing = load_gemini_recommendation(context.repository, unit.review_work_unit_id)
+    def _ensure_for(self, repository, job, review_round: int, unit) -> dict | None:
+        existing = load_gemini_recommendation(repository, unit.review_work_unit_id)
         if existing is not None:
             return existing
-        privacy = _privacy_for_job(context.job)
+        privacy = _privacy_for_job(job)
         if privacy is PrivacyMode.PRIVATE:
-            _persist_status(context.repository, unit, context.job, review_round, "SKIPPED_PRIVATE")
-            return load_gemini_recommendation(context.repository, unit.review_work_unit_id)
+            _persist_status(repository, unit, job, review_round, "SKIPPED_PRIVATE")
+            return load_gemini_recommendation(repository, unit.review_work_unit_id)
         try:
-            material = _review_material(context.repository, context.job, review_round)
+            material = _review_material(repository, job, review_round)
             gated = self._with_keychain_gemini(
                 lambda: self.gateway.review(material=material, privacy=privacy)
             )
-            return _persist_recommendation(
-                context.repository, unit, context.job, review_round, gated
-            )
+            return _persist_recommendation(repository, unit, job, review_round, gated)
         except (CloudEgressDenied, GeminiProviderError, ProviderCredentialError, ValueError) as error:
             status = f"UNAVAILABLE_{type(error).__name__}"[:64]
-            _persist_status(context.repository, unit, context.job, review_round, status)
-            return load_gemini_recommendation(context.repository, unit.review_work_unit_id)
+            _persist_status(repository, unit, job, review_round, status)
+            return load_gemini_recommendation(repository, unit.review_work_unit_id)
+
+    def ensure_advisory(self, repository, job) -> dict | None:
+        """Prepare advisory for an already-created immutable Review boundary.
+
+        This method never reads or submits a human ReviewResult. It is safe to
+        call before returning REVIEW_RESULT_PENDING to the Owner.
+        """
+        review_round = job.review_round + 1
+        unit = repository.review_work_unit_for_round(job.job_id, job.owner_id, review_round)
+        return self._ensure_for(repository, job, review_round, unit)
 
     def run(self, context: StageContext) -> StageResult:
         if context.stage is not WorkflowStage.REVIEW:
@@ -202,12 +210,8 @@ class GeminiAdvisoryReviewRunner(LocalWorktreeDurableReviewRunner):
                 "review runner scope denied",
                 error="REVIEW_STAGE_SCOPE",
             )
-        review_round = context.job.review_round + 1
         try:
-            unit = context.repository.review_work_unit_for_round(
-                context.job.job_id, context.job.owner_id, review_round
-            )
-            advisory = self._ensure_advisory(context, review_round, unit)
+            advisory = self.ensure_advisory(context.repository, context.job)
         except KeyError:
             advisory = None
         result = super().run(context)
