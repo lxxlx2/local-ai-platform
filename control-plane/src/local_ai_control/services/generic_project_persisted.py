@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from .supervisor_codex import PersistedCodexStageRunner
 from .supervisor_contracts import StageContext, StageResult, StageResultStatus, WorkflowStage
 
@@ -64,8 +66,7 @@ class GenericPersistedStageRunner(PersistedCodexStageRunner):
                 },
             )
 
-        self.execution_id = __import__("uuid").uuid4().hex
-        self.execution_id = str(__import__("uuid").UUID(self.execution_id))
+        self.execution_id = str(uuid.uuid4())
         self.work_unit_id = unit.work_unit_id
         self.repository = context.repository
         provider = type(self.task_runner).__name__
