@@ -37,13 +37,15 @@ Owner objective
 
 The Direct Local Qwen Agent has no arbitrary shell tool. Repository documents, comments, issues, tests, generated text, and tool output are untrusted data and cannot widen capabilities. The executor has no package-install/download tool, no credential tool, no network tool, no service/process-control tool, and no commit/push/merge tool. Writes are limited to approved text/code file types inside the exact task worktree.
 
+The production Direct Qwen provider is authorized by deterministic route attestation. Its endpoint must be exactly `http://127.0.0.1:8001`; a different or missing provider route is blocked before generation. Generic Project execution does not start Codex CLI or Codex app-server. This makes executor attribution independent of unrelated account activity and removes OpenAI telemetry processes from the mutating task lifecycle.
+
 The previous `qwen_local_bridge → codex exec` path remains historical compatibility evidence only and is not the normal Generic Project implementation path. It must not be used as an automatic fallback because a guarded real run showed OpenAI Codex quota movement despite the isolated custom-provider configuration.
 
 ## Codex quota isolation and desktop policy
 
 OpenAI Codex quota is reserved for explicit planning and acceptance/review work. Codex Desktop is an interactive client, not a 7×24 platform service, and must never be treated as a required daemon for Local Qwen execution. The local platform must continue to function when Codex Desktop is fully quit.
 
-Before and after a task that claims to be local-only, the control plane snapshots the account Codex rate-limit state through the read-only app-server rate-limit endpoint. If the five-hour or weekly Codex usage increases during a strictly local task, execution fails closed with `CODEX_QUOTA_LEAK_DETECTED`. This guard is telemetry and containment, not authorization to use OpenAI quota.
+Account Codex rate-limit snapshots remain available as an out-of-band diagnostic through the read-only app-server endpoint. They are not an execution authorization signal: account-wide `usedPercent` changes cannot prove which client or process consumed quota. A quota increase is therefore recorded and investigated separately rather than converted into a Generic Project mutation fence. This avoids treating unrelated Desktop, CLI, scheduled, or other account activity as evidence that a localhost-only Direct Qwen task used OpenAI.
 
 The accepted provider roles are:
 
