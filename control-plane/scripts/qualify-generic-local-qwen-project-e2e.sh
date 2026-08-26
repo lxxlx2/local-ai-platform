@@ -28,6 +28,7 @@ PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q \
   "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py" \
   "$CONTROL_PLANE_ROOT/tests/test_direct_local_qwen_agent.py" \
   "$CONTROL_PLANE_ROOT/tests/test_direct_local_qwen_verified.py" \
+  "$CONTROL_PLANE_ROOT/tests/test_generic_project_execution_phases.py" \
   "$CONTROL_PLANE_ROOT/tests/test_generic_project_review_policy.py" \
   "$CONTROL_PLANE_ROOT/tests/test_supervisor_gemini_review.py"
 
