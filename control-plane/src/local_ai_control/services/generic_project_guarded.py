@@ -4,19 +4,21 @@ import subprocess
 from pathlib import Path
 
 from .codex_quota_guard import CodexQuotaGuard, CodexQuotaProbeError
-from .direct_local_qwen_agent import DirectGenericProjectQwenRunner
+from .direct_local_qwen_verified import VerifiedDirectGenericProjectQwenRunner
 from .generic_project_policy import TestProfile
 from .supervisor_codex import PersistedCodexStageRunner
 from .supervisor_contracts import StageResult, StageResultStatus, WorkflowStage
 from .supervisor_generic_project import generic_project_runners
 
 
-class GuardedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
-    """Direct Local-Qwen executor with OpenAI Codex quota leak detection.
+class GuardedDirectGenericProjectQwenRunner(VerifiedDirectGenericProjectQwenRunner):
+    """Verified Direct Local-Qwen executor with OpenAI Codex quota leak detection.
 
     The implementation path never starts Codex CLI. The quota probe only reads
     account/rateLimits/read before and after the local task so any unrelated or
-    accidental quota movement fails closed.
+    accidental quota movement fails closed. A task also cannot PASS until the
+    verified direct-agent layer proves a non-empty candidate diff, a post-write
+    diff inspection, and post-write fixed tests when a test profile is selected.
     """
 
     def __init__(
@@ -69,7 +71,7 @@ class GuardedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
             | {
                 "codex_quota_guard": "PASS" if not changes else "LEAK_DETECTED",
                 "codex_cli_invoked": False,
-                "local_executor": "direct-qwen-tools",
+                "local_executor": "direct-qwen-tools-verified",
             }
         )
         if changes:
