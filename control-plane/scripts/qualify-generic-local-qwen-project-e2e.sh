@@ -22,7 +22,7 @@ LAUNCHER=$SCRIPT_DIR/local-qwen-project.sh
 mkdir -p "$ROOT" "$EXTERNAL_REPO"
 chmod 700 "$ROOT"
 
-printf '[1/8] Focused Generic Project + verified direct-Qwen + quota guard checks\n'
+printf '[1/8] Focused Generic Project + verified direct-Qwen + local-route checks\n'
 PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q \
   "$CONTROL_PLANE_ROOT/tests/test_generic_project_adapter.py" \
   "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py" \
@@ -149,7 +149,9 @@ printf 'source_unchanged=PASS\n'
 printf 'candidate_uncommitted=PASS\n'
 printf 'protected_test_unchanged=PASS\n'
 printf 'owner_review_binding=PASS\n'
-printf 'codex_quota_guard=ENFORCED\n'
+printf 'local_route_attestation=ENFORCED\n'
+printf 'codex_quota_telemetry=OUT_OF_BAND_ONLY\n'
 printf 'codex_cli_invoked=NO\n'
+printf 'codex_app_server_invoked=NO\n'
 printf 'local_executor=DIRECT_QWEN_TOOLS_VERIFIED\n'
 printf 'artifacts=%s\n' "$ROOT"
