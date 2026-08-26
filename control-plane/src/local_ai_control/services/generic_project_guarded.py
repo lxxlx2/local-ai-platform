@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from .codex_quota_guard import CodexQuotaGuard, CodexQuotaProbeError
+from .codex_quota_guard import CodexQuotaGuard
 from .direct_local_qwen_verified import VerifiedDirectGenericProjectQwenRunner
 from .generic_project_persisted import GenericPersistedStageRunner
 from .generic_project_policy import TestProfile
@@ -11,14 +10,17 @@ from .supervisor_contracts import StageResult, StageResultStatus, WorkflowStage
 from .supervisor_generic_project import generic_project_runners
 
 
-class GuardedDirectGenericProjectQwenRunner(VerifiedDirectGenericProjectQwenRunner):
-    """Verified Direct Local-Qwen executor with OpenAI Codex quota leak detection.
+LOCAL_QWEN_ENDPOINT = "http://127.0.0.1:8001"
 
-    The implementation path never starts Codex CLI. The quota probe only reads
-    account/rateLimits/read before and after the local task so any unrelated or
-    accidental quota movement fails closed. A task also cannot PASS until the
-    verified direct-agent layer proves a non-empty candidate diff, a post-write
-    diff inspection, and post-write fixed tests when a test profile is selected.
+
+class GuardedDirectGenericProjectQwenRunner(VerifiedDirectGenericProjectQwenRunner):
+    """Verified Direct Local-Qwen executor with deterministic local-route attestation.
+
+    Runtime authorization is based on the executor route and capabilities, not on
+    correlation with account-wide OpenAI quota movement. The production provider
+    must be bound to the exact localhost Qwen sidecar. The task path never starts
+    Codex CLI or Codex app-server. Codex quota telemetry remains available as an
+    out-of-band diagnostic, but it is not part of the mutating task lifecycle.
     """
 
     def __init__(
@@ -30,60 +32,47 @@ class GuardedDirectGenericProjectQwenRunner(VerifiedDirectGenericProjectQwenRunn
         quota_guard: CodexQuotaGuard | None = None,
     ):
         super().__init__(enabled=enabled, provider=provider, test_profile=test_profile)
-        self.quota_guard = quota_guard or CodexQuotaGuard()
+        # Kept only for API compatibility with older callers/tests. It is never
+        # invoked from a Direct-Qwen task because doing so would itself start a
+        # Codex app-server process and account-wide quota changes are not
+        # attributable to this executor.
+        self.quota_guard = quota_guard
 
-    @staticmethod
-    def _probe_error_metrics(error: Exception, *, execution_started: bool) -> dict[str, str | bool]:
-        return {
-            "category": type(error).__name__,
-            "quota_probe_error": str(error).replace("\n", " ")[:400],
-            "codex_cli_invoked": False,
-            "execution_started": execution_started,
-        }
+    def _route_attestation(self) -> StageResult | None:
+        endpoint = getattr(self.provider, "base_url", None)
+        if endpoint != LOCAL_QWEN_ENDPOINT:
+            return StageResult(
+                StageResultStatus.BLOCKED,
+                "Direct Local Qwen provider route is not the qualified localhost sidecar",
+                error="LOCAL_EXECUTOR_ROUTE_DENIED",
+                metrics={
+                    "provider_type": type(self.provider).__name__,
+                    "local_route_attestation": "FAIL",
+                    "qualified_endpoint": LOCAL_QWEN_ENDPOINT,
+                    "codex_cli_invoked": False,
+                    "codex_app_server_invoked": False,
+                    "execution_started": False,
+                },
+            )
+        return None
 
     def run_task(self, spec, execution_id: str) -> StageResult:
-        try:
-            before = self.quota_guard.before()
-        except Exception as error:
-            return StageResult(
-                StageResultStatus.BLOCKED,
-                "Codex quota telemetry unavailable before local-only execution",
-                error="CODEX_QUOTA_PRECHECK_UNAVAILABLE",
-                metrics=self._probe_error_metrics(error, execution_started=False),
-            )
+        denied = self._route_attestation()
+        if denied is not None:
+            return denied
 
         result = super().run_task(spec, execution_id)
-
-        try:
-            after, changes = self.quota_guard.after(before)
-        except Exception as error:
-            return StageResult(
-                StageResultStatus.BLOCKED,
-                "Codex quota telemetry unavailable after local-only execution",
-                error="CODEX_QUOTA_POSTCHECK_UNAVAILABLE",
-                metrics=(result.metrics or {})
-                | before.metrics("quota_before")
-                | self._probe_error_metrics(error, execution_started=True),
-            )
-
-        quota_metrics = (
-            before.metrics("quota_before")
-            | after.metrics("quota_after")
-            | {
-                "codex_quota_guard": "PASS" if not changes else "LEAK_DETECTED",
+        result.metrics.update(
+            {
+                "local_route_attestation": "PASS",
+                "qualified_endpoint": LOCAL_QWEN_ENDPOINT,
                 "codex_cli_invoked": False,
+                "codex_app_server_invoked": False,
+                "codex_quota_telemetry": "OUT_OF_BAND_ONLY",
                 "local_executor": "direct-qwen-tools-verified",
                 "execution_started": True,
             }
         )
-        if changes:
-            return StageResult(
-                StageResultStatus.BLOCKED,
-                "OpenAI Codex quota changed during a direct local-only Qwen task",
-                error="CODEX_QUOTA_LEAK_DETECTED",
-                metrics=(result.metrics or {}) | quota_metrics | {"changed_scopes": list(changes)},
-            )
-        result.metrics.update(quota_metrics)
         return result
 
 
@@ -101,19 +90,18 @@ def guarded_generic_project_runners(
         test_profile=test_profile,
         gemini_gateway=gemini_gateway,
     )
-    guard = quota_guard or CodexQuotaGuard()
     runners[WorkflowStage.PRODUCER] = GenericPersistedStageRunner(
         GuardedDirectGenericProjectQwenRunner(
             enabled=enabled,
             test_profile=test_profile,
-            quota_guard=guard,
+            quota_guard=quota_guard,
         )
     )
     runners[WorkflowStage.REVISION] = GenericPersistedStageRunner(
         GuardedDirectGenericProjectQwenRunner(
             enabled=enabled,
             test_profile=test_profile,
-            quota_guard=guard,
+            quota_guard=quota_guard,
         )
     )
     return runners
