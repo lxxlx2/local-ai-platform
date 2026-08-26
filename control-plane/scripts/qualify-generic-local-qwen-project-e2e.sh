@@ -23,8 +23,10 @@ LAUNCHER=$SCRIPT_DIR/local-qwen-project.sh
 mkdir -p "$ROOT" "$EXTERNAL_REPO"
 chmod 700 "$ROOT"
 
-printf '[1/8] Focused Generic Project checks\n'
-PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q "$CONTROL_PLANE_ROOT/tests/test_generic_project_adapter.py"
+printf '[1/8] Focused Generic Project + quota guard checks\n'
+PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q \
+  "$CONTROL_PLANE_ROOT/tests/test_generic_project_adapter.py" \
+  "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py"
 
 printf '[2/8] Create real second Git project outside local-ai-platform\n'
 git -C "$EXTERNAL_REPO" init -b main >/dev/null
@@ -60,7 +62,7 @@ chmod 600 "$PROMPT"
 printf '[3/8] Register external project\n'
 /bin/zsh "$LAUNCHER" --runtime "$OPERATOR_RUNTIME" register --repo "$EXTERNAL_REPO" --project-id "$PROJECT_ID" >/dev/null
 
-printf '[4/8] Run Local Qwen/Codex task to durable Gemini Review boundary\n'
+printf '[4/8] Run guarded Local Qwen/Codex task to durable Gemini Review boundary\n'
 /bin/zsh "$LAUNCHER" --runtime "$OPERATOR_RUNTIME" task \
   --project "$PROJECT_ID" \
   --task-id "$TASK_ID" \
@@ -68,7 +70,7 @@ printf '[4/8] Run Local Qwen/Codex task to durable Gemini Review boundary\n'
   --test-profile pytest \
   --privacy RESTRICTED \
   --risk LOW \
-  --timeout 600 >"$SUBMIT_JSON"
+  --timeout 240 >"$SUBMIT_JSON"
 
 "$PYTHON" - "$SUBMIT_JSON" <<'PY'
 import json,sys
@@ -142,4 +144,6 @@ printf 'source_unchanged=PASS\n'
 printf 'candidate_uncommitted=PASS\n'
 printf 'protected_test_unchanged=PASS\n'
 printf 'owner_review_binding=PASS\n'
+printf 'codex_quota_guard=ENFORCED\n'
+printf 'bounded_timeout_cleanup=ENFORCED\n'
 printf 'artifacts=%s\n' "$ROOT"
