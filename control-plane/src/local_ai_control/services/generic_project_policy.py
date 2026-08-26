@@ -138,7 +138,7 @@ class TestProfile(StrEnum):
 
 TEST_PROFILE_ARGV = {
     TestProfile.NONE: (),
-    TestProfile.PYTEST: ("python3", "-m", "pytest", "-q"),
+    TestProfile.PYTEST: ("python3", "-m", "pytest", "-q", "-p", "no:cacheprovider"),
     TestProfile.NPM_TEST: ("npm", "test", "--", "--runInBand"),
     TestProfile.GO_TEST: ("go", "test", "./..."),
     TestProfile.CARGO_TEST: ("cargo", "test"),
