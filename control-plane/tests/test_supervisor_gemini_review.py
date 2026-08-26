@@ -104,6 +104,21 @@ def test_gemini_advisory_is_persisted_once_and_does_not_auto_approve(monkeypatch
     assert stored["egress_material_sha256"] == "2" * 64
 
 
+def test_boundary_advisory_does_not_consume_human_review(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    repository = FakeRepository()
+    gateway = FakeGateway()
+    runner = GeminiAdvisoryReviewRunner(gateway=gateway)
+    context = _context(repository, PrivacyMode.RESTRICTED)
+
+    advisory = runner.ensure_advisory(repository, context.job)
+
+    assert advisory["status"] == "READY"
+    assert advisory["verdict"] == "PASS"
+    assert len(gateway.calls) == 1
+    assert repository.submitted_calls == 0
+
+
 def test_private_review_never_calls_gemini(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     repository = FakeRepository()
