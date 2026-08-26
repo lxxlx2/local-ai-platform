@@ -21,9 +21,15 @@ def _safe_detail(error: Exception) -> str:
 class GenericPersistedStageRunner(PersistedCodexStageRunner):
     """Persisted mutating runner with phase-correct fail-closed semantics.
 
-    Durable execution is not marked STARTED until the immutable execution view
-    has been reconstructed and validated. Once execution has actually started,
-    unexpected runner/completion exceptions still create the mutation fence.
+    Direct Local-Qwen execution consumes the immutable task spec reconstructed
+    from durable state. The old Codex execution_view transformation is not used:
+    it was an external-runner boundary that re-bound repository allowed roots to
+    individual files and could invalidate an otherwise valid immutable manifest.
+
+    Durable execution is not marked STARTED until the reconstructed spec has
+    validated successfully and contains a non-empty immutable safe manifest.
+    Once execution has actually started, unexpected runner/completion exceptions
+    still create the mutation fence.
     """
 
     def run(self, context: StageContext) -> StageResult:
@@ -53,12 +59,16 @@ class GenericPersistedStageRunner(PersistedCodexStageRunner):
                 context.stage,
                 context.job.review_round if context.stage is WorkflowStage.REVISION else 0,
             )
-            execution_spec = spec.execution_view()
+            validated = spec.validate()
+            manifest = tuple(validated.get("safe_file_manifest") or ())
+            if not manifest:
+                raise PermissionError("generic project safe execution manifest contains no files")
+            execution_spec = spec
         except Exception as error:
             return StageResult(
                 StageResultStatus.BLOCKED,
-                "Generic immutable execution view is unavailable or invalid",
-                error="GENERIC_EXECUTION_VIEW_INVALID",
+                "Generic immutable direct execution spec is unavailable or invalid",
+                error="GENERIC_EXECUTION_SPEC_INVALID",
                 metrics={
                     "category": type(error).__name__,
                     "detail": _safe_detail(error),
