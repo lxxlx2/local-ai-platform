@@ -52,12 +52,12 @@ def prepare(tmp_path: Path):
     return root, repo, job
 
 
-def test_generic_producer_reconstructs_from_bound_candidate_identity(tmp_path):
+def test_generic_producer_reconstructs_from_job_baseline_identity(tmp_path):
     root = make_repo(tmp_path)
     repo = GuardedGenericProjectSupervisorRepository(root, tmp_path / "runtime/supervisor.db")
     repo.migrate()
     try:
-        job, unit = create_generic_qwen_job(
+        job, _unit = create_generic_qwen_job(
             repo,
             title="generic producer manifest",
             owner_id="owner",
@@ -73,12 +73,13 @@ def test_generic_producer_reconstructs_from_bound_candidate_identity(tmp_path):
         validated = reconstructed.validate()
         assert validated["safe_file_manifest"]
         assert any(item["path"] == "app.py" for item in validated["safe_file_manifest"])
-        assert reconstructed.candidate_identity.same_candidate(unit.candidate_identity)
+        current = repo.candidate_identity_provider.snapshot(job.baseline_commit_sha)
+        assert reconstructed.candidate_identity.same_candidate(current)
     finally:
         repo.close()
 
 
-def test_generic_producer_reconstruct_fails_if_candidate_changed(tmp_path):
+def test_generic_producer_reconstruct_fails_if_job_baseline_changed(tmp_path):
     root = make_repo(tmp_path)
     repo = GuardedGenericProjectSupervisorRepository(root, tmp_path / "runtime/supervisor.db")
     repo.migrate()
@@ -91,7 +92,7 @@ def test_generic_producer_reconstruct_fails_if_candidate_changed(tmp_path):
             job_id="generic-producer-stale-job",
         )
         (root / "app.py").write_text("def value():\n    return 99\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="candidate identity is stale"):
+        with pytest.raises(ValueError, match="producer baseline identity is stale"):
             repo.reconstruct_codex_task(
                 job.job_id,
                 job.owner_id,
@@ -151,5 +152,50 @@ def test_generic_revision_manifest_uses_same_generic_policy(tmp_path):
         )
         assert "app.py" in unit.candidate_identity.candidate_paths
         assert any(item["path"] == "app.py" for item in unit.safe_file_manifest)
+        reconstructed = repo.reconstruct_codex_task(
+            job.job_id,
+            job.owner_id,
+            WorkflowStage.REVISION,
+            1,
+        )
+        assert reconstructed.candidate_identity.same_candidate(unit.candidate_identity)
+    finally:
+        repo.close()
+
+
+def test_generic_revision_reconstruct_fails_if_candidate_changes_after_unit(tmp_path):
+    root, repo, job = prepare(tmp_path)
+    try:
+        job = repo.update_job(
+            job.job_id,
+            current_stage=WorkflowStage.REVISION,
+            review_round=1,
+        )
+        spec = GenericProjectCodexTaskSpec(
+            root,
+            (root,),
+            "Apply the requested revision.",
+            "LOW",
+            60,
+            "CODE",
+            {"type": "object"},
+            write_roots=(root,),
+        )
+        repo.create_work_unit(
+            job.job_id,
+            job.owner_id,
+            WorkflowStage.REVISION,
+            spec,
+            work_unit_id="revision-generic-policy-stale-1",
+            review_round=1,
+        )
+        (root / "app.py").write_text("def value():\n    return 3\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="revision candidate identity is stale"):
+            repo.reconstruct_codex_task(
+                job.job_id,
+                job.owner_id,
+                WorkflowStage.REVISION,
+                1,
+            )
     finally:
         repo.close()
