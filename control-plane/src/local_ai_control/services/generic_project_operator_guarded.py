@@ -3,6 +3,7 @@ from __future__ import annotations
 from . import generic_project_operator as base
 from .generic_project_guarded import guarded_generic_project_runners
 from .generic_project_policy import TestProfile
+from .generic_project_repository_guarded import GuardedGenericProjectSupervisorRepository
 from .supervisor_generic_project import GenericProjectWorkflowSupervisor
 
 
@@ -25,6 +26,7 @@ def _run_enabled(repository, job_id: str, test_profile: TestProfile):
 
 
 def main(argv: list[str] | None = None) -> int:
+    base.GenericProjectSupervisorRepository = GuardedGenericProjectSupervisorRepository
     base._run_enabled = _run_enabled
     return base.main(argv)
 
