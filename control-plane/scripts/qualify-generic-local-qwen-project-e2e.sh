@@ -83,8 +83,9 @@ assert p["resume_state"] == "REVIEW_RESULT_PENDING", p
 assert p.get("patch_sha256"), p
 assert p.get("review_work_unit_id"), p
 assert "gemini_advisory" in p, p
+assert p["gemini_advisory"].get("status") == "READY", p
 print("REVIEW_BOUNDARY_PASS")
-print("gemini_advisory_status=" + str(p["gemini_advisory"].get("status")))
+print("gemini_advisory_status=READY")
 PY
 
 WORKTREE=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["worktree"])' "$SUBMIT_JSON")
