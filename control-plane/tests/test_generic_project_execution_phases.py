@@ -3,8 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from local_ai_control.services.generic_project_guarded import GuardedDirectGenericProjectQwenRunner
+from local_ai_control.services.generic_project_operator_guarded import GuardedGenericProjectWorkflowSupervisor
 from local_ai_control.services.generic_project_persisted import GenericPersistedStageRunner
-from local_ai_control.services.supervisor_contracts import StageResult, StageResultStatus, WorkflowStage
+from local_ai_control.services.supervisor_contracts import (
+    JobStatus,
+    StageResult,
+    StageResultStatus,
+    WorkflowStage,
+)
 
 
 class NeverTaskRunner:
@@ -91,6 +97,19 @@ class ExplodingQuotaGuard:
         raise AssertionError("quota telemetry must stay out of the direct task lifecycle")
 
 
+class FailureSchedulingRepository:
+    def __init__(self):
+        self.updates = []
+        self.events = []
+
+    def update_job(self, job_id, **kwargs):
+        self.updates.append((job_id, kwargs))
+        return SimpleNamespace(job_id=job_id, **kwargs)
+
+    def record_event(self, job_id, event_type, stage, payload):
+        self.events.append((job_id, event_type, stage, payload))
+
+
 def _context(repository):
     return SimpleNamespace(
         stage=WorkflowStage.PRODUCER,
@@ -142,3 +161,27 @@ def test_remote_provider_route_is_denied_before_any_generation_or_quota_probe():
     assert result.metrics["codex_cli_invoked"] is False
     assert result.metrics["codex_app_server_invoked"] is False
     assert result.metrics["execution_started"] is False
+
+
+def test_started_mutating_failure_is_blocked_without_automatic_retry():
+    repository = FailureSchedulingRepository()
+    supervisor = GuardedGenericProjectWorkflowSupervisor(repository, {}, timeout_seconds=900)
+    job = SimpleNamespace(job_id="job-1", current_stage=WorkflowStage.PRODUCER)
+    result = StageResult(
+        StageResultStatus.FAIL,
+        "agent protocol failed after mutation",
+        error="DIRECT_LOCAL_QWEN_DirectLocalQwenProtocolError",
+        metrics={
+            "execution_started": True,
+            "candidate_diff_nonempty": True,
+            "finalization_verified": False,
+        },
+    )
+
+    updated = supervisor._schedule_failure(job, result)
+
+    assert updated.status is JobStatus.BLOCKED
+    assert updated.resume_state == "MUTATING_EXECUTION_FAILED_REVIEW_REQUIRED"
+    assert repository.updates[-1][1]["status"] is JobStatus.BLOCKED
+    assert repository.events[-1][3]["automatic_retry"] is False
+    assert repository.events[-1][3]["candidate_diff_nonempty"] is True
