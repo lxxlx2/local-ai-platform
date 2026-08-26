@@ -62,6 +62,26 @@ class AlwaysPrematureProvider:
         return ModelReply("<FINAL>Done.</FINAL>", "completed", None, 10, max_output_tokens)
 
 
+class VerifiedThenMalformedProvider:
+    def __init__(self):
+        self.responses = iter(
+            [
+                '<TOOL>{"name":"read_file","path":"app.py"}</TOOL>',
+                '<TOOL>{"name":"write_file","path":"app.py","content":"def value():\\n    return 2\\n"}</TOOL>',
+                '<TOOL>{"name":"git_diff"}</TOOL>',
+                "not-an-envelope",
+                "still-not-an-envelope",
+                "final-protocol-is-malformed",
+            ]
+        )
+
+    def health(self):
+        return {"status": "healthy", "model": "fake"}
+
+    def generate(self, prompt, max_output_tokens=1024):
+        return ModelReply(next(self.responses), "completed", None, 10, max_output_tokens)
+
+
 def task_spec(root: Path) -> GenericProjectCodexTaskSpec:
     return GenericProjectCodexTaskSpec(
         root,
@@ -111,3 +131,22 @@ def test_selected_test_profile_requires_post_write_test_evidence(tmp_path):
     reasons = box.finalization_reasons()
 
     assert "fixed tests have not passed after the latest write" in reasons
+
+
+def test_protocol_failure_after_complete_deterministic_evidence_is_salvaged(tmp_path):
+    root = make_repo(tmp_path)
+    runner = VerifiedDirectGenericProjectQwenRunner(
+        enabled=True,
+        provider=VerifiedThenMalformedProvider(),
+    )
+
+    result = runner.run_task(task_spec(root), "00000000-0000-4000-8000-000000000013")
+
+    assert result.status.value == "PASS"
+    assert result.metrics["finalization_verified"] is True
+    assert result.metrics["finalization_salvaged_after_agent_error"] is True
+    assert result.metrics["agent_protocol_completion"] == "SYNTHETIC_FROM_DETERMINISTIC_EVIDENCE"
+    assert result.metrics["candidate_diff_nonempty"] is True
+    assert result.metrics["diff_verified_after_latest_write"] is True
+    assert result.metrics["detail"] == "malformed direct-agent action"
+    assert (root / "app.py").read_text(encoding="utf-8") == "def value():\n    return 2\n"
