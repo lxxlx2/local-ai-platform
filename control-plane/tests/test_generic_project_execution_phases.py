@@ -73,9 +73,22 @@ class PassTaskRunner:
         return True
 
 
-class BrokenQuotaGuard:
+class RemoteProvider:
+    base_url = "https://api.example.invalid"
+
+    def health(self):
+        raise AssertionError("remote provider health must not be called")
+
+    def generate(self, *args, **kwargs):
+        raise AssertionError("remote provider generation must not be called")
+
+
+class ExplodingQuotaGuard:
     def before(self):
-        raise ValueError("fixture quota parser failure")
+        raise AssertionError("quota telemetry must stay out of the direct task lifecycle")
+
+    def after(self, before):
+        raise AssertionError("quota telemetry must stay out of the direct task lifecycle")
 
 
 def _context(repository):
@@ -114,15 +127,18 @@ def test_valid_direct_spec_bypasses_legacy_codex_execution_view():
     assert repository.complete_calls == 1
 
 
-def test_raw_quota_probe_value_error_is_normalized_before_agent_start():
+def test_remote_provider_route_is_denied_before_any_generation_or_quota_probe():
     runner = GuardedDirectGenericProjectQwenRunner(
         enabled=True,
-        quota_guard=BrokenQuotaGuard(),
+        provider=RemoteProvider(),
+        quota_guard=ExplodingQuotaGuard(),
     )
 
     result = runner.run_task(None, "00000000-0000-4000-8000-000000000001")
 
     assert result.status is StageResultStatus.BLOCKED
-    assert result.error == "CODEX_QUOTA_PRECHECK_UNAVAILABLE"
-    assert result.metrics["category"] == "ValueError"
+    assert result.error == "LOCAL_EXECUTOR_ROUTE_DENIED"
+    assert result.metrics["local_route_attestation"] == "FAIL"
     assert result.metrics["codex_cli_invoked"] is False
+    assert result.metrics["codex_app_server_invoked"] is False
+    assert result.metrics["execution_started"] is False
