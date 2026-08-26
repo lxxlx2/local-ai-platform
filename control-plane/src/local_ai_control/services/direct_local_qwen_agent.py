@@ -85,10 +85,16 @@ class DirectProjectToolbox:
     def _relative(self, value: str, *, must_exist: bool = True) -> tuple[Path, str]:
         if not isinstance(value, str) or not value or "\x00" in value:
             raise PermissionError("invalid project path")
-        raw = self.repo_root / value
+        requested = Path(value)
+        if requested.is_absolute() or ".." in requested.parts:
+            raise PermissionError("path escapes approved worktree")
+        raw = self.repo_root / requested
         if raw.is_symlink():
             raise PermissionError("symlink path denied")
-        candidate = raw.resolve(strict=must_exist)
+        try:
+            candidate = raw.resolve(strict=must_exist)
+        except OSError as error:
+            raise PermissionError("project path is unavailable") from error
         if candidate != self.repo_root and not candidate.is_relative_to(self.repo_root):
             raise PermissionError("path escapes approved worktree")
         relative = "." if candidate == self.repo_root else candidate.relative_to(self.repo_root).as_posix()
