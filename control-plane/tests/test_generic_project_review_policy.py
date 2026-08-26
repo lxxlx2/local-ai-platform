@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from local_ai_control.services.generic_project_repository_guarded import (
     GuardedGenericProjectSupervisorRepository,
 )
@@ -48,6 +50,56 @@ def prepare(tmp_path: Path):
     )
     (root / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
     return root, repo, job
+
+
+def test_generic_producer_reconstructs_from_bound_candidate_identity(tmp_path):
+    root = make_repo(tmp_path)
+    repo = GuardedGenericProjectSupervisorRepository(root, tmp_path / "runtime/supervisor.db")
+    repo.migrate()
+    try:
+        job, unit = create_generic_qwen_job(
+            repo,
+            title="generic producer manifest",
+            owner_id="owner",
+            task_prompt="Change value() to return 2.",
+            job_id="generic-producer-job",
+        )
+        reconstructed = repo.reconstruct_codex_task(
+            job.job_id,
+            job.owner_id,
+            WorkflowStage.PRODUCER,
+            0,
+        )
+        validated = reconstructed.validate()
+        assert validated["safe_file_manifest"]
+        assert any(item["path"] == "app.py" for item in validated["safe_file_manifest"])
+        assert reconstructed.candidate_identity.same_candidate(unit.candidate_identity)
+    finally:
+        repo.close()
+
+
+def test_generic_producer_reconstruct_fails_if_candidate_changed(tmp_path):
+    root = make_repo(tmp_path)
+    repo = GuardedGenericProjectSupervisorRepository(root, tmp_path / "runtime/supervisor.db")
+    repo.migrate()
+    try:
+        job, _unit = create_generic_qwen_job(
+            repo,
+            title="generic producer stale candidate",
+            owner_id="owner",
+            task_prompt="Change value() to return 2.",
+            job_id="generic-producer-stale-job",
+        )
+        (root / "app.py").write_text("def value():\n    return 99\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="candidate identity is stale"):
+            repo.reconstruct_codex_task(
+                job.job_id,
+                job.owner_id,
+                WorkflowStage.PRODUCER,
+                0,
+            )
+    finally:
+        repo.close()
 
 
 def test_generic_review_manifest_accepts_exact_authorized_repo_root(tmp_path):
