@@ -5,8 +5,8 @@ from pathlib import Path
 
 from .codex_quota_guard import CodexQuotaGuard, CodexQuotaProbeError
 from .direct_local_qwen_verified import VerifiedDirectGenericProjectQwenRunner
+from .generic_project_persisted import GenericPersistedStageRunner
 from .generic_project_policy import TestProfile
-from .supervisor_codex import PersistedCodexStageRunner
 from .supervisor_contracts import StageResult, StageResultStatus, WorkflowStage
 from .supervisor_generic_project import generic_project_runners
 
@@ -43,7 +43,7 @@ class GuardedDirectGenericProjectQwenRunner(VerifiedDirectGenericProjectQwenRunn
     def run_task(self, spec, execution_id: str) -> StageResult:
         try:
             before = self.quota_guard.before()
-        except (CodexQuotaProbeError, OSError, subprocess.SubprocessError) as error:
+        except Exception as error:
             return StageResult(
                 StageResultStatus.BLOCKED,
                 "Codex quota telemetry unavailable before local-only execution",
@@ -55,7 +55,7 @@ class GuardedDirectGenericProjectQwenRunner(VerifiedDirectGenericProjectQwenRunn
 
         try:
             after, changes = self.quota_guard.after(before)
-        except (CodexQuotaProbeError, OSError, subprocess.SubprocessError) as error:
+        except Exception as error:
             return StageResult(
                 StageResultStatus.BLOCKED,
                 "Codex quota telemetry unavailable after local-only execution",
@@ -100,14 +100,14 @@ def guarded_generic_project_runners(
         gemini_gateway=gemini_gateway,
     )
     guard = quota_guard or CodexQuotaGuard()
-    runners[WorkflowStage.PRODUCER] = PersistedCodexStageRunner(
+    runners[WorkflowStage.PRODUCER] = GenericPersistedStageRunner(
         GuardedDirectGenericProjectQwenRunner(
             enabled=enabled,
             test_profile=test_profile,
             quota_guard=guard,
         )
     )
-    runners[WorkflowStage.REVISION] = PersistedCodexStageRunner(
+    runners[WorkflowStage.REVISION] = GenericPersistedStageRunner(
         GuardedDirectGenericProjectQwenRunner(
             enabled=enabled,
             test_profile=test_profile,
