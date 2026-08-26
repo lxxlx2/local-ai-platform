@@ -27,7 +27,8 @@ PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q \
   "$CONTROL_PLANE_ROOT/tests/test_generic_project_adapter.py" \
   "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py" \
   "$CONTROL_PLANE_ROOT/tests/test_direct_local_qwen_agent.py" \
-  "$CONTROL_PLANE_ROOT/tests/test_generic_project_review_policy.py"
+  "$CONTROL_PLANE_ROOT/tests/test_generic_project_review_policy.py" \
+  "$CONTROL_PLANE_ROOT/tests/test_supervisor_gemini_review.py"
 
 printf '[2/8] Create real second Git project outside local-ai-platform\n'
 git -C "$EXTERNAL_REPO" init -b main >/dev/null
