@@ -31,14 +31,20 @@ class GuardedGenericProjectSupervisorRepository(GenericProjectSupervisorReposito
     rather than the shared RepoAccessPolicy defaults.
     """
 
-    def reconstruct_codex_task(self, job_id, owner_id, stage, review_round=None):
-        """Rehydrate the execution manifest from the durable candidate identity.
+    @staticmethod
+    def _candidate_state_hash(identity) -> str:
+        return hashlib.sha256(
+            _json_exact(identity.stable_payload(), 1_000_000).encode()
+        ).hexdigest()
 
-        The persisted safe manifest remains part of the immutable work-unit hash,
-        but freshness is proven by the stronger candidate identity. Once the
-        current worktree is proven to be the exact durable candidate, rebuild a
-        canonical safe manifest from that state instead of treating serialized
-        manifest bytes as a second independent freshness oracle.
+    def reconstruct_codex_task(self, job_id, owner_id, stage, review_round=None):
+        """Rehydrate an execution manifest from the authoritative durable state.
+
+        Producer freshness is bound to the job baseline captured before any
+        mutating stage. Revision freshness is bound to that revision work unit's
+        candidate identity. The serialized safe manifest remains integrity data,
+        while a canonical manifest is rebuilt only after the current worktree has
+        been proven to match the appropriate durable identity.
         """
         unit = self.work_unit_for_stage(job_id, owner_id, stage, review_round)
         job = self.get_job_for_owner(job_id, owner_id)
@@ -46,12 +52,19 @@ class GuardedGenericProjectSupervisorRepository(GenericProjectSupervisorReposito
             raise PermissionError("generic project durable work unit scope mismatch")
         if not job.baseline_commit_sha:
             raise ValueError("trusted immutable job baseline is missing")
-        if unit.candidate_identity is None:
-            raise ValueError("generic project durable candidate identity is missing")
 
         current_identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
-        if not unit.candidate_identity.same_candidate(current_identity):
-            raise ValueError("generic project durable candidate identity is stale")
+        if stage is WorkflowStage.PRODUCER:
+            expected_state = str(job.baseline_candidate_state_sha256 or "")
+            if not expected_state or self._candidate_state_hash(current_identity) != expected_state:
+                raise ValueError("generic project producer baseline identity is stale")
+        elif stage is WorkflowStage.REVISION:
+            if unit.candidate_identity is None:
+                raise ValueError("generic project revision candidate identity is missing")
+            if not unit.candidate_identity.same_candidate(current_identity):
+                raise ValueError("generic project revision candidate identity is stale")
+        else:
+            raise ValueError("generic project execution task requires producer or revision stage")
 
         prompt = self.load_work_unit_prompt(unit.work_unit_id, job_id, owner_id)
         policy = GenericRepoAccessPolicy(unit.repo_root)
@@ -239,7 +252,6 @@ class GuardedGenericProjectSupervisorRepository(GenericProjectSupervisorReposito
 
         content_ref, stored_sha = self.content_store.put(f"review-{identifier}", spec.task_prompt)
         if stored_sha != prompt_sha:
-            self.content_store.delete(content_ref)
             raise ValueError("review prompt integrity mismatch")
         patch_ref = None
         objective_ref = None
