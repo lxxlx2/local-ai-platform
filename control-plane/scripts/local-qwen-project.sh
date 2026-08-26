@@ -56,7 +56,7 @@ if [[ "$NEEDS_BRIDGE" == "1" ]] && ! curl -sf "$BRIDGE_HEALTH" >/dev/null 2>&1; 
 fi
 
 set +e
-"$PYTHON" -m local_ai_control.services.generic_project_operator "$@"
+"$PYTHON" -m local_ai_control.services.generic_project_operator_guarded "$@"
 STATUS=$?
 set -e
 cleanup_bridge
