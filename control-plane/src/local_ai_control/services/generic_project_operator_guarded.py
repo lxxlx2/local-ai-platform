@@ -17,10 +17,10 @@ class GuardedGenericProjectWorkflowSupervisor(GenericProjectWorkflowSupervisor):
     """Generic workflow with phase-aware BLOCKED semantics."""
 
     def _schedule_failure(self, job, result):
-        if (
-            result.status is StageResultStatus.BLOCKED
-            and (result.metrics or {}).get("execution_started") is False
-        ):
+        metrics = result.metrics or {}
+        execution_started = metrics.get("execution_started")
+
+        if result.status is StageResultStatus.BLOCKED and execution_started is False:
             error = _safe_text(result.error or result.summary, 1000)
             updated = self.repository.update_job(
                 job.job_id,
@@ -35,12 +35,42 @@ class GuardedGenericProjectWorkflowSupervisor(GenericProjectWorkflowSupervisor):
                 {"error": error, "execution_started": False},
             )
             return updated
+
+        if (
+            job.current_stage in {WorkflowStage.PRODUCER, WorkflowStage.REVISION}
+            and execution_started is True
+            and result.status is not StageResultStatus.PASS
+        ):
+            error = _safe_text(result.error or result.summary, 1000)
+            updated = self.repository.update_job(
+                job.job_id,
+                status=JobStatus.BLOCKED,
+                resume_state="MUTATING_EXECUTION_FAILED_REVIEW_REQUIRED",
+                last_error=error,
+            )
+            self.repository.record_event(
+                job.job_id,
+                "STAGE_FAILED",
+                job.current_stage,
+                {
+                    "error": error,
+                    "execution_started": True,
+                    "automatic_retry": False,
+                    "candidate_diff_nonempty": bool(metrics.get("candidate_diff_nonempty", False)),
+                },
+            )
+            return updated
+
         return super()._schedule_failure(job, result)
 
 
 def _safe_payload_guarded(record: dict, repository, job) -> dict:
     payload = _BASE_SAFE_PAYLOAD(record, repository, job)
-    if job.status is not JobStatus.BLOCKED or job.resume_state != "PREEXECUTION_BLOCKED":
+    diagnostic_states = {
+        "PREEXECUTION_BLOCKED",
+        "MUTATING_EXECUTION_FAILED_REVIEW_REQUIRED",
+    }
+    if job.status is not JobStatus.BLOCKED or job.resume_state not in diagnostic_states:
         return payload
     runs = repository.latest_stage_runs(job.job_id)
     if not runs:
@@ -54,10 +84,21 @@ def _safe_payload_guarded(record: dict, repository, job) -> dict:
         "stage": str(latest.get("stage") or job.current_stage.value),
         "error": str(latest.get("error") or job.last_error or ""),
         "category": str(metrics.get("category") or ""),
-        "detail": _safe_text(str(metrics.get("detail") or metrics.get("quota_probe_error") or ""), 1000) or "",
+        "detail": _safe_text(
+            str(metrics.get("detail") or metrics.get("quota_probe_error") or ""),
+            1000,
+        ) or "",
         "execution_started": bool(metrics.get("execution_started", False)),
     }
-    payload["preexecution_diagnostic"] = diagnostic
+    if "finalization_verified" in metrics:
+        diagnostic["finalization_verified"] = bool(metrics.get("finalization_verified"))
+    if metrics.get("finalization_reasons"):
+        diagnostic["finalization_reasons"] = list(metrics.get("finalization_reasons") or ())[:12]
+    if "candidate_diff_nonempty" in metrics:
+        diagnostic["candidate_diff_nonempty"] = bool(metrics.get("candidate_diff_nonempty"))
+    payload["execution_diagnostic"] = diagnostic
+    if job.resume_state == "PREEXECUTION_BLOCKED":
+        payload["preexecution_diagnostic"] = diagnostic
     return payload
 
 
