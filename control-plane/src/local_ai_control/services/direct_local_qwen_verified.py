@@ -190,6 +190,10 @@ class VerifiedDirectLocalQwenAgent(DirectLocalQwenAgent):
 class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
     """Generic runner that cannot PASS with an empty or unverified candidate."""
 
+    @staticmethod
+    def _safe_error_detail(error: Exception) -> str:
+        return str(error).replace("\n", " ")[:500]
+
     def run_task(self, spec, execution_id: str) -> StageResult:
         if not self.enabled:
             return StageResult(
@@ -212,7 +216,7 @@ class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
                 StageResultStatus.BLOCKED,
                 "Direct Local Qwen preflight failed",
                 error="DIRECT_LOCAL_QWEN_PREFLIGHT_FAILED",
-                metrics={"category": type(error).__name__},
+                metrics={"category": type(error).__name__, "detail": self._safe_error_detail(error)},
             )
         if not isinstance(health, dict) or health.get("status") != "healthy":
             return StageResult(
@@ -230,14 +234,48 @@ class VerifiedDirectGenericProjectQwenRunner(DirectGenericProjectQwenRunner):
                     "verified finalization invariant changed after agent completion: " + "; ".join(remaining)
                 )
         except Exception as error:
+            detail = self._safe_error_detail(error)
+            evidence_metrics: dict[str, Any] = {}
+            evidence_error: Exception | None = None
+            try:
+                remaining = toolbox.finalization_reasons()
+                evidence_metrics = toolbox.finalization_metrics()
+            except Exception as finalization_error:
+                remaining = ("deterministic finalization evidence could not be read",)
+                evidence_error = finalization_error
+
+            if not remaining and toolbox.successful_writes > 0:
+                metrics = {
+                    "category": type(error).__name__,
+                    "detail": detail,
+                    "finalization_verified": True,
+                    "finalization_salvaged_after_agent_error": True,
+                    "agent_protocol_completion": "SYNTHETIC_FROM_DETERMINISTIC_EVIDENCE",
+                    "codex_cli_invoked": False,
+                    "network_access": False,
+                }
+                metrics.update(evidence_metrics)
+                return StageResult.passed(
+                    "Direct Local Qwen candidate passed deterministic finalization after agent protocol failure",
+                    metrics=metrics,
+                )
+
+            metrics = {
+                "category": type(error).__name__,
+                "detail": detail,
+                "codex_cli_invoked": False,
+                "network_access": False,
+                "finalization_verified": False,
+                "finalization_reasons": list(remaining),
+            }
+            metrics.update(evidence_metrics)
+            if evidence_error is not None:
+                metrics["finalization_evidence_error"] = (
+                    f"{type(evidence_error).__name__}: {self._safe_error_detail(evidence_error)}"
+                )
             return StageResult.failed(
                 "Direct Local Qwen agent did not produce a verified candidate",
                 error=f"DIRECT_LOCAL_QWEN_{type(error).__name__}",
-                metrics={
-                    "category": type(error).__name__,
-                    "codex_cli_invoked": False,
-                    "network_access": False,
-                    "finalization_verified": False,
-                },
+                metrics=metrics,
             )
         return StageResult.passed(summary, metrics=metrics)
