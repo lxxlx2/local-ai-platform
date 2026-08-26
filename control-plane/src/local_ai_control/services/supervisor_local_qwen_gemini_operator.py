@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from . import supervisor_local_qwen_operator as operator
+from .supervisor_contracts import JobStatus, WorkflowStage
 from .supervisor_gemini_review import gemini_local_qwen_runners, load_gemini_recommendation
 from .supervisor_local_qwen import LocalWorktreeWorkflowSupervisor
 
@@ -60,15 +61,24 @@ def command_review_show(args):
 
 
 def _run_enabled(repository, job_id):
+    runners = gemini_local_qwen_runners(repository.repo_root, enabled=True)
     supervisor = LocalWorktreeWorkflowSupervisor(
         repository,
-        gemini_local_qwen_runners(repository.repo_root, enabled=True),
+        runners,
         timeout_seconds=900,
     )
     if not supervisor.acquire_singleton():
         raise RuntimeError("another local Qwen Supervisor consumer owns the operator database")
     try:
-        return operator.run_until_boundary(supervisor, repository, job_id)
+        job = operator.run_until_boundary(supervisor, repository, job_id)
+        if (
+            job.current_stage is WorkflowStage.REVIEW
+            and job.status is JobStatus.WAITING
+            and job.resume_state == "REVIEW_RESULT_PENDING"
+        ):
+            runners[WorkflowStage.REVIEW].ensure_advisory(repository, job)
+            job = repository.get_job(job_id)
+        return job
     finally:
         supervisor.release_singleton()
 
