@@ -86,4 +86,4 @@ def test_direct_runner_modifies_feature_worktree_without_codex_cli(tmp_path):
     assert result.metrics["codex_cli_invoked"] is False
     assert result.metrics["network_access"] is False
     assert (root / "app.py").read_text(encoding="utf-8") == "def value():\n    return 2\n"
-    assert git(root, "status", "--porcelain") == " M app.py"
+    assert git(root, "status", "--porcelain") == "M app.py"
