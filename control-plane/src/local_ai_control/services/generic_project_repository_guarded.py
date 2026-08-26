@@ -14,7 +14,10 @@ from .supervisor_contracts import (
     _json_exact,
     utc_now,
 )
-from .supervisor_generic_project import GenericProjectSupervisorRepository
+from .supervisor_generic_project import (
+    GenericProjectCodexTaskSpec,
+    GenericProjectSupervisorRepository,
+)
 from .supervisor_round2_common import _canonical_digest
 from .supervisor_round2_common import ReviewerWorkUnit
 
@@ -27,6 +30,52 @@ class GuardedGenericProjectSupervisorRepository(GenericProjectSupervisorReposito
     so Review and Revision manifest construction must use GenericRepoAccessPolicy
     rather than the shared RepoAccessPolicy defaults.
     """
+
+    def reconstruct_codex_task(self, job_id, owner_id, stage, review_round=None):
+        """Rehydrate the execution manifest from the durable candidate identity.
+
+        The persisted safe manifest remains part of the immutable work-unit hash,
+        but freshness is proven by the stronger candidate identity. Once the
+        current worktree is proven to be the exact durable candidate, rebuild a
+        canonical safe manifest from that state instead of treating serialized
+        manifest bytes as a second independent freshness oracle.
+        """
+        unit = self.work_unit_for_stage(job_id, owner_id, stage, review_round)
+        job = self.get_job_for_owner(job_id, owner_id)
+        if unit.repo_root.resolve() != Path(job.project_scope).resolve():
+            raise PermissionError("generic project durable work unit scope mismatch")
+        if not job.baseline_commit_sha:
+            raise ValueError("trusted immutable job baseline is missing")
+        if unit.candidate_identity is None:
+            raise ValueError("generic project durable candidate identity is missing")
+
+        current_identity = self.candidate_identity_provider.snapshot(job.baseline_commit_sha)
+        if not unit.candidate_identity.same_candidate(current_identity):
+            raise ValueError("generic project durable candidate identity is stale")
+
+        prompt = self.load_work_unit_prompt(unit.work_unit_id, job_id, owner_id)
+        policy = GenericRepoAccessPolicy(unit.repo_root)
+        allowed = policy.validate_allowed_paths(list(unit.allowed_paths))
+        manifest = policy.merge_candidate_manifest(current_identity, allowed)
+        if not manifest:
+            raise PermissionError("generic project safe execution manifest contains no files")
+
+        spec = GenericProjectCodexTaskSpec(
+            unit.repo_root,
+            unit.allowed_paths,
+            prompt,
+            unit.risk_level,
+            unit.timeout_seconds,
+            unit.model_role,
+            unit.expected_output_schema,
+            manifest,
+            current_identity,
+            unit.write_roots,
+        )
+        validated = spec.validate()
+        if validated["task_prompt_sha256"] != unit.prompt_sha256:
+            raise ValueError("generic project work unit prompt hash mismatch")
+        return spec
 
     def create_work_unit(
         self,
