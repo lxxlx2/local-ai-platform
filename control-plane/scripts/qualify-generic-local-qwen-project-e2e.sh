@@ -22,11 +22,12 @@ LAUNCHER=$SCRIPT_DIR/local-qwen-project.sh
 mkdir -p "$ROOT" "$EXTERNAL_REPO"
 chmod 700 "$ROOT"
 
-printf '[1/8] Focused Generic Project + direct-Qwen + quota guard checks\n'
+printf '[1/8] Focused Generic Project + verified direct-Qwen + quota guard checks\n'
 PYTHONPATH="$CONTROL_PLANE_ROOT/src" "$PYTHON" -m pytest -q \
   "$CONTROL_PLANE_ROOT/tests/test_generic_project_adapter.py" \
   "$CONTROL_PLANE_ROOT/tests/test_codex_quota_guard.py" \
   "$CONTROL_PLANE_ROOT/tests/test_direct_local_qwen_agent.py" \
+  "$CONTROL_PLANE_ROOT/tests/test_direct_local_qwen_verified.py" \
   "$CONTROL_PLANE_ROOT/tests/test_generic_project_review_policy.py" \
   "$CONTROL_PLANE_ROOT/tests/test_supervisor_gemini_review.py"
 
@@ -64,7 +65,7 @@ chmod 600 "$PROMPT"
 printf '[3/8] Register external project\n'
 /bin/zsh "$LAUNCHER" --runtime "$OPERATOR_RUNTIME" register --repo "$EXTERNAL_REPO" --project-id "$PROJECT_ID" >/dev/null
 
-printf '[4/8] Run direct Local Qwen task to durable Gemini Review boundary\n'
+printf '[4/8] Run verified direct Local Qwen task to durable Gemini Review boundary\n'
 /bin/zsh "$LAUNCHER" --runtime "$OPERATOR_RUNTIME" task \
   --project "$PROJECT_ID" \
   --task-id "$TASK_ID" \
@@ -149,5 +150,5 @@ printf 'protected_test_unchanged=PASS\n'
 printf 'owner_review_binding=PASS\n'
 printf 'codex_quota_guard=ENFORCED\n'
 printf 'codex_cli_invoked=NO\n'
-printf 'local_executor=DIRECT_QWEN_TOOLS\n'
+printf 'local_executor=DIRECT_QWEN_TOOLS_VERIFIED\n'
 printf 'artifacts=%s\n' "$ROOT"
