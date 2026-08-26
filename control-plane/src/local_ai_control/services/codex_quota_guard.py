@@ -80,7 +80,12 @@ class CodexQuotaProbe:
             raise CodexQuotaProbeError("Codex app-server stdout unavailable")
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([process.stdout], [], [], min(1.0, max(0.0, deadline - time.monotonic())))
+            ready, _, _ = select.select(
+                [process.stdout],
+                [],
+                [],
+                min(1.0, max(0.0, deadline - time.monotonic())),
+            )
             if not ready:
                 if process.poll() is not None:
                     raise CodexQuotaProbeError("Codex app-server exited before quota response")
@@ -152,12 +157,45 @@ class CodexQuotaProbe:
 
 
 class CodexQuotaGuard:
-    def __init__(self, snapshotter: Callable[[], CodexQuotaSnapshot] | None = None):
+    """Bounded, fail-closed rate-limit telemetry around a local-only task."""
+
+    def __init__(
+        self,
+        snapshotter: Callable[[], CodexQuotaSnapshot] | None = None,
+        *,
+        attempts: int = 3,
+        retry_delay_seconds: float = 0.75,
+        sleeper: Callable[[float], None] = time.sleep,
+    ):
+        if not 1 <= int(attempts) <= 5:
+            raise ValueError("quota probe attempts outside safe bound")
+        if not 0 <= float(retry_delay_seconds) <= 5:
+            raise ValueError("quota probe retry delay outside safe bound")
         self.snapshotter = snapshotter or CodexQuotaProbe().snapshot
+        self.attempts = int(attempts)
+        self.retry_delay_seconds = float(retry_delay_seconds)
+        self.sleeper = sleeper
+
+    def _snapshot_with_retry(self, phase: str) -> CodexQuotaSnapshot:
+        last_error: Exception | None = None
+        for attempt in range(1, self.attempts + 1):
+            try:
+                return self.snapshotter()
+            except (CodexQuotaProbeError, OSError, subprocess.SubprocessError) as error:
+                last_error = error
+                if attempt < self.attempts and self.retry_delay_seconds:
+                    self.sleeper(self.retry_delay_seconds)
+        if last_error is None:
+            raise CodexQuotaProbeError(f"Codex quota {phase} failed without an error")
+        detail = str(last_error).replace("\n", " ")[:240]
+        raise CodexQuotaProbeError(
+            f"Codex quota {phase} failed after {self.attempts} attempts: "
+            f"{type(last_error).__name__}: {detail}"
+        ) from last_error
 
     def before(self) -> CodexQuotaSnapshot:
-        return self.snapshotter()
+        return self._snapshot_with_retry("precheck")
 
     def after(self, before: CodexQuotaSnapshot) -> tuple[CodexQuotaSnapshot, tuple[str, ...]]:
-        after = self.snapshotter()
+        after = self._snapshot_with_retry("postcheck")
         return after, quota_increases(before, after)
