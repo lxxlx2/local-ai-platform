@@ -72,6 +72,11 @@ def effective_bytes(row: dict) -> int:
     return min(int(row["downloaded_bytes"]), int(expected * 0.999))
 
 
+def activity_bytes(row: dict) -> int:
+    """Bytes used only for activity/speed, without the 99.9% display clamp."""
+    return int(row.get("downloaded_bytes") or 0)
+
+
 def slices_for(root: Path) -> list[dict]:
     if not root.exists():
         return []
@@ -128,7 +133,7 @@ def render(state: dict, *, now: float, previous_time: float | None,
     current_bytes: dict[str, int] = {}
     speeds: dict[str, float] = {}
     for row in models:
-        current = effective_bytes(row)
+        current = activity_bytes(row)
         current_bytes[row["id"]] = current
         old = previous_bytes.get(row["id"], current)
         speeds[row["id"]] = max(current - old, 0) / dt if dt else 0.0
@@ -145,14 +150,14 @@ def render(state: dict, *, now: float, previous_time: float | None,
     print(
         f"TOTAL {bar(overall_pct)} {overall_pct:5.1f}%  "
         f"{gib_short(total_effective)}/{gib_short(total_expected)}  "
-        f"left {gib_short(remaining)}  speed {rate(global_speed)}  "
-        f"ETA {eta(remaining / global_speed if global_speed > 0 else None)}  done {completed}/{len(models)}"
+        f"left {gib_short(remaining)}  activity {rate(global_speed)}  "
+        f"ETA~ {eta(remaining / global_speed if global_speed > 0 else None)}  done {completed}/{len(models)}"
     )
     print()
 
+    finalizing_present = False
     for row in models:
         state_name = str(row["state"])
-        label = STATE_LABELS.get(state_name, state_name[:4])
         name = model_name(row["id"])
         expected = int(row["expected_bytes"])
         current = effective_bytes(row)
@@ -160,12 +165,29 @@ def render(state: dict, *, now: float, previous_time: float | None,
         speed_bps = speeds[row["id"]]
         remaining_model = max(expected - current, 0)
         worker = row.get("worker_pid")
+        finalizing = state_name != "COMPLETED" and pct >= 99.9
+        label = "FINAL" if finalizing else STATE_LABELS.get(state_name, state_name[:4])
+        finalizing_present = finalizing_present or finalizing
 
         if state_name == "COMPLETED":
-            print(f"{label}  {name:<18}  100.0%  {gib_short(expected):>8}")
+            print(f"{label:<5} {name:<18}  100.0%  {gib_short(expected):>8}")
+        elif finalizing:
+            if state_name == "DOWNLOADING":
+                print(
+                    f"{label:<5} {name:<18}   99.9%  "
+                    f"{gib_short(current):>7}/{gib_short(expected):<7}  "
+                    f"activity {rate(speed_bps):>8}  pid {worker or '-'}"
+                )
+            else:
+                extra = f"  error={row['last_error_category']}" if row.get("last_error_category") else ""
+                print(
+                    f"{label:<5} {name:<18}   99.9%  "
+                    f"{gib_short(current):>7}/{gib_short(expected):<7}  "
+                    f"waiting verification{extra}"
+                )
         elif state_name == "DOWNLOADING":
             print(
-                f"{label}  {name:<18}  {pct:5.1f}%  "
+                f"{label:<5} {name:<18}  {pct:5.1f}%  "
                 f"{gib_short(current):>7}/{gib_short(expected):<7}  "
                 f"{rate(speed_bps):>8}  ETA {eta(remaining_model / speed_bps if speed_bps > 0 else None):>6}  "
                 f"pid {worker or '-'}"
@@ -173,7 +195,7 @@ def render(state: dict, *, now: float, previous_time: float | None,
         else:
             extra = f"  error={row['last_error_category']}" if row.get("last_error_category") else ""
             print(
-                f"{label}  {name:<18}  {pct:5.1f}%  "
+                f"{label:<5} {name:<18}  {pct:5.1f}%  "
                 f"{gib_short(current):>7}/{gib_short(expected):<7}{extra}"
             )
 
@@ -189,7 +211,9 @@ def render(state: dict, *, now: float, previous_time: float | None,
                     short_path = short_path[:24] + "..." + short_path[-24:]
                 print(f"        {item['kind']:<7} {gib_short(item['bytes']):>7}  age {age/60:5.1f}m  {short_path}")
 
-    print("\nCtrl+C closes this view only. Downloads keep running.")
+    if finalizing_present:
+        print("\nFINAL = size boundary reached; waiting for downloader completion marker/verification.")
+    print("Ctrl+C closes this view only. Downloads keep running.")
     return current_bytes
 
 
