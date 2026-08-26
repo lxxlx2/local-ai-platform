@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from local_ai_control.services.generic_project_guarded import GuardedDirectGenericProjectQwenRunner
 from local_ai_control.services.generic_project_persisted import GenericPersistedStageRunner
 from local_ai_control.services.supervisor_contracts import StageResultStatus, WorkflowStage
 
@@ -35,6 +36,11 @@ class PreparationRepository:
         self.start_calls += 1
 
 
+class BrokenQuotaGuard:
+    def before(self):
+        raise ValueError("fixture quota parser failure")
+
+
 def test_invalid_execution_view_never_marks_execution_started():
     repository = PreparationRepository()
     context = SimpleNamespace(
@@ -52,3 +58,17 @@ def test_invalid_execution_view_never_marks_execution_started():
     assert result.metrics["category"] == "ValueError"
     assert result.metrics["execution_started"] is False
     assert repository.start_calls == 0
+
+
+def test_raw_quota_probe_value_error_is_normalized_before_agent_start():
+    runner = GuardedDirectGenericProjectQwenRunner(
+        enabled=True,
+        quota_guard=BrokenQuotaGuard(),
+    )
+
+    result = runner.run_task(None, "00000000-0000-4000-8000-000000000001")
+
+    assert result.status is StageResultStatus.BLOCKED
+    assert result.error == "CODEX_QUOTA_PRECHECK_UNAVAILABLE"
+    assert result.metrics["category"] == "ValueError"
+    assert result.metrics["codex_cli_invoked"] is False
