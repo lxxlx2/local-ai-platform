@@ -90,6 +90,22 @@ IMMUTABLE_GEMINI_PROFILE = {
     "search_grounding_required": False,
     "own_search_browser_layer": True,
 }
+IMMUTABLE_TTS_PROFILES = {
+    "qwen3-tts-base": {
+        "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+        "revision": "a6eb4f68e4b056f1215157bb696209bc82a6db48",
+        "local_dir": "/Users/jerson/AI/models/qwen3-tts-base-bf16",
+        "runtime": "MLX Audio 0.5.0", "role": "TTS_MAIN", "local": True,
+        "cloud_fallback": False,
+    },
+    "qwen3-tts-design": {
+        "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        "revision": "7d3824abff87e49756bb0f83fb5411de75d160c4",
+        "local_dir": "/Users/jerson/AI/models/qwen3-tts-voice-design-bf16",
+        "runtime": "MLX Audio 0.5.0", "role": "TTS_DESIGN", "local": True,
+        "cloud_fallback": False,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -179,9 +195,11 @@ class ModelRoleRegistry:
         if payload["runtime_isolation"] != IMMUTABLE_RUNTIME_ISOLATION or payload["policy"] != IMMUTABLE_POLICY:
             raise ValueError("immutable model safety policy mismatch")
         profiles=payload["profiles"]
-        if (not isinstance(profiles,dict) or set(profiles)!={"owner-qwen38-raw-q6k","gemini-free-review-chain"} or
+        expected_profiles={"owner-qwen38-raw-q6k","gemini-free-review-chain",*IMMUTABLE_TTS_PROFILES}
+        if (not isinstance(profiles,dict) or set(profiles)!=expected_profiles or
                 profiles.get("owner-qwen38-raw-q6k")!=IMMUTABLE_RAW_PROFILE or
-                profiles.get("gemini-free-review-chain")!=IMMUTABLE_GEMINI_PROFILE):
+                profiles.get("gemini-free-review-chain")!=IMMUTABLE_GEMINI_PROFILE or
+                any(profiles.get(name)!=value for name,value in IMMUTABLE_TTS_PROFILES.items())):
             raise ValueError("immutable provider profile mismatch")
         aliases=payload["production_aliases"]
         required={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING","STT_MAIN","TTS_MAIN","TTS_DESIGN","IMAGE_MAIN","VIDEO_MAIN","VIDEO_HIGH","EMBED","RERANK","RAW"}

@@ -7,8 +7,8 @@
     "VISION": {"profile": "local-qwen38", "status": "QUALIFIED"},
     "VIDEO_UNDERSTANDING": {"profile": "local-qwen38", "status": "REGISTERED_NOT_QUALIFIED"},
     "STT_MAIN": {"profile": "whisper-large-v3", "status": "REGISTERED_NOT_QUALIFIED"},
-    "TTS_MAIN": {"profile": "qwen3-tts-base", "status": "REGISTERED_NOT_QUALIFIED"},
-    "TTS_DESIGN": {"profile": "qwen3-tts-design", "status": "REGISTERED_NOT_QUALIFIED"},
+    "TTS_MAIN": {"profile": "qwen3-tts-base", "status": "QUALIFIED"},
+    "TTS_DESIGN": {"profile": "qwen3-tts-design", "status": "QUALIFIED"},
     "IMAGE_MAIN": {"profile": "flux2-klein", "status": "REGISTERED_NOT_QUALIFIED"},
     "VIDEO_MAIN": {"profile": "wan21-video", "status": "REGISTERED_NOT_QUALIFIED"},
     "VIDEO_HIGH": {"profile": "longcat-video", "status": "REGISTERED_NOT_QUALIFIED"},
@@ -35,6 +35,24 @@
     }
   },
   "profiles": {
+    "qwen3-tts-base": {
+      "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+      "revision": "a6eb4f68e4b056f1215157bb696209bc82a6db48",
+      "local_dir": "/Users/jerson/AI/models/qwen3-tts-base-bf16",
+      "runtime": "MLX Audio 0.5.0",
+      "role": "TTS_MAIN",
+      "local": true,
+      "cloud_fallback": false
+    },
+    "qwen3-tts-design": {
+      "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+      "revision": "7d3824abff87e49756bb0f83fb5411de75d160c4",
+      "local_dir": "/Users/jerson/AI/models/qwen3-tts-voice-design-bf16",
+      "runtime": "MLX Audio 0.5.0",
+      "role": "TTS_DESIGN",
+      "local": true,
+      "cloud_fallback": false
+    },
     "owner-qwen38-raw-q6k": {
       "repo": "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
       "artifact": "Qwen3.8-27B-Uncensored-Q6_K.gguf",

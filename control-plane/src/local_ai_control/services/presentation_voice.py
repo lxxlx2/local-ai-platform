@@ -9,6 +9,7 @@ import re
 import stat
 import tempfile
 import wave
+from array import array
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,6 +136,27 @@ def validate_wav(path: Path) -> tuple[int, float]:
     if rate < 8_000 or rate > 192_000 or not (0.1 <= duration <= 120.0):
         raise VoiceProfileError("VOICE_REFERENCE_INVALID")
     return rate, duration
+
+
+def validate_wav_quality(path: Path) -> dict:
+    """Qualification-only PCM quality checks; normal reads stay format-focused."""
+    rate, duration = validate_wav(path)
+    with wave.open(str(path), "rb") as wav:
+        if wav.getsampwidth() != 2:
+            raise VoiceProfileError("VOICE_REFERENCE_QUALIFICATION_FORMAT_UNSUPPORTED")
+        samples = array("h")
+        samples.frombytes(wav.readframes(wav.getnframes()))
+    if not samples:
+        raise VoiceProfileError("VOICE_REFERENCE_SILENT")
+    peak = max(abs(sample) for sample in samples) / 32768.0
+    rms = (sum(float(sample) ** 2 for sample in samples) / len(samples)) ** 0.5 / 32768.0
+    clipped = sum(1 for sample in samples if abs(sample) >= 32760)
+    if rms < 0.002 or peak >= 0.9998 or clipped:
+        raise VoiceProfileError("VOICE_REFERENCE_AUDIO_QUALITY_FAILED")
+    return {
+        "sample_rate": rate, "duration_seconds": duration,
+        "peak_ratio": round(peak, 6), "rms_ratio": round(rms, 6), "clipped_samples": clipped,
+    }
 
 
 class VoiceProfileStore:
