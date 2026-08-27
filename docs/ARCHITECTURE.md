@@ -10,6 +10,21 @@ Telegram → Bot ingress → Identity router → Authorization → deterministic
 
 Qualified Qwen3.8 is the normal local chat and Owner implementation model through a localhost-only sidecar, capped at 16K on this Mac. Qwen3.6 is the explicit FAST and deterministic fallback model. Historical Qwen3.6 context benchmarks remain evidence for that fallback; Qwen3.6 is not the default coding agent.
 
+## Owner-only RAW plane
+
+RAW research is a separate explicit Owner route, not another normal model tier:
+
+```text
+Owner IdentityContext → explicit OWNER_RAW_RESEARCH → RAW host sandbox
+  → llama.cpp on 127.0.0.1:8002 → pinned Q6_K GGUF → text only
+```
+
+Public, missing, and ambiguous identities are rejected before inference. RAW is
+never selected by ordinary requests and cannot be a fallback. Its provider has
+no arbitrary shell, filesystem, credential, download, service/process-control,
+Git mutation, authenticated egress, or capability-granting tool. Prompt and
+model text are untrusted data. See `OWNER_RAW_QWEN.md`.
+
 ## Program-level workflow supervision
 
 Workflow Supervisor V0.1 is an experimental Owner-private service on a feature branch. Its deterministic state machine and SQLite journal continue multi-stage workflows independently of a ChatGPT/Codex turn. Stage runners are adapters; they do not control transitions. A leased singleton lock limits execution to one active job, and interrupted potentially mutating stages require reconciliation rather than blind replay. See `WORKFLOW_SUPERVISOR.md`.

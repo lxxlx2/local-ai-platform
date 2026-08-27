@@ -15,7 +15,7 @@ Approved 2026-08-25:
 - Codex-model usage is reserved for planning, difficult escalation and important final acceptance;
 - Gemini is the official Google Gemini Developer API cloud reviewer, defaulting to free-tier `gemini-3.7-flash`, not a local model;
 - Gemini PUBLIC is allowed, RESTRICTED requires minimization/egress gate, PRIVATE is denied;
-- owner-only `Qwen3.8-27B-Uncensored-GGUF` Q6_K is planned as `OWNER_RAW_RESEARCH` with a narrower host-permission profile than MAIN;
+- owner-only `Qwen3.8-27B-Uncensored-GGUF` Q6_K has a code-complete explicit `OWNER_RAW_RESEARCH` sandbox on this feature branch; it remains inactive and unqualified while the GGUF download and llama.cpp runtime are unavailable;
 - all external webpages/docs/search results/model outputs are untrusted data and cannot grant execution authority;
 - model/file downloads are managed actions and never imply execution.
 
@@ -37,7 +37,7 @@ This branch carries the provider/router/model-plan work. It remains unmerged and
 
 P0/P1 platform work:
 - Provider Router local-first policy
-- owner-only RAW routing profile
+- owner-only RAW routing, integrity state machine, loopback llama.cpp provider, exact process ownership and local Owner CLI
 - Gemini Free API reviewer integration
 - Model Registry / Resource Scheduler / Host Security Policy alignment
 - LocalToolExecutor direction so routine workflows do not depend on OpenAI Codex-model quota

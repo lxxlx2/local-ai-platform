@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -38,11 +39,15 @@ class ModelProfile:
     max_qualified_context_tokens: int | None = None
 
 
-REGISTRY_PATH = Path("/Users/jerson/AI/config/model-registry-v0.1.json")
+REGISTRY_PATH = Path(os.environ.get(
+    "LOCAL_AI_MODEL_REGISTRY",
+    str(Path(__file__).resolve().parents[4] / "config/model-registry-v0.1.json"),
+))
 ELIGIBLE_STATUSES = frozenset({"QUALIFIED", "VALIDATED"})
-ALL_STATUSES = ELIGIBLE_STATUSES | {"REGISTERED_NOT_QUALIFIED"}
+ALL_STATUSES = ELIGIBLE_STATUSES | {"REGISTERED_NOT_QUALIFIED", "REGISTERED_NOT_DOWNLOADED"}
 IMMUTABLE_RUNTIME_ISOLATION = {
     "qwen38": "/Users/jerson/AI/runtime/qwen38-venv",
+    "owner_raw": "/Users/jerson/AI/runtime/owner-raw",
     "audio": "/Users/jerson/AI/runtime/audio-venv",
     "image": "/Users/jerson/AI/runtime/image-venv",
     "video": "/Users/jerson/AI/runtime/video-venv",
@@ -53,6 +58,37 @@ IMMUTABLE_POLICY = {
     "registered_is_not_ready": True,
     "raw_owner_only": True,
     "public_privilege_expansion": False,
+    "routine_codex_model_quota": False,
+    "gemini_free_by_default": True,
+    "gemini_private_egress": False,
+    "silent_paid_upgrade": False,
+}
+
+IMMUTABLE_RAW_PROFILE = {
+    "repo": "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
+    "artifact": "Qwen3.8-27B-Uncensored-Q6_K.gguf",
+    "revision": "dee0a3164d9e11bbbebf5b63f52ba99443d14fc3",
+    "sha256": "a50aa1478295b58ee3d93eabe02c17f6d5fcf6cb787fd8a0ab07ac629a46cae6",
+    "runtime": "llama.cpp-metal",
+    "role": "OWNER_RAW_RESEARCH",
+    "public": False,
+    "auto_download": False,
+    "shell": False,
+    "credential_access": False,
+    "document_command_execution": False,
+}
+IMMUTABLE_GEMINI_PROFILE = {
+    "models": ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"],
+    "provider": "google-gemini-developer-api",
+    "tier": "FREE",
+    "local": False,
+    "billing_auto_upgrade": False,
+    "role": "CLOUD_REVIEWER_MULTIMODAL",
+    "thinking_level": "low",
+    "fallback_on": ["TIMEOUT", "DEADLINE_EXCEEDED", "RATE_LIMIT", "MODEL_UNAVAILABLE"],
+    "free_tier_data_use_warning": True,
+    "search_grounding_required": False,
+    "own_search_browser_layer": True,
 }
 
 
@@ -89,9 +125,14 @@ def _profile(pid, name, provider, model_id, role, *, precision=None, owner_only=
 
 DEFAULT_MODELS = (
     QWEN36, QWEN38,
-    _profile("owner-qwen38-raw", "Qwen3.8-27B RAW 8-bit", "local-mlx-vlm",
-             "orcarouter/Qwen3.8-27B-Uncensored-MLX#8-bit", ModelRole.RAW,
-             precision="8bit", owner_only=True, runtime_env="/Users/jerson/AI/runtime/qwen38-venv", expected_memory_gib=34),
+    ModelProfile(
+        "owner-qwen38-raw-q6k", "Qwen3.8-27B Uncensored Q6_K", "local-llama-cpp-raw",
+        "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/Qwen3.8-27B-Uncensored-Q6_K.gguf",
+        frozenset({ModelRole.RAW}), "LOCAL", "NONE", precision="Q6_K", owner_only=True,
+        runtime_env="/Users/jerson/AI/runtime/owner-raw",
+        local_path="/Users/jerson/AI/models/qwen38-owner-raw-q6k/Qwen3.8-27B-Uncensored-Q6_K.gguf",
+        expected_memory_gib=30,
+    ),
     _profile("whisper-large-v3", "Whisper large-v3 MLX", "local-mlx-audio",
              "mlx-community/whisper-large-v3-mlx", ModelRole.STT_MAIN,
              runtime_env="/Users/jerson/AI/runtime/audio-venv", expected_memory_gib=6),
@@ -133,27 +174,47 @@ class ModelRoleRegistry:
             payload=json.loads(path.read_text())
         except (OSError,json.JSONDecodeError) as exc:
             raise ValueError("invalid model registry JSON") from exc
-        if set(payload)!={"schema_version","production_aliases","runtime_isolation","policy"} or payload["schema_version"]!="0.1":
+        if set(payload)!={"schema_version","production_aliases","profiles","runtime_isolation","policy"} or payload["schema_version"]!="0.1":
             raise ValueError("invalid model registry schema")
         if payload["runtime_isolation"] != IMMUTABLE_RUNTIME_ISOLATION or payload["policy"] != IMMUTABLE_POLICY:
             raise ValueError("immutable model safety policy mismatch")
+        profiles=payload["profiles"]
+        if (not isinstance(profiles,dict) or set(profiles)!={"owner-qwen38-raw-q6k","gemini-free-review-chain"} or
+                profiles.get("owner-qwen38-raw-q6k")!=IMMUTABLE_RAW_PROFILE or
+                profiles.get("gemini-free-review-chain")!=IMMUTABLE_GEMINI_PROFILE):
+            raise ValueError("immutable provider profile mismatch")
         aliases=payload["production_aliases"]
         required={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING","STT_MAIN","TTS_MAIN","TTS_DESIGN","IMAGE_MAIN","VIDEO_MAIN","VIDEO_HIGH","EMBED","RERANK","RAW"}
-        if not isinstance(aliases,dict) or set(aliases)!=required:
+        provider_aliases={"CLOUD_REVIEW","PREMIUM_PLAN_ACCEPT"}
+        if not isinstance(aliases,dict) or set(aliases)!=required|provider_aliases:
             raise ValueError("invalid production aliases")
-        return self._validate_aliases(aliases)
+        raw=aliases["RAW"]
+        if (raw.get("profile")!="owner-qwen38-raw-q6k" or raw.get("status") not in ALL_STATUSES or
+                raw.get("owner_only") is not True or raw.get("host_permission_profile")!="OWNER_RAW_RESEARCH" or
+                set(raw)!={"profile","status","owner_only","host_permission_profile"}):
+            raise ValueError("RAW alias safety metadata mismatch")
+        if aliases["CLOUD_REVIEW"].get("profile")!="gemini-free-review-chain":
+            raise ValueError("cloud review alias mismatch")
+        if aliases["PREMIUM_PLAN_ACCEPT"].get("profile")!="openai-codex-premium":
+            raise ValueError("premium alias mismatch")
+        return self._validate_aliases({name:value for name,value in aliases.items() if name in required})
 
     def _validate_aliases(self, raw_aliases):
         result={}
         for role_name, raw in raw_aliases.items():
             try: role=ModelRole(role_name)
             except ValueError as exc: raise ValueError("unknown model role") from exc
-            if not isinstance(raw,dict) or not {"profile","status"} <= set(raw) or set(raw)-{"profile","status","max_context_tokens"}:
+            allowed={"profile","status","max_context_tokens"}
+            if role is ModelRole.RAW:
+                allowed|={"owner_only","host_permission_profile"}
+            if not isinstance(raw,dict) or not {"profile","status"} <= set(raw) or set(raw)-allowed:
                 raise ValueError("malformed model alias")
             profile_id=raw["profile"]; status=raw["status"]
             if not isinstance(profile_id,str) or profile_id not in self.models or status not in ALL_STATUSES:
                 raise ValueError("unknown profile or status")
             profile=self.models[profile_id]
+            if role is ModelRole.RAW and (raw.get("owner_only") is not True or raw.get("host_permission_profile")!="OWNER_RAW_RESEARCH"):
+                raise ValueError("RAW alias safety metadata mismatch")
             if role not in profile.roles:
                 raise ValueError("profile does not support role")
             maximum=raw.get("max_context_tokens")

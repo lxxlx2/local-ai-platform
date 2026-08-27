@@ -5,7 +5,7 @@ import pytest
 
 from local_ai_control.services.models import ModelRegistry, ModelRole, ModelRouter
 
-SOURCE = Path("/Users/jerson/AI/config/model-registry-v0.1.json")
+SOURCE = Path(__file__).resolve().parents[2] / "config/model-registry-v0.1.json"
 
 
 def registry_with(tmp_path, **changes):
@@ -52,10 +52,22 @@ def test_config_cannot_weaken_immutable_safety_metadata(tmp_path):
     path=tmp_path/"bad.json"; path.write_text(json.dumps(payload))
     with pytest.raises(ValueError): ModelRegistry(config_path=path)
     registry=ModelRegistry()
-    with pytest.raises(PermissionError): registry.require("owner-qwen38-raw",owner=False)
-    raw=registry.require("owner-qwen38-raw",owner=True)
-    assert raw.owner_only and raw.model_id=="orcarouter/Qwen3.8-27B-Uncensored-MLX#8-bit"
+    with pytest.raises(PermissionError): registry.require("owner-qwen38-raw-q6k",owner=False)
+    raw=registry.require("owner-qwen38-raw-q6k",owner=True)
+    assert raw.owner_only and raw.model_id.endswith("/Qwen3.8-27B-Uncensored-Q6_K.gguf")
     with pytest.raises(LookupError): registry.require("attacker/repo",owner=True)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda payload: payload["profiles"]["owner-qwen38-raw-q6k"].update(shell=True),
+    lambda payload: payload["profiles"]["owner-qwen38-raw-q6k"].update(sha256="0" * 64),
+    lambda payload: payload["profiles"].update({"attacker/repo": {"role": "RAW"}}),
+    lambda payload: payload["production_aliases"]["RAW"].update(owner_only=False),
+])
+def test_raw_registry_injection_or_safety_weakening_fails_closed(tmp_path, mutation):
+    payload=json.loads(SOURCE.read_text()); mutation(payload)
+    path=tmp_path/"unsafe-raw.json"; path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError): ModelRegistry(config_path=path)
 
 
 def test_chat_falls_back_when_main_missing_unhealthy_or_resource_denied(tmp_path):
@@ -69,12 +81,15 @@ def test_chat_falls_back_when_main_missing_unhealthy_or_resource_denied(tmp_path
 def test_every_production_role_has_exact_future_eligibility_without_repo_injection(tmp_path):
     source=json.loads(SOURCE.read_text())
     roles=set(source["production_aliases"])
-    assert roles=={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING","STT_MAIN","TTS_MAIN",
-                   "TTS_DESIGN","IMAGE_MAIN","VIDEO_MAIN","VIDEO_HIGH","EMBED","RERANK","RAW"}
-    for role_name,configured in source["production_aliases"].items():
+    model_roles={"MAIN","FAST","FALLBACK","VISION","VIDEO_UNDERSTANDING","STT_MAIN","TTS_MAIN",
+                 "TTS_DESIGN","IMAGE_MAIN","VIDEO_MAIN","VIDEO_HIGH","EMBED","RERANK","RAW"}
+    assert roles==model_roles|{"CLOUD_REVIEW","PREMIUM_PLAN_ACCEPT"}
+    for role_name in model_roles:
+        configured=source["production_aliases"][role_name]
         payload=json.loads(SOURCE.read_text())
         payload["production_aliases"][role_name]={"profile":configured["profile"],"status":"QUALIFIED"}
         if role_name=="MAIN": payload["production_aliases"][role_name]["max_context_tokens"]=16384
+        if role_name=="RAW": payload["production_aliases"][role_name].update(owner_only=True,host_permission_profile="OWNER_RAW_RESEARCH")
         path=tmp_path/f"{role_name}.json"; path.write_text(json.dumps(payload))
         registry=ModelRegistry(config_path=path)
         eligible=registry.eligible(ModelRole(role_name))
