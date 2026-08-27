@@ -85,9 +85,18 @@ assert p["resume_state"] == "REVIEW_RESULT_PENDING", p
 assert p.get("patch_sha256"), p
 assert p.get("review_work_unit_id"), p
 assert "gemini_advisory" in p, p
-assert p["gemini_advisory"].get("status") == "READY", p
+status=p["gemini_advisory"].get("status")
+allowed={
+    "READY",
+    "UNAVAILABLE_GeminiTimeoutError",
+    "UNAVAILABLE_GeminiRateLimitError",
+    "UNAVAILABLE_GeminiModelUnavailableError",
+}
+assert status in allowed, p
 print("REVIEW_BOUNDARY_PASS")
-print("gemini_advisory_status=READY")
+print(f"gemini_advisory_status={status}")
+if status != "READY":
+    print("gemini_advisory_transient_unavailable=NON_BLOCKING")
 PY
 
 WORKTREE=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["worktree"])' "$SUBMIT_JSON")
@@ -110,7 +119,7 @@ fi
 [[ -n $(git -C "$WORKTREE" status --porcelain) ]]
 
 printf '[6/8] Run deterministic fixture test\n'
-(cd "$WORKTREE" && PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -q)
+(cd "$WORKTREE" && PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -q -p no:cacheprovider)
 
 printf '\nReview the small deterministic qualification patch above.\n'
 printf 'Approve this qualification candidate and continue through Security/Git Gate? [y/N] '
@@ -150,6 +159,7 @@ printf 'candidate_uncommitted=PASS\n'
 printf 'protected_test_unchanged=PASS\n'
 printf 'owner_review_binding=PASS\n'
 printf 'local_route_attestation=ENFORCED\n'
+printf 'gemini_advisory_policy=NON_BLOCKING_TRANSIENTS\n'
 printf 'codex_quota_telemetry=OUT_OF_BAND_ONLY\n'
 printf 'codex_cli_invoked=NO\n'
 printf 'codex_app_server_invoked=NO\n'
