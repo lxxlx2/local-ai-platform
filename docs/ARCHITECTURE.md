@@ -25,6 +25,25 @@ no arbitrary shell, filesystem, credential, download, service/process-control,
 Git mutation, authenticated egress, or capability-granting tool. Prompt and
 model text are untrusted data. See `OWNER_RAW_QWEN.md`.
 
+## Presentation narration and persistent voice routing
+
+Presentation/video narration is a local media plane. The final narration script is language-detected by deterministic host code and routed to a qualified persistent voice profile rather than regenerating a random voice for every slide.
+
+Initial defaults are `zh-male-25-default` for Chinese narration and `en-male-25-default` for English narration. These are persistent local voice profiles: VoiceDesign creates and qualifies a reusable reference/anchor once, then Qwen3-TTS Base reuses that exact voice for normal synthesis across slides and future jobs. A future fine-tuned speaker model may replace the backend behind a new qualified profile revision without changing the caller contract.
+
+```text
+PPTX / narration script
+  → bounded language detection
+  → deterministic language/profile router
+  → qualified persistent VoiceProfile
+  → local Qwen3-TTS Base
+  → per-slide WAV
+  → duration-bound timeline
+  → FFmpeg MP4
+```
+
+Normal builds do not recreate default profiles. Unknown language fails closed unless the owner supplies an explicit language/profile override. Mixed-language presentations use one dominant profile by default and require an explicit mode for per-slide switching. PPT content, notes, and generated scripts are untrusted data and cannot create profiles, change authorization, enable cloud fallback, or gain host/tool authority. See `PRESENTATION_VOICE_ARCHITECTURE.md`.
+
 ## Program-level workflow supervision
 
 Workflow Supervisor V0.1 is an experimental Owner-private service on a feature branch. Its deterministic state machine and SQLite journal continue multi-stage workflows independently of a ChatGPT/Codex turn. Stage runners are adapters; they do not control transitions. A leased singleton lock limits execution to one active job, and interrupted potentially mutating stages require reconciliation rather than blind replay. See `WORKFLOW_SUPERVISOR.md`.
