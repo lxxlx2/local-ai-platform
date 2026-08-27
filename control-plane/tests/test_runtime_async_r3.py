@@ -187,7 +187,7 @@ def test_validation_and_authorization_rejections_do_not_fail_over(tmp_path,rejec
 
 
 def unqualified_main_registry(tmp_path):
-    payload=json.loads(Path("/Users/jerson/AI/config/model-registry-v0.1.json").read_text())
+    payload=json.loads((Path(__file__).resolve().parents[2]/"config/model-registry-v0.1.json").read_text())
     payload["production_aliases"]["MAIN"]={"profile":"local-qwen38","status":"REGISTERED_NOT_QUALIFIED"}
     path=tmp_path/"registry.json"; path.write_text(json.dumps(payload)); return ModelRegistry(config_path=path)
 

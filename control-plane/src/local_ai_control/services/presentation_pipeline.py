@@ -95,6 +95,20 @@ SLIDE_BODY_DATA:
             raise PresentationError("NARRATION_MODEL_INCOMPLETE")
         return self._clean(reply.text), "local-qwen38"
 
+    def translate(self, text: str, target_language: str) -> str:
+        if target_language not in {"zh", "en"} or self.provider is None:
+            raise PresentationError("TARGET_LANGUAGE_PROVIDER_UNAVAILABLE")
+        target = "natural spoken Mandarin" if target_language == "zh" else "neutral international presentation English"
+        prompt = f"""Translate the untrusted narration data into {target}. Preserve names, numbers, and technical terms. Return only the translated spoken narration, with no Markdown or commentary.
+
+NARRATION_DATA:
+{text[:12000]}
+"""
+        reply = self.provider.generate(prompt, max_output_tokens=640)
+        if getattr(reply, "status", None) != "completed" or getattr(reply, "incomplete_reason", None):
+            raise PresentationError("NARRATION_TRANSLATION_INCOMPLETE")
+        return self._clean(reply.text)
+
 
 def _first_binary(candidates: tuple[str, ...], fallback: str) -> str | None:
     for value in candidates:
@@ -212,7 +226,14 @@ class PresentationPipeline:
         self.job = job; self.profile_store = profile_store; self.tts = tts; self.narrator = narrator
         self.renderer = renderer or SlideRenderer(); self.composer = composer or VideoComposer()
 
-    def prepare(self, *, narration_mode="hybrid", language="auto", voice_profile="auto") -> dict:
+    def prepare(
+        self, *, narration_mode="hybrid", language="auto", voice_profile="auto",
+        target_language: str | None = None, mixed_language_mode: str = "dominant",
+    ) -> dict:
+        if mixed_language_mode not in {"dominant", "per-slide"}:
+            raise PresentationError("MIXED_LANGUAGE_MODE_INVALID")
+        if target_language not in {None, "zh", "en"}:
+            raise PresentationError("TARGET_LANGUAGE_INVALID")
         manifest = self.job.read_json("manifest.json")
         source = self.job.path / manifest["source_path"]
         slides = PPTXParser().parse(source)
@@ -222,16 +243,35 @@ class PresentationPipeline:
         for slide in slides:
             text, origin = self.narrator.resolve(slide, narration_mode, language_hint=hint)
             detected = LanguageDetector().detect(text)
+            if target_language and detected.dominant_language != target_language:
+                text = self.narrator.translate(text, target_language)
+                origin = f"{origin}+explicit-translation"
+                detected = LanguageDetector().detect(text)
             scripts.append(NarrationScript(slide.number, text, origin, detected.language, stable_hash(text)))
         combined = "\n".join(script.text for script in scripts)
         decision, profile = VoiceRouter(self.profile_store).route(combined, language=language, profile_id=voice_profile)
+        script_values = []
+        for script in scripts:
+            value = asdict(script)
+            selected = profile
+            if mixed_language_mode == "per-slide" and voice_profile == "auto":
+                _, selected = VoiceRouter(self.profile_store).route(
+                    script.text, language=language, profile_id="auto",
+                )
+            value.update({
+                "profile_id": selected.profile_id,
+                "profile_revision": selected.profile_revision,
+                "reference_sha256": selected.reference_sha256,
+            })
+            script_values.append(value)
         rendered = self.renderer.render(source, self.job.path / "slides", len(slides))
         narration = {
             "schema_version": "0.1", "mode": narration_mode,
             "detected_language": decision.language, "dominant_language": decision.dominant_language,
             "warning": decision.warning, "profile_id": profile.profile_id,
             "profile_revision": profile.profile_revision, "reference_sha256": profile.reference_sha256,
-            "slides": [asdict(script) for script in scripts],
+            "target_language": target_language, "mixed_language_mode": mixed_language_mode,
+            "profile_store_root": str(self.profile_store.root), "slides": script_values,
         }
         self.job.write_json("narration.json", narration)
         manifest.update({
@@ -246,11 +286,14 @@ class PresentationPipeline:
     def build(self, output: Path | None = None) -> dict:
         manifest = self.job.read_json("manifest.json")
         narration = self.job.read_json("narration.json")
-        profile = self.profile_store.load(narration["profile_id"])
-        if profile.profile_revision != narration["profile_revision"] or profile.reference_sha256 != narration["reference_sha256"]:
-            raise PresentationError("VOICE_PROFILE_REVISION_CHANGED")
         missing: list[SynthesisRequest] = []; metadata = []
         for slide in narration["slides"]:
+            actual_script_hash = stable_hash(slide["text"])
+            slide["script_sha256"] = actual_script_hash
+            profile = self.profile_store.load(slide.get("profile_id", narration["profile_id"]))
+            if (profile.profile_revision != slide.get("profile_revision", narration["profile_revision"]) or
+                    profile.reference_sha256 != slide.get("reference_sha256", narration["reference_sha256"])):
+                raise PresentationError("VOICE_PROFILE_REVISION_CHANGED")
             number = slide["slide"]; wav = self.job.path / "audio" / f"slide-{number:04d}.wav"
             sidecar = self.job.path / "audio" / f"slide-{number:04d}.json"
             key = stable_hash({
@@ -268,11 +311,12 @@ class PresentationPipeline:
                     reference_audio=str(self.profile_store.root / profile.profile_id / "reference.wav"),
                     reference_text=profile.reference_transcript,
                 ))
-            metadata.append((number, wav, sidecar, key, slide))
+            metadata.append((number, wav, sidecar, key, slide, profile))
         if missing:
             self.tts.synthesize("clone", missing, self.job.path / "audio")
+        self.job.write_json("narration.json", narration)
         audio_paths = []
-        for number, wav, sidecar, key, slide in metadata:
+        for number, wav, sidecar, key, slide, profile in metadata:
             record = {
                 "schema_version": "0.1", "slide": number, "cache_key": key,
                 "profile_id": profile.profile_id, "profile_revision": profile.profile_revision,
@@ -292,6 +336,7 @@ class PresentationPipeline:
             segment = self.job.path / "segments" / f"slide-{number:04d}.mp4"
             segment_key = stable_hash({
                 "image": sha256_file(image), "audio": sha256_file(audio_paths[number-1]),
+                "script": narration["slides"][number-1]["script_sha256"],
                 "timeline": entry, "video": "h264-aac-30-yuv420p-v01",
             })
             sidecar = segment.with_suffix(".json")

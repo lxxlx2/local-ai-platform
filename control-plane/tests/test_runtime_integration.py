@@ -98,7 +98,7 @@ def test_unknown_or_unowned_resident_process_is_never_killed_or_overlapped():
 def test_runtime_conflict_fails_closed_and_unqualified_main_uses_fast(tmp_path):
     runtime,_,_,_=factory(main=True,fast=True)
     with pytest.raises(HeavyModelConflict): runtime.state()
-    payload=json.loads(Path("/Users/jerson/AI/config/model-registry-v0.1.json").read_text())
+    payload=json.loads((Path(__file__).resolve().parents[2]/"config/model-registry-v0.1.json").read_text())
     payload["production_aliases"]["MAIN"]={"profile":"local-qwen38","status":"REGISTERED_NOT_QUALIFIED"}
     path=tmp_path/"registry.json"; path.write_text(json.dumps(payload))
     unqualified=ModelRegistry(config_path=path)

@@ -14,6 +14,7 @@ MODELS = {
     "design": Path("/Users/jerson/AI/models/qwen3-tts-voice-design-bf16"),
     "clone": Path("/Users/jerson/AI/models/qwen3-tts-base-bf16"),
 }
+LOCAL_STT_MODEL = Path("/Users/jerson/AI/models/whisper-large-v3-mlx")
 
 
 def fail(message: str) -> None:
@@ -83,11 +84,22 @@ def main() -> int:
                     fail("TTS_REFERENCE_DENIED")
             except OSError:
                 fail("TTS_REFERENCE_DENIED")
-            if not isinstance(item["reference_text"], str) or not item["reference_text"].strip():
-                fail("TTS_REFERENCE_TEXT_REQUIRED")
             kwargs["ref_audio"] = str(reference)
-            kwargs["ref_text"] = item["reference_text"]
-            kwargs["stt_model"] = None
+            if isinstance(item["reference_text"], str) and item["reference_text"].strip():
+                kwargs["ref_text"] = item["reference_text"]
+                kwargs["stt_model"] = None
+            else:
+                marker = LOCAL_STT_MODEL / ".local-ai-download-complete.json"
+                try:
+                    stt_marker = json.loads(marker.read_text("utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    stt_marker = {}
+                if (LOCAL_STT_MODEL.is_symlink() or
+                        stt_marker.get("repo") != "mlx-community/whisper-large-v3-mlx" or
+                        stt_marker.get("revision") != "49e6aa286ad60c14352c404340ded53710378a11"):
+                    fail("LOCAL_STT_REFERENCE_TRANSCRIPTION_UNAVAILABLE")
+                kwargs["ref_text"] = None
+                kwargs["stt_model"] = str(LOCAL_STT_MODEL)
         generate_audio(**kwargs)
         if not output.is_file() or output.stat().st_size < 100:
             fail(f"TTS_OUTPUT_MISSING:{index}")

@@ -196,8 +196,16 @@ class DefaultVoiceBootstrap:
                 rate, duration, "GENERATED_NOT_QUALIFIED", None,
             )
             self.store.save(candidate, reference, overwrite=replace_existing)
+        return self.qualify(profile_id)
+
+    def qualify(self, profile_id: str) -> VoiceProfile:
+        if profile_id not in DEFAULT_VOICES:
+            raise VoiceProfileError("DEFAULT_VOICE_ID_INVALID")
+        spec = DEFAULT_VOICES[profile_id]
         # A real Base-clone smoke is the deterministic machine qualification gate.
         candidate = self.store.load(profile_id, require_qualified=False)
+        if candidate.qualification_status == "QUALIFIED":
+            return candidate
         profile_dir = self.store.root / profile_id
         qualification = profile_dir / ".qualification.wav"
         self.runtime.synthesize("clone", [SynthesisRequest(

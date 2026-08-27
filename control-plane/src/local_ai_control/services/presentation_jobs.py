@@ -112,6 +112,10 @@ class PPTXParser:
             raise PresentationError("PPTX_SIZE_INVALID")
         try:
             with zipfile.ZipFile(path) as archive:
+                members = archive.infolist()
+                if (len(members) > 20_000 or sum(item.file_size for item in members) > 500 * 1024 * 1024 or
+                        any(item.file_size > 100 * 1024 * 1024 for item in members)):
+                    raise PresentationError("PPTX_EXPANSION_LIMIT_EXCEEDED")
                 names = {_safe_member(name) for name in archive.namelist()}
                 if "ppt/presentation.xml" not in names:
                     raise PresentationError("PPTX_MANIFEST_MISSING")

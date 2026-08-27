@@ -1,6 +1,6 @@
 # Presentation voice architecture
 
-Status: architecture contract for the feature branch. Implementation may lag this document until the presentation-video milestone is qualified.
+Status: implemented and locally qualified on the feature branch on 2026-08-28.
 
 ## Goal
 
@@ -171,3 +171,48 @@ Initial qualification must cover at least:
 - generated WAV files are valid and non-empty;
 - profile assets never enter Git;
 - no cloud TTS fallback occurs.
+
+## V0.1 implementation and Owner workflow
+
+The implementation is in `local_ai_control.services.presentation_*` with a
+narrow Owner CLI at `control-plane/scripts/presentation-video.sh`. Private
+profiles are stored under `/Users/jerson/AI/runtime/voice-profiles/`; private
+jobs are stored under `/Users/jerson/AI/runtime/presentation-jobs/`. Both roots
+and their generated WAV, PNG, SRT, JSON, and MP4 artifacts are outside Git.
+
+One-time default bootstrap:
+
+```text
+/Users/jerson/AI/control-plane/scripts/presentation-video.sh voice create-defaults
+```
+
+Normal automatic build:
+
+```text
+/Users/jerson/AI/control-plane/scripts/presentation-video.sh presentation build \
+  --input "/absolute/path/to/file.pptx" \
+  --narration hybrid \
+  --language auto \
+  --voice-profile auto \
+  --output "/absolute/path/to/presentation.mp4"
+```
+
+The editable workflow is `presentation prepare`, inspect/edit the private
+`narration.json`, then `presentation resume --job-id ...`. Script hashes are
+recomputed from the edited text; only affected audio and video segments are
+regenerated. A profile revision change invalidates dependent audio but not the
+rendered slides. Translation happens only with explicit `--target-language`.
+
+V0.1 uses fixed, shell-free local invocations: LibreOffice converts PPTX to
+PDF, pdftoppm renders pages, MLX Audio 0.5.0 runs pinned local Qwen3-TTS models,
+and FFmpeg emits H.264/AAC 30 fps yuv420p MP4. There is no cloud fallback and
+no automatic model download. If system dependencies are absent, install them
+explicitly with `brew install --cask libreoffice` and `brew install ffmpeg`.
+
+Qualification evidence used a deterministic three-slide English PPTX. Local
+Qwen3.8 produced three scripts, all routed to the single qualified
+`en-male-25-default` revision 1 reference; Qwen3-TTS Base generated three real
+WAV files; LibreOffice rendered three 1920x1080 slides; and FFmpeg produced a
+36.254-second H.264/AAC MP4 against a 36.210-second duration timeline. An
+unchanged resume preserved all WAV hashes and modification times. The source
+PPTX hash was unchanged.
