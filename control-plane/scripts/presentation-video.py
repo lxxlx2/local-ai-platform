@@ -20,6 +20,11 @@ from local_ai_control.services.presentation_voice import (
     validate_wav_quality,
 )
 from local_ai_control.services.qwen38_runtime import Qwen38Provider
+from local_ai_control.services.media_workflow import (
+    CompletionMode, EvidenceIntake, IntakeMode, MediaWorkflowState, Requirements,
+    RequirementsStore, new_media_workspace,
+)
+from local_ai_control.services.media_production import LocalScriptGenerator, MediaPreparationService, ScriptParser
 
 
 RUNTIME_ROOT = Path("/Users/jerson/AI/runtime/presentation-jobs")
@@ -59,10 +64,10 @@ def owner_reference_profile(job: PresentationJob, source: Path, language: str) -
     return store, profile_id
 
 
-def pipeline_for(job: PresentationJob, *, profile_store: VoiceProfileStore | None = None) -> PresentationPipeline:
+def pipeline_for(job: PresentationJob, *, profile_store: VoiceProfileStore | None = None, narrator=None) -> PresentationPipeline:
     return PresentationPipeline(
         job, profile_store=profile_store or VoiceProfileStore(PROFILE_ROOT), tts=runtime(),
-        narrator=NarrationResolver(Qwen38Provider(timeout=180)),
+        narrator=narrator or NarrationResolver(Qwen38Provider(timeout=180)),
     )
 
 
@@ -80,7 +85,17 @@ def prepare(args) -> dict:
         if reference_language not in {"zh", "en"}:
             raise ValueError("VOICE_REFERENCE_LANGUAGE_OVERRIDE_REQUIRED")
         store, profile_id = owner_reference_profile(job, Path(args.voice_reference), reference_language)
-    narration = pipeline_for(job, profile_store=store).prepare(
+    narrator = None
+    if getattr(args, "script_file", None):
+        document = ScriptParser().parse(Path(args.script_file).read_text("utf-8"), language=args.language)
+        values = iter(scene.narration for scene in document.scenes)
+        class FileNarrator:
+            def resolve(self, slide, mode, *, language_hint="auto"):
+                try: return next(values), "owner-script"
+                except StopIteration as exc: raise ValueError("SCRIPT_SCENE_COUNT_MISMATCH") from exc
+            def translate(self, text, target_language): return NarrationResolver(Qwen38Provider(timeout=180)).translate(text,target_language)
+        narrator = FileNarrator()
+    narration = pipeline_for(job, profile_store=store, narrator=narrator).prepare(
         narration_mode=args.narration, language=args.language, voice_profile=profile_id,
         target_language=args.target_language, mixed_language_mode=args.mixed_language_mode,
     )
@@ -141,6 +156,32 @@ def presentation_command(args) -> int:
     raise ValueError("PRESENTATION_ACTION_INVALID")
 
 
+def media_command(args) -> int:
+    if args.media_action != "prepare": raise ValueError("MEDIA_ACTION_INVALID")
+    provided = sum(bool(value) for value in (args.script_file,args.brief_file,args.url))
+    if provided != 1: raise ValueError("MEDIA_SOURCE_EXACTLY_ONE_REQUIRED")
+    mode = IntakeMode.LINKS if args.url else IntakeMode.DIRECT_BRIEF
+    workspace = new_media_workspace(args.task, "cli-owner", intake_mode=mode,
+                                    completion_mode=CompletionMode(args.completion_mode))
+    evidence=[]; script_text=None; brief_text=None
+    if args.script_file:
+        script_text=Path(args.script_file).read_text("utf-8")
+        evidence.append({"source":"owner-script","trust_label":"OWNER_PROVIDED"})
+    elif args.brief_file:
+        brief_text=Path(args.brief_file).read_text("utf-8")
+        evidence.append(EvidenceIntake().from_brief(workspace,brief_text)["provenance"])
+    else:
+        item=EvidenceIntake().from_url(workspace,args.url); evidence.append(item["provenance"])
+        brief_text=workspace.read_artifact(item["artifact"]["path"]).decode("utf-8",errors="replace")
+    workspace.transition(MediaWorkflowState.REQUIREMENTS_PENDING,reason="CLI intake")
+    RequirementsStore().persist(workspace,Requirements(args.task,language_requirements=args.language),evidence)
+    workspace.transition(MediaWorkflowState.REQUIREMENTS_READY,reason="requirements persisted")
+    generator = LocalScriptGenerator(Qwen38Provider(timeout=180)) if not script_text else None
+    result=MediaPreparationService(workspace,script_generator=generator).prepare(script_text=script_text,brief_text=brief_text,language=args.language)
+    print_json({"job_id":workspace.path.name,"job_path":str(workspace.path),"state":workspace.load().state,"deck":str(result["deck"])})
+    return 0
+
+
 def common_build_args(parser):
     parser.add_argument("--input", required=True)
     parser.add_argument("--job-id")
@@ -151,6 +192,7 @@ def common_build_args(parser):
     parser.add_argument("--target-language", choices=("zh", "en"))
     parser.add_argument("--mixed-language-mode", choices=("dominant", "per-slide"), default="dominant")
     parser.add_argument("--output")
+    parser.add_argument("--script-file")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -168,13 +210,21 @@ def parser() -> argparse.ArgumentParser:
     for name in ("resume", "status"):
         sub = actions.add_parser(name); sub.add_argument("--job-id", required=True)
         if name == "resume": sub.add_argument("--output")
+    media=commands.add_parser("media"); media_actions=media.add_subparsers(dest="media_action",required=True)
+    media_prepare=media_actions.add_parser("prepare"); media_prepare.add_argument("--task",required=True)
+    media_prepare.add_argument("--script-file"); media_prepare.add_argument("--brief-file"); media_prepare.add_argument("--url")
+    media_prepare.add_argument("--script-generator",choices=("local-qwen",),default="local-qwen")
+    media_prepare.add_argument("--language",choices=("auto","zh","en"),default="auto")
+    media_prepare.add_argument("--completion-mode",choices=("AUTO_COMPLETE","SCRIPT_REVIEW_FIRST"),default="AUTO_COMPLETE")
     return root
 
 
 def main() -> int:
     try:
         args = parser().parse_args()
-        return voice_command(args) if args.command == "voice" else presentation_command(args)
+        if args.command == "voice": return voice_command(args)
+        if args.command == "media": return media_command(args)
+        return presentation_command(args)
     except Exception as exc:
         print_json({"status": "FAILED", "error_category": type(exc).__name__, "detail": str(exc)[:500]})
         return 2

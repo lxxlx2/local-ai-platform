@@ -14,6 +14,11 @@ def test_owner_cli_has_required_commands_and_safe_defaults():
     assert args.language=="auto"
     assert args.voice_profile=="auto"
     assert args.mixed_language_mode=="dominant"
+    assert parser.parse_args(["presentation","build","--input","deck.pptx","--script-file","script.txt"]).script_file=="script.txt"
+    media=parser.parse_args(["media","prepare","--task","launch","--brief-file","brief.txt","--script-generator","local-qwen"])
+    assert media.media_action=="prepare" and media.completion_mode=="AUTO_COMPLETE"
+    assert parser.parse_args(["media","prepare","--task","launch","--script-file","script.txt"])
+    assert parser.parse_args(["media","prepare","--task","launch","--url","https://example.test/rules"])
     for argv in (["voice","status"],["voice","create-defaults"],["voice","inspect","x"],
                  ["voice","qualify","x"],["presentation","inspect","--input","x.pptx"],
                  ["presentation","resume","--job-id","presentation-1234"],
