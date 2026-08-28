@@ -75,7 +75,7 @@ def media_menu(owner=False):
         return inline([
             [("文件分析", "owner:file"), ("视觉理解", "owner:image")],
             [("语音", "owner:audio"), ("图片生成", "owner:image_generate")],
-            [("视频", "media:video"), ("图片生成", "owner:image_generate")],
+            [("视频", "media:video")],
             [("任务与进度", "owner:media_jobs")], [("返回", "home")],
         ])
     return inline([[("文件分析", f"{prefix}:file"), ("图片处理", f"{prefix}:image")], [("视频处理", f"{prefix}:video")], [("返回", "home")]])
@@ -112,6 +112,7 @@ def voice_menu(): return inline([[('自动选择','mw:voice:auto')],[('中文声
 def completion_mode_menu(): return inline([[('完成后审视频','mw:complete:AUTO_COMPLETE')],[('先审文稿再生成','mw:complete:SCRIPT_REVIEW_FIRST')],[('取消','mw:cancel')]])
 def confirmation_menu(): return inline([[('确认生成','mw:confirm'),('取消','mw:cancel')]])
 def review_video_menu(): return inline([[('通过并发布','mw:approve'),('重新生成','mw:regenerate')],[('修改文稿','mw:edit-script'),('取消','mw:cancel')]])
+def script_review_menu(): return inline([[('文稿通过并生成','mw:script-approve'),('修改文稿','mw:edit-script')],[('取消','mw:cancel')]])
 
 
 def system_menu():

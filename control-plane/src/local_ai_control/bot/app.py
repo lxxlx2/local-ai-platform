@@ -6,13 +6,13 @@ import subprocess
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 from local_ai_control.bot.ui import (
     BACK, back_for, inline, media_menu, owner_dashboard, owner_task_menu,
     public_dashboard, system_menu, workflow_controls, workflow_menu, video_production_menu,
     source_mode_menu, execution_mode_menu, language_menu, voice_menu, completion_mode_menu,
-    confirmation_menu, materials_menu,
+    confirmation_menu, materials_menu, review_video_menu, script_review_menu,
 )
 from local_ai_control.bot.media_wizard import MediaWizardController,MediaWizardStore,WizardStep,wizard_summary,material_summary
 from local_ai_control.services.capabilities import capability_intro, model_identity, routed_capability_text
@@ -32,6 +32,8 @@ from local_ai_control.services.supervisor import JobStatus, SupervisorRepository
 from local_ai_control.services.qwen38_runtime import ContextLimitExceeded, RuntimeUnavailable
 from local_ai_control.services.runtime_providers import HeavyModelConflict, RuntimeProviderFactory
 from local_ai_control.services.vision import TelegramImageService
+from local_ai_control.services.media_coordinator import MediaProductCoordinator
+from local_ai_control.services.media_workflow import MediaWorkflowError
 
 OWNER_HOME = "本地 AI 控制中心\n\n请选择一个功能："
 PUBLIC_HOME = "AI 助手\n\n你好！可以直接发送问题，或选择一个功能："
@@ -90,6 +92,19 @@ async def send_rendered_output(message, renderer, text):
     return rendered
 
 
+async def send_bot_rendered(bot, chat_id, renderer, text, *, reply_markup=None):
+    rendered = renderer.package(text)
+    for index, chunk in enumerate(rendered.chunks):
+        await bot.send_message(
+            chat_id,
+            chunk,
+            parse_mode=rendered.parse_mode,
+            reply_markup=(reply_markup if index == len(rendered.chunks) - 1 else None),
+        )
+    logging.info("telegram output chars=%s chunks=%s", len(rendered.canonical_text), len(rendered.chunks))
+    return rendered
+
+
 async def run():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.load()
@@ -112,8 +127,16 @@ async def run():
     image_service = TelegramImageService(provider_factory.main)
     media_wizard_store=MediaWizardStore()
     media_wizard=MediaWizardController(media_wizard_store)
+    media_products=MediaProductCoordinator()
     bot = Bot(settings.token)
     dp = Dispatcher()
+    media_tasks: set[asyncio.Task] = set()
+
+    def schedule_media(coroutine):
+        task = asyncio.create_task(coroutine)
+        media_tasks.add(task)
+        task.add_done_callback(media_tasks.discard)
+        return task
 
     def identity(update):
         return identity_from_telegram(update.from_user.id, settings.owner_id)
@@ -129,6 +152,8 @@ async def run():
             and session.step in {
                 WizardStep.TASK_NAME,
                 WizardStep.MATERIALS,
+                WizardStep.SCRIPT_EDIT,
+                WizardStep.OWNER_FACT,
             }
         )
 
@@ -149,6 +174,8 @@ async def run():
             in {
                 WizardStep.TASK_NAME,
                 WizardStep.MATERIALS,
+                WizardStep.SCRIPT_EDIT,
+                WizardStep.OWNER_FACT,
             }
         )
 
@@ -170,6 +197,110 @@ async def run():
 
     async def send_chat_output(message, text):
         return await send_rendered_output(message, renderer, text)
+
+    async def send_media_review(chat_id, owner_id, job_ref, result):
+        session=media_wizard_store.get(owner_id)
+
+        if not session or session.values.get("job_ref") != job_ref:
+            logging.info("media video ready without active wizard job=%s",job_ref)
+            return
+        media_wizard_store.update(
+            owner_id,
+            WizardStep.CREATED,
+            review_output_sha256=result.output_sha256,
+            review_candidate_revision=result.candidate_revision,
+            review_duration_seconds=result.duration_seconds,
+        )
+
+        caption=(
+            "视频已生成\n\n"
+            f"时长：{result.duration_seconds:.1f} 秒\n"
+            "状态：等待确认"
+        )
+
+        try:
+            await bot.send_video(
+                chat_id=chat_id,
+                video=FSInputFile(result.output_path),
+                caption=caption,
+                supports_streaming=True,
+                reply_markup=review_video_menu(),
+            )
+        except Exception as video_error:
+            logging.warning("telegram video preview failed type=%s", type(video_error).__name__)
+            try:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=FSInputFile(result.output_path),
+                    caption=caption,
+                    reply_markup=review_video_menu(),
+                )
+            except Exception as document_error:
+                logging.warning("telegram document preview failed type=%s", type(document_error).__name__)
+                await bot.send_message(
+                    chat_id,
+                    "视频已经生成，但 Telegram 预览发送失败。"
+                    "本地成品已保留，没有发布或删除。",
+                )
+
+    async def run_media_generation(chat_id, owner_id, job_ref):
+        try:
+            result=await asyncio.to_thread(
+                media_products.generate,
+                owner_id,
+                job_ref,
+            )
+        except Exception as error:
+            logging.exception(
+                "media generation failed type=%s job=%s",
+                type(error).__name__,
+                job_ref,
+            )
+            question = None
+            try:
+                question = await asyncio.to_thread(
+                    media_products.missing_owner_fact,
+                    owner_id,
+                    job_ref,
+                )
+            except Exception:
+                pass
+            unsupported = str(error) in {
+                "MEDIA_DOCX_PARSER_NOT_QUALIFIED",
+                "MEDIA_PDF_PARSER_NOT_QUALIFIED",
+                "MEDIA_BINARY_INPUT_PARSER_NOT_QUALIFIED",
+            }
+            await bot.send_message(
+                chat_id,
+                question or (
+                    "这个文件格式当前还不能用于视频文稿解析。请改用 PPTX、TXT 或 Markdown。"
+                    if unsupported else
+                    "视频生成失败。任务记录和材料已经保留，可以稍后继续处理。"
+                ),
+            )
+            if question:
+                media_wizard_store.update(owner_id,WizardStep.OWNER_FACT)
+            return
+
+        if result.state == "SCRIPT_READY":
+            session=media_wizard_store.get(owner_id)
+            if not session or session.values.get("job_ref") != job_ref:
+                logging.info("media script ready without active wizard job=%s",job_ref)
+                return
+            media_wizard_store.update(owner_id,WizardStep.CREATED,
+                                      review_candidate_revision=result.candidate_revision)
+            try:
+                await send_bot_rendered(
+                    bot,chat_id,renderer,
+                    "文稿已准备好，请先确认。\n\n" + result.script_text,
+                    reply_markup=script_review_menu(),
+                )
+            except Exception as error:
+                logging.warning("telegram script preview failed type=%s",type(error).__name__)
+                await bot.send_message(chat_id,"文稿已经生成，但 Telegram 预览发送失败。任务记录仍然保留。")
+            return
+
+        await send_media_review(chat_id, owner_id, job_ref, result)
 
     @dp.message(CommandStart())
     async def start(message: Message):
@@ -301,6 +432,47 @@ async def run():
     async def media_wizard_text(message: Message):
         ctx = identity(message)
 
+        active = media_wizard_store.get(ctx.internal_user_id)
+        if active and active.step is WizardStep.OWNER_FACT:
+            try:
+                await asyncio.to_thread(
+                    media_products.provide_owner_fact,
+                    ctx.internal_user_id,
+                    active.values["job_ref"],
+                    message.text,
+                )
+                media_wizard_store.update(ctx.internal_user_id,WizardStep.CREATED)
+            except (MediaWorkflowError,KeyError,ValueError):
+                await message.answer("没有保存这项信息，请用一句明确事实重新回答。")
+                return
+            await message.answer("信息已补充，继续生成。")
+            schedule_media(run_media_generation(message.chat.id,ctx.internal_user_id,active.values["job_ref"]))
+            return
+
+        if active and active.step is WizardStep.SCRIPT_EDIT:
+            try:
+                result = await asyncio.to_thread(
+                    media_products.revise_script,
+                    ctx.internal_user_id,
+                    active.values["job_ref"],
+                    message.text,
+                )
+                media_wizard_store.update(
+                    ctx.internal_user_id,
+                    WizardStep.CREATED,
+                    review_candidate_revision=result.candidate_revision,
+                )
+            except (MediaWorkflowError, KeyError, ValueError):
+                await message.answer("文稿格式不完整，请按“## 场景标题”分段后重新发送完整文稿。")
+                return
+            await send_rendered_output(
+                message,
+                renderer,
+                "文稿已更新，请确认。\n\n" + result.script_text,
+            )
+            await message.answer("下一步：", reply_markup=script_review_menu())
+            return
+
         try:
             session = media_wizard.text(
                 ctx.role,
@@ -394,7 +566,41 @@ async def run():
     async def media_wizard_callback(query:CallbackQuery):
         ctx=identity(query); data=query.data
         try:
-            if data=="mw:cancel": media_wizard.cancel(ctx.role,ctx.internal_user_id); await edit_page(query,"视频任务已取消。",video_production_menu()); return
+            if data=="mw:cancel":
+                session=media_wizard_store.get(ctx.internal_user_id)
+
+                if (
+                    session
+                    and session.step in {WizardStep.CREATED,WizardStep.SCRIPT_EDIT,WizardStep.OWNER_FACT}
+                    and session.values.get("job_ref")
+                ):
+                    try:
+                        await asyncio.to_thread(
+                            media_products.cancel_review,
+                            ctx.internal_user_id,
+                            session.values["job_ref"],
+                        )
+                    except MediaWorkflowError:
+                        pass
+
+                media_wizard.cancel(
+                    ctx.role,
+                    ctx.internal_user_id,
+                )
+
+                try:
+                    await query.message.edit_reply_markup(
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+
+                await query.answer()
+                await query.message.answer(
+                    "视频任务已取消。",
+                    reply_markup=video_production_menu(),
+                )
+                return
             if data.startswith("mw:source:"):
                 value=data.split(":",2)[2]
                 session=media_wizard.choice(
@@ -471,7 +677,123 @@ async def run():
             if data.startswith("mw:complete:"):
                 session=media_wizard.choice(ctx.role,ctx.internal_user_id,"completion_mode",data.split(":",2)[2]); await edit_page(query,wizard_summary(session),confirmation_menu()); return
             if data=="mw:confirm":
-                media_wizard.confirm(ctx.role,ctx.internal_user_id); await edit_page(query,"视频任务已创建。\n\n材料会在私有工作区处理；生成完成后会在这里等待你的最终确认。",video_production_menu()); return
+                session=media_wizard.confirm(
+                    ctx.role,
+                    ctx.internal_user_id,
+                )
+
+                job_ref=session.values["job_ref"]
+                chat_id=query.message.chat.id
+
+                await edit_page(
+                    query,
+                    "视频任务已创建。\n\n"
+                    "正在本地生成，完成后会直接把预览发到这里。",
+                    video_production_menu(),
+                )
+
+                schedule_media(
+                    run_media_generation(
+                        chat_id,
+                        ctx.internal_user_id,
+                        job_ref,
+                    )
+                )
+                return
+
+            if data=="mw:script-approve":
+                session=media_wizard_store.get(ctx.internal_user_id)
+                if not session or session.step is not WizardStep.CREATED or not session.values.get("job_ref"):
+                    await query.answer("当前没有可确认的文稿。", show_alert=True)
+                    return
+                await edit_page(query,"文稿已确认，正在本地生成视频。",video_production_menu())
+                schedule_media(run_media_generation(query.message.chat.id,ctx.internal_user_id,session.values["job_ref"]))
+                return
+
+            if data=="mw:edit-script":
+                session=media_wizard_store.get(ctx.internal_user_id)
+                if not session or session.step is not WizardStep.CREATED or not session.values.get("job_ref"):
+                    await query.answer("当前没有可修改的文稿。", show_alert=True)
+                    return
+                media_wizard_store.update(ctx.internal_user_id,WizardStep.SCRIPT_EDIT)
+                await edit_page(query,"请发送完整的新文稿。\n\n每个场景使用“## 场景标题”开头；场景数量需与演示文稿页数一致。",inline([[('取消','mw:cancel')]]))
+                return
+
+            if data=="mw:regenerate":
+                session=media_wizard_store.get(ctx.internal_user_id)
+                if not session or session.step is not WizardStep.CREATED or not session.values.get("job_ref"):
+                    await query.answer("当前没有可重新生成的视频。", show_alert=True)
+                    return
+                async def regenerate_media():
+                    try:
+                        result=await asyncio.to_thread(media_products.regenerate,ctx.internal_user_id,session.values["job_ref"])
+                        await send_media_review(query.message.chat.id,ctx.internal_user_id,session.values["job_ref"],result)
+                    except Exception as error:
+                        logging.exception("media regeneration failed type=%s",type(error).__name__)
+                        await bot.send_message(query.message.chat.id,"重新生成失败。原视频和任务记录仍然保留。")
+                await edit_page(query,"正在重新生成视频；完成后会把新预览发到这里。",video_production_menu())
+                schedule_media(regenerate_media())
+                return
+
+            if data=="mw:approve":
+                session=media_wizard_store.get(
+                    ctx.internal_user_id
+                )
+
+                if (
+                    not session
+                    or session.step is not WizardStep.CREATED
+                    or not session.values.get("job_ref")
+                    or not session.values.get("review_output_sha256")
+                ):
+                    await query.answer(
+                        "当前没有可发布的视频。",
+                        show_alert=True,
+                    )
+                    return
+
+                await query.answer("正在发布，请稍候。")
+
+                try:
+                    result=await asyncio.to_thread(
+                        media_products.approve_publish,
+                        ctx.internal_user_id,
+                        session.values["job_ref"],
+                        output_sha256=session.values[
+                            "review_output_sha256"
+                        ],
+                        candidate_revision=session.values[
+                            "review_candidate_revision"
+                        ],
+                    )
+                except Exception as error:
+                    logging.exception(
+                        "media publish failed type=%s",
+                        type(error).__name__,
+                    )
+                    await query.message.answer(
+                        "发布暂时失败，本地视频没有删除。"
+                        "网络恢复后可以再次点击“通过并发布”重试。"
+                    )
+                    return
+
+                try:
+                    await query.message.edit_reply_markup(
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+
+                media_wizard_store.cancel(
+                    ctx.internal_user_id
+                )
+
+                await query.message.answer(
+                    "视频已发布到 ai_video_product。\n"
+                    "远端验证完成，本地可再生视频文件已清理。",
+                    reply_markup=video_production_menu(),
+                )
+                return
             await query.answer("该操作尚未就绪。",show_alert=True)
         except (PermissionError,KeyError,ValueError): await query.answer("步骤无效或已过期，请重新开始。",show_alert=True)
 
@@ -636,6 +958,8 @@ async def run():
     try:
         await dp.start_polling(bot)
     finally:
+        if media_tasks:
+            await asyncio.gather(*tuple(media_tasks), return_exceptions=True)
         runtime_executor.shutdown(); private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); media_wizard_store.close(); await bot.session.close()
 
 

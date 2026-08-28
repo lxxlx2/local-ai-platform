@@ -1,5 +1,5 @@
 from local_ai_control.bot.media_wizard import MediaWizardController,MediaWizardStore,WizardStep,wizard_summary
-from local_ai_control.bot.ui import media_menu,video_production_menu,source_mode_menu,review_video_menu,materials_menu
+from local_ai_control.bot.ui import media_menu,video_production_menu,source_mode_menu,review_video_menu,script_review_menu,materials_menu
 from local_ai_control.domain.identity import Role
 
 
@@ -35,7 +35,8 @@ def test_public_cannot_start_or_advance_owner_wizard(tmp_path):
 
 def test_review_actions_and_callback_payloads_are_bounded():
     assert labels(review_video_menu())==["通过并发布","重新生成","修改文稿","取消"]
-    for markup in (source_mode_menu(),video_production_menu(),review_video_menu()):
+    assert labels(script_review_menu())==["文稿通过并生成","修改文稿","取消"]
+    for markup in (source_mode_menu(),video_production_menu(),review_video_menu(),script_review_menu()):
         for row in markup.inline_keyboard:
             for button in row:
                 assert len(button.callback_data.encode())<=64 and "/" not in button.callback_data

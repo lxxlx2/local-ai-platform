@@ -32,6 +32,8 @@ class WizardStep(StrEnum):
     COMPLETION_MODE = "COMPLETION_MODE"
     CONFIRMATION = "CONFIRMATION"
     CREATED = "CREATED"
+    SCRIPT_EDIT = "SCRIPT_EDIT"
+    OWNER_FACT = "OWNER_FACT"
 
 
 @dataclass(frozen=True)

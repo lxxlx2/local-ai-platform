@@ -260,7 +260,10 @@ class MediaWorkspace:
     def invalidate_candidate(self, reason: str) -> MediaProductJob:
         job = self.load(); job.candidate_revision += 1; job.approval = None; job.publish = None
         job.updated_at = utc_now(); job.history.append({"at": job.updated_at, "event": "candidate_invalidated", "reason": reason[:200]})
-        self.save(job); return job
+        self.save(job)
+        if job.state in {MediaWorkflowState.REVIEW_PENDING, MediaWorkflowState.APPROVED}:
+            return self.transition(MediaWorkflowState.SCRIPT_PENDING, reason="candidate invalidated")
+        return job
 
 
 class EvidenceIntake:

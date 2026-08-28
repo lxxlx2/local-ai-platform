@@ -281,6 +281,13 @@ Example result:
 
 The video wizard is durable. If Telegram reconnects or the bot restarts, the Owner can reopen `视频 -> 我的任务` and continue from the last valid step.
 
+V0.2 implements the entry under `文件与媒体 -> 视频 -> 新建视频`.
+The wizard persists task name, source mode, material, execution mode, language,
+voice and completion mode before asking the next question. Public identities
+are denied server-side. Confirmation contains no filesystem path, Git detail,
+JSON, model revision or internal job id. Production activation still requires
+a separate reviewed deployment; code qualification is not live deployment.
+
 At most one unanswered wizard question is active for a task. Unexpected text/file input is not silently interpreted as a privileged action; the bot explains the expected input and preserves wizard state.
 
 Capability questions are deterministic product responses, not free-form model descriptions. They disclose the active model and local backend while respecting Owner/Public scope.

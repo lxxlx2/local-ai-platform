@@ -1,6 +1,6 @@
 # Local media production architecture
 
-Status: architecture baseline. Presentation narration/video V0.1 is implemented and locally qualified. Media Product Workflow V0.2 architecture is Owner-approved; generalized script/brief/link intake, Telegram MediaJob UX, automatic publishing/cleanup, generative video, and trainable persona adapters remain staged implementation work.
+Status: architecture baseline plus qualification evidence. Presentation narration/video V0.1 and Media Product Workflow V0.2 are implemented on `feat/local-qwen-owner-raw-v04` and locally qualified. Generative video and trainable persona adapters remain staged work.
 
 ## Goal
 
@@ -459,41 +459,41 @@ Model-generated requirements/scripts/scene plans/prompts are validated host-side
 - PPTX -> narration -> local TTS -> synchronized MP4;
 - task-named `ai_video_product` Git LFS archival manually proven with real production outputs.
 
+### Functional on the feature branch
+
+- restart-safe, content-addressed MediaJob V0.2 and bounded private workspaces;
+- upload/direct-brief/URL evidence intake contracts, with fetched content marked untrusted;
+- task/brief -> local Qwen -> script/scene plan/prompt pack and deterministic no-PPT slides;
+- first-class `--script-file`, `--brief-file` and `--url` CLI contracts;
+- qualified persistent voice -> TTS -> timeline -> MP4;
+- durable Owner Telegram `文件与媒体 -> 视频 -> 新建视频` workflow;
+- exact-output approval, fixed-target Git/LFS publisher and verified cleanup;
+- real local three-scene E2E through a temporary Git remote, ending in `ARCHIVED`.
+
 ### Partially ready
 
-- task/brief -> local Qwen -> final script: model exists, general MediaJob orchestration not implemented;
-- script-file -> presentation/audio: durable artifacts exist, first-class ingestion not implemented;
-- Telegram media entry exists architecturally; the approved link/upload wizard and review/publish flow are not implemented;
+- Telegram production worker dispatch and direct preview transport remain undeployed; wizard state and interaction contracts are code-complete;
 - custom persistent human voice: job-scoped reference cloning works, named reusable PersonaProfile does not yet;
 - FLUX is downloaded but not yet qualified for production routing.
 
 ### Not yet implemented/qualified
 
-- URL requirement-intake provider integrated into MediaJob;
-- durable requirements/brief/scene/prompt artifact pipeline;
-- standalone script-to-audio product CLI;
-- automatic publisher to canonical `ai_video_product` V0.2 layout;
-- verified post-publish cleanup worker;
-- Telegram exact-output preview/approval callbacks;
 - custom speaker fine-tuning/training pipeline;
 - private persona dataset manager;
 - visual identity LoRA/adapter training;
 - identity-consistency evaluation suite;
 - generative local video backend qualification;
 - talking-avatar/lip-sync adapter;
-- unified MediaJob orchestrator across requirement/script/audio/presentation/image/video/training/publishing.
+- unified MediaJob expansion into image/video generation and training providers.
 
 ## Recommended implementation order
 
-1. Implement Media Product Workflow V0.2 foundation: durable MediaJob, script/brief/link intake contracts, requirements/brief/scene/prompt artifacts, standalone script-to-audio and presentation `--script-file`.
-2. Implement deterministic canonical publisher + remote verification + cleanup policy for `ai_video_product`.
-3. Implement the approved simple Telegram video wizard including uploads/links/brief, execution mode, preview and exact-output approval.
-4. Add template-based no-PPT presentation generation so requirement/brief-only jobs can produce useful local videos before generative-image/video models are ready.
-5. Introduce private PersonaProfile + dataset/provenance store and reusable named custom voices.
-6. Qualify already-downloaded Whisper and FLUX where current local dependencies permit; do not automatically install/download missing dependencies while network is constrained.
-7. Add Training Plane schemas/state/evaluation/promote/rollback foundations.
-8. Add visual identity adapters after image qualification.
-9. Complete/qualify generative video after model download/network blockers clear.
-10. Add lip-sync/talking avatar only after voice and visual identity profiles are independently qualified.
+1. Merge/deploy Media Product Workflow V0.2 only after independent review and explicit approval.
+2. Introduce private PersonaProfile + dataset/provenance store and reusable named custom voices.
+3. Qualify already-downloaded Whisper and FLUX where current local dependencies permit; do not automatically install/download missing dependencies while network is constrained.
+4. Add Training Plane schemas/state/evaluation/promote/rollback foundations.
+5. Add visual identity adapters after image qualification.
+6. Complete/qualify generative video after model download/network blockers clear.
+7. Add lip-sync/talking avatar only after voice and visual identity profiles are independently qualified.
 
 Material changes to this architecture follow `ARCHITECTURE_CHANGE_PROTOCOL.md` before implementation.

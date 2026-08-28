@@ -216,3 +216,11 @@ WAV files; LibreOffice rendered three 1920x1080 slides; and FFmpeg produced a
 36.254-second H.264/AAC MP4 against a 36.210-second duration timeline. An
 unchanged resume preserved all WAV hashes and modification times. The source
 PPTX hash was unchanged.
+
+Media Product Workflow V0.2 reuses this qualified path. Its real-local
+qualification generated a three-scene deterministic 16:9 deck, three English
+narration WAVs with `en-male-25-default` revision 1, and a 50.728-second
+H.264/AAC MP4. The harness bound approval to the exact MP4 SHA, published to a
+temporary local Git/LFS remote, verified commit and output hash, applied
+bounded cleanup, and reached `ARCHIVED`. No cloud or generative image/video
+provider was used.

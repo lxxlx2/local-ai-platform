@@ -96,12 +96,16 @@ def test_cleanup_removes_published_local_video_and_bounded_presentation_artifact
     (presentation/"segments"/"slide.mp4").write_bytes(b"segment")
     (presentation/"output"/"presentation.mp4").write_bytes(b"video")
     (presentation/"manifest.json").write_text("retain")
+    older=presentation_root/"presentation-old"
+    (older/"audio").mkdir(parents=True)
+    (older/"audio"/"slide.wav").write_bytes(b"old-audio")
+    (older/"manifest.json").write_text("retain")
 
     result=MediaCleanup(
         allowed_derived_roots=(presentation_root,)
     ).cleanup(
         workspace,
-        derived_workspaces=(presentation,),
+        derived_workspaces=(older,presentation),
     )
 
     assert workspace.load().state is MediaWorkflowState.ARCHIVED
@@ -111,8 +115,10 @@ def test_cleanup_removes_published_local_video_and_bounded_presentation_artifact
     assert not (presentation/"slides"/"slide.png").exists()
     assert not (presentation/"segments"/"slide.mp4").exists()
     assert not (presentation/"output"/"presentation.mp4").exists()
+    assert not (older/"audio"/"slide.wav").exists()
 
     assert (presentation/"manifest.json").is_file()
+    assert (older/"manifest.json").is_file()
 
     assert any(
         item == "output/presentation.mp4"
@@ -146,3 +152,117 @@ def test_cleanup_rejects_derived_workspace_outside_allowlist(tmp_path):
             workspace,
             derived_workspaces=(outside,),
         )
+
+
+def test_cleanup_preflights_symlinks_before_transition_or_deletion(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+    MediaApprovalService().approve(workspace,owner_id="owner",**candidate)
+    repo,bare=temp_public_repo(tmp_path)
+    MediaPublisher(repo,expected_remote=str(bare)).publish(workspace)
+    outside=tmp_path/"outside.wav"; outside.write_bytes(b"private")
+    (workspace.path/"audio"/"unsafe.wav").symlink_to(outside)
+    with pytest.raises(MediaWorkflowError,match="SYMLINK_DENIED"):
+        MediaCleanup().cleanup(workspace)
+    assert workspace.load().state is MediaWorkflowState.PUBLISHED
+    assert (workspace.path/"output"/"presentation.mp4").is_file()
+    assert outside.read_bytes()==b"private"
+
+
+def test_publisher_can_update_existing_task_slug(tmp_path):
+    repo,bare=temp_public_repo(tmp_path)
+
+    first,candidate=workspace_at_review(tmp_path/"first")
+    MediaApprovalService().approve(
+        first,
+        owner_id="owner",
+        **candidate,
+    )
+
+    one=MediaPublisher(
+        repo,
+        expected_remote=str(bare),
+    ).publish(first)
+
+    first_commit=one["commit"]
+
+    second,candidate=workspace_at_review(tmp_path/"second")
+    MediaApprovalService().approve(
+        second,
+        owner_id="owner",
+        **candidate,
+    )
+
+    two=MediaPublisher(
+        repo,
+        expected_remote=str(bare),
+    ).publish(second)
+
+    assert two["commit"] != first_commit
+    assert (
+        repo/"launch-video"/"output"/"final.mp4"
+    ).is_file()
+
+
+def test_publish_excludes_private_intake_artifacts(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+    workspace.write_artifact("production_brief.md","private owner brief")
+    workspace.write_artifact("source_evidence.json",{"source":"private"})
+    workspace.write_artifact("scene_plan.json",{"schema_version":"0.2","scenes":[]})
+    MediaApprovalService().approve(workspace,owner_id="owner",**candidate)
+    repo,bare=temp_public_repo(tmp_path)
+    (repo/"launch-video"/"source").mkdir(parents=True)
+    (repo/"launch-video"/"source"/"requirements.md").write_text("legacy private intake")
+    git("add",".",cwd=repo); git("commit","-m","legacy product",cwd=repo); git("push","origin","HEAD",cwd=repo)
+    MediaPublisher(repo,expected_remote=str(bare)).publish(workspace)
+    target=repo/"launch-video"
+    assert not (target/"source"/"requirements.md").exists()
+    assert not (target/"source"/"production_brief.md").exists()
+    assert not (target/"source"/"source_evidence.json").exists()
+    assert (target/"generated"/"script.txt").is_file()
+
+
+def test_push_failure_resumes_same_commit_without_duplicate_commit(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+    MediaApprovalService().approve(workspace,owner_id="owner",**candidate)
+    repo,bare=temp_public_repo(tmp_path)
+    calls={"push":0}
+
+    def fail_first_push(argv,**kwargs):
+        if "push" in argv:
+            calls["push"]+=1
+            if calls["push"]==1:
+                return subprocess.CompletedProcess(argv,1,"","offline")
+        return subprocess.run(argv,**kwargs)
+
+    publisher=MediaPublisher(repo,expected_remote=str(bare),run=fail_first_push)
+    with pytest.raises(MediaWorkflowError,match="GIT_FAILED:push"):
+        publisher.publish(workspace)
+    assert workspace.load().state is MediaWorkflowState.PUBLISH_PENDING
+    pending_commit=git("rev-parse","HEAD",cwd=repo).stdout.strip()
+    commit_count=git("rev-list","--count","HEAD",cwd=repo).stdout.strip()
+
+    result=publisher.resume_publish(workspace)
+
+    assert result["commit"]==pending_commit
+    assert git("rev-list","--count","HEAD",cwd=repo).stdout.strip()==commit_count
+    assert workspace.load().state is MediaWorkflowState.PUBLISHED
+
+
+def test_public_payload_with_secret_assignment_fails_before_repo_mutation(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+    workspace.write_artifact("script.txt","API_KEY=not-for-public")
+    MediaApprovalService().approve(workspace,owner_id="owner",**candidate)
+    repo,bare=temp_public_repo(tmp_path)
+    with pytest.raises(MediaWorkflowError,match="PUBLIC_PAYLOAD_SENSITIVE"):
+        MediaPublisher(repo,expected_remote=str(bare)).publish(workspace)
+    assert not git("status","--porcelain",cwd=repo).stdout.strip()
+    assert workspace.load().state is MediaWorkflowState.APPROVED
+
+
+def test_local_commit_without_push_is_not_claimed_published(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+    MediaApprovalService().approve(workspace,owner_id="owner",**candidate)
+    repo,bare=temp_public_repo(tmp_path)
+    result=MediaPublisher(repo,expected_remote=str(bare)).publish(workspace,push=False)
+    assert result["verified"] is False
+    assert workspace.load().state is MediaWorkflowState.PUBLISH_PENDING

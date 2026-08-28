@@ -53,6 +53,14 @@ class MediaExecutionResult:
     presentation_job_path: str
 
 
+@dataclass(frozen=True)
+class MediaScriptReviewResult:
+    job_id: str
+    state: str
+    script_text: str
+    candidate_revision: int
+
+
 class FixedNarrator:
     def __init__(self, document: ScriptDocument):
         self.values = iter(
@@ -208,15 +216,10 @@ class MediaExecutionService:
                     "MEDIA_DOCX_PARSER_NOT_QUALIFIED"
                 )
 
-            evidence.append(
-                {
-                    "source": upload.get(
-                        "name",
-                        path.name,
-                    ),
-                    "trust_label": "OWNER_PROVIDED_UNPARSED",
-                }
-            )
+            if suffix == ".pdf":
+                raise MediaWorkflowError("MEDIA_PDF_PARSER_NOT_QUALIFIED")
+
+            raise MediaWorkflowError("MEDIA_BINARY_INPUT_PARSER_NOT_QUALIFIED")
 
         direct = self.workspace.path / "source" / "direct-brief.txt"
 
@@ -233,6 +236,11 @@ class MediaExecutionService:
                     "trust_label": "OWNER_PROVIDED",
                 }
             )
+
+        owner_facts = self.workspace.path / "source" / "owner-facts.txt"
+        if owner_facts.is_file() and not owner_facts.is_symlink():
+            brief_parts.append(owner_facts.read_text("utf-8",errors="replace").strip())
+            evidence.append({"source":"owner-facts","trust_label":"OWNER_PROVIDED"})
 
         urls = request.get("source_urls", [])
 
@@ -384,19 +392,76 @@ class MediaExecutionService:
             reason="owner script ready",
         )
 
-        self.workspace.transition(
-            MediaWorkflowState.PROFILE_SELECTED,
-            reason="qualified voice selected",
-        )
-
         return document
+
+    def _script_review_result(self) -> MediaScriptReviewResult:
+        job=self.workspace.load()
+        if job.state is not MediaWorkflowState.SCRIPT_READY:
+            raise MediaWorkflowError("MEDIA_SCRIPT_REVIEW_STATE_INVALID")
+        return MediaScriptReviewResult(job.job_id,job.state.value,
+            self.workspace.read_artifact("script.txt").decode("utf-8"),job.candidate_revision)
+
+    def _build_to_review(self, pipeline, presentation, manifest=None) -> MediaExecutionResult:
+        if self.workspace.load().state is MediaWorkflowState.SCRIPT_READY:
+            self.workspace.transition(MediaWorkflowState.PROFILE_SELECTED,reason="qualified voice selected")
+        if manifest is None:
+            manifest = pipeline.prepare(
+                narration_mode="auto",
+                language=self._request()["language"],
+                voice_profile=self._request().get("voice","auto"),
+            )
+        built_manifest=pipeline.build()
+        built=presentation.path/built_manifest["output_path"]
+        self.workspace.write_artifact("output/final.mp4",built.read_bytes())
+        prior_paths=[]
+        try:
+            prior=json.loads(self.workspace.read_artifact("metadata/execution.json"))
+            prior_paths=list(prior.get("presentation_job_paths",[]))
+            if prior.get("presentation_job_path"):
+                prior_paths.append(prior["presentation_job_path"])
+        except (OSError,ValueError,json.JSONDecodeError):
+            pass
+        presentation_paths=list(dict.fromkeys([*prior_paths,str(presentation.path)]))
+        self.workspace.write_artifact("metadata/execution.json",{
+            "schema_version":"0.2","presentation_job_id":presentation.path.name,
+            "presentation_job_path":str(presentation.path),"profile_id":built_manifest.get("profile_id"),
+            "presentation_job_paths":presentation_paths,
+            "duration_seconds":built_manifest["duration_seconds"],
+            "output_sha256":sha256_file(self.workspace.path/"output"/"final.mp4"),
+        })
+        for target in (MediaWorkflowState.ASSETS_READY,MediaWorkflowState.AUDIO_READY,
+                       MediaWorkflowState.VISUAL_READY,MediaWorkflowState.VIDEO_READY):
+            self.workspace.transition(target,reason="local media production")
+        candidate=MediaApprovalService().submit_for_review(self.workspace,self.workspace.path/"output"/"final.mp4",
+                                                            duration_seconds=built_manifest["duration_seconds"])
+        return MediaExecutionResult(self.workspace.path.name,self.workspace.load().state.value,
+            str(self.workspace.path/"output"/"final.mp4"),candidate["output_sha256"],
+            built_manifest["duration_seconds"],candidate["candidate_revision"],str(presentation.path))
+
+    def resume_after_script_review(self) -> MediaExecutionResult:
+        job=self.workspace.load()
+        if job.state is not MediaWorkflowState.SCRIPT_READY:
+            raise MediaWorkflowError("MEDIA_SCRIPT_REVIEW_RESUME_INVALID")
+        request=self._request(); inputs=self._collect_inputs(request)
+        deck=self.workspace.path/"generated"/"presentation.pptx"
+        if not deck.is_file(): deck=inputs["pptx"]
+        if deck is None or not Path(deck).is_file(): raise MediaWorkflowError("MEDIA_PRESENTATION_SOURCE_REQUIRED")
+        document=ScriptParser().parse(self.workspace.read_artifact("script.txt").decode("utf-8"),
+                                      title=job.task_name,language=request["language"])
+        if len(document.scenes) != len(PPTXParser().parse(deck)):
+            raise MediaWorkflowError("SCRIPT_SCENE_COUNT_MISMATCH")
+        presentation=self._presentation_job(Path(deck)); pipeline=self._pipeline(presentation,FixedNarrator(document))
+        narration_path=presentation.path/"narration.json"
+        manifest={} if narration_path.is_file() else None
+        return self._build_to_review(pipeline,presentation,manifest)
 
     def _presentation_job(
         self,
         deck: Path,
     ) -> PresentationJob:
         suffix = self.workspace.path.name[-12:]
-        job_id = f"media-{suffix}"
+        revision = self.workspace.load().candidate_revision
+        job_id = f"media-{suffix}-r{revision}"
 
         presentation = PresentationJob(
             job_id,
@@ -438,7 +503,7 @@ class MediaExecutionService:
             narrator=narrator,
         )
 
-    def run_to_review(self) -> MediaExecutionResult:
+    def run_to_review(self) -> MediaExecutionResult | MediaScriptReviewResult:
         request = self._request()
         inputs = self._collect_inputs(request)
 
@@ -449,6 +514,7 @@ class MediaExecutionService:
 
         language = request["language"]
         voice = request.get("voice", "auto")
+        script_review = request.get("completion_mode") == "SCRIPT_REVIEW_FIRST"
         supplied_pptx = inputs["pptx"]
         script_text = inputs["script_text"]
 
@@ -478,6 +544,7 @@ class MediaExecutionService:
                 script_text=script_text,
                 brief_text=inputs["brief"],
                 language=language,
+                select_profile=False,
             )
 
             document = prepared["script"]
@@ -493,6 +560,9 @@ class MediaExecutionService:
             raise MediaWorkflowError(
                 "MEDIA_PRESENTATION_SOURCE_REQUIRED"
             )
+
+        if document is not None and script_review:
+            return self._script_review_result()
 
         presentation = self._presentation_job(
             deck
@@ -557,90 +627,7 @@ class MediaExecutionService:
                 MediaWorkflowState.SCRIPT_READY,
                 reason="automatic narration ready",
             )
+            if script_review:
+                return self._script_review_result()
 
-            self.workspace.transition(
-                MediaWorkflowState.PROFILE_SELECTED,
-                reason="qualified voice selected",
-            )
-
-        manifest = pipeline.build()
-
-        built = (
-            presentation.path
-            / manifest["output_path"]
-        )
-
-        self.workspace.write_artifact(
-            "output/final.mp4",
-            built.read_bytes(),
-        )
-
-        self.workspace.write_artifact(
-            "metadata/execution.json",
-            {
-                "schema_version": "0.2",
-                "presentation_job_id": (
-                    presentation.path.name
-                ),
-                "presentation_job_path": (
-                    str(presentation.path)
-                ),
-                "profile_id": manifest.get(
-                    "profile_id"
-                ),
-                "duration_seconds": manifest[
-                    "duration_seconds"
-                ],
-                "output_sha256": sha256_file(
-                    self.workspace.path
-                    / "output"
-                    / "final.mp4"
-                ),
-            },
-        )
-
-        for target in (
-            MediaWorkflowState.ASSETS_READY,
-            MediaWorkflowState.AUDIO_READY,
-            MediaWorkflowState.VISUAL_READY,
-            MediaWorkflowState.VIDEO_READY,
-        ):
-            self.workspace.transition(
-                target,
-                reason="local media production",
-            )
-
-        candidate = (
-            MediaApprovalService()
-            .submit_for_review(
-                self.workspace,
-                self.workspace.path
-                / "output"
-                / "final.mp4",
-                duration_seconds=manifest[
-                    "duration_seconds"
-                ],
-            )
-        )
-
-        return MediaExecutionResult(
-            job_id=self.workspace.path.name,
-            state=self.workspace.load().state.value,
-            output_path=str(
-                self.workspace.path
-                / "output"
-                / "final.mp4"
-            ),
-            output_sha256=candidate[
-                "output_sha256"
-            ],
-            duration_seconds=manifest[
-                "duration_seconds"
-            ],
-            candidate_revision=candidate[
-                "candidate_revision"
-            ],
-            presentation_job_path=str(
-                presentation.path
-            ),
-        )
+        return self._build_to_review(pipeline,presentation,narration)

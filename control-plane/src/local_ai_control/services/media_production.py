@@ -174,7 +174,8 @@ class MediaPreparationService:
     def __init__(self, workspace: MediaWorkspace, *, script_generator: LocalScriptGenerator | None = None, deck_builder=None):
         self.workspace=workspace; self.script_generator=script_generator; self.deck_builder=deck_builder or DeterministicDeckBuilder()
 
-    def prepare(self, *, script_text: str | None = None, brief_text: str | None = None, language="auto") -> dict:
+    def prepare(self, *, script_text: str | None = None, brief_text: str | None = None,
+                language="auto", select_profile=True) -> dict:
         job=self.workspace.load()
         if job.state is MediaWorkflowState.REQUIREMENTS_READY:
             self.workspace.transition(MediaWorkflowState.SCRIPT_PENDING,reason="script preparation")
@@ -196,5 +197,6 @@ class MediaPreparationService:
         deck=self.deck_builder.build(document,self.workspace.path/"generated"/"presentation.pptx")
         self.workspace.write_artifact("metadata/deck.json",{"sha256":sha256_file(deck),"generator":"deterministic-ooxml-v0.2"})
         self.workspace.transition(MediaWorkflowState.SCRIPT_READY,reason="script and scene plan ready")
-        self.workspace.transition(MediaWorkflowState.PROFILE_SELECTED,reason="persistent qualified voice selected")
+        if select_profile:
+            self.workspace.transition(MediaWorkflowState.PROFILE_SELECTED,reason="persistent qualified voice selected")
         return {"script":document,"deck":deck}
