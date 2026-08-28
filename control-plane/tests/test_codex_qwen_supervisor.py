@@ -1,5 +1,9 @@
 import json
+import inspect
+import signal
 import subprocess
+import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -68,8 +72,40 @@ def healthy_bridge():
     }
 
 
-class Completed:
-    returncode = 0
+class FakeProcess:
+    next_pid=51000
+    def __init__(self,*,stdout="",stderr="",returncode=0,timeout=False,ignore_term=False):
+        self.pid=FakeProcess.next_pid; FakeProcess.next_pid+=1
+        self.stdout=stdout; self.stderr=stderr; self.final_returncode=returncode
+        self.returncode=None; self.timeout=timeout; self.ignore_term=ignore_term
+        self.signals=[]; self.wait_calls=0
+    def communicate(self,timeout=None):
+        if self.timeout and self.returncode is None:
+            raise subprocess.TimeoutExpired(("fake",),timeout,output=self.stdout,stderr=self.stderr)
+        if self.returncode is None: self.returncode=self.final_returncode
+        return self.stdout,self.stderr
+    def poll(self): return self.returncode
+    def wait(self,timeout=None):
+        self.wait_calls+=1
+        if self.returncode is None: raise subprocess.TimeoutExpired(("fake",),timeout)
+        return self.returncode
+    def terminate(self): self.returncode=-15
+    def kill(self): self.returncode=-9
+    def signal_group(self,signal_number):
+        self.signals.append(signal_number)
+        if signal_number==9 or not self.ignore_term: self.returncode=-signal_number
+
+
+def fake_process_kwargs(process,calls=None):
+    def factory(command,**kwargs):
+        if calls is not None: calls.append((command,kwargs))
+        return process
+    return {
+        "popen_factory":factory,
+        "pgid_resolver":lambda pid:pid,
+        "group_signaler":lambda pgid,sig:process.signal_group(sig),
+        "cancel_wait_seconds":0.05,
+    }
 
 
 def test_local_qwen_runner_is_disabled_by_default(tmp_path):
@@ -80,7 +116,7 @@ def test_local_qwen_runner_is_disabled_by_default(tmp_path):
         calls.append((args, kwargs))
         raise AssertionError("disabled runner must not spawn Codex")
 
-    runner = LocalQwenCodexRunner(command_runner=should_not_run,trace_root=tmp_path/"traces")
+    runner = LocalQwenCodexRunner(popen_factory=should_not_run,trace_root=tmp_path/"traces")
     result = runner.run_task(task_spec(root), str(uuid.uuid4()))
     assert result.status is StageResultStatus.BLOCKED
     assert result.error == "LOCAL_QWEN_PRODUCER_DISABLED"
@@ -91,14 +127,10 @@ def test_local_qwen_runner_feature_worktree_success_uses_safe_command(tmp_path):
     root = make_feature_repo(tmp_path)
     calls = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return Completed()
-
     runner = LocalQwenCodexRunner(
         enabled=True,
         health_probe=healthy_bridge,
-        command_runner=fake_run,
+        **fake_process_kwargs(FakeProcess(),calls),
         trace_root=tmp_path/"traces",
     )
     result = runner.run_task(task_spec(root), str(uuid.uuid4()))
@@ -118,6 +150,7 @@ def test_local_qwen_runner_feature_worktree_success_uses_safe_command(tmp_path):
     assert kwargs["stdout"] is subprocess.PIPE
     assert kwargs["stderr"] is subprocess.PIPE
     assert kwargs["text"] is True
+    assert kwargs["start_new_session"] is True
     assert not any(key.upper().endswith(("TOKEN", "SECRET", "PASSWORD")) for key in kwargs["env"])
 
 
@@ -129,7 +162,7 @@ def test_local_qwen_runner_rejects_main_before_health_or_process(tmp_path):
     runner = LocalQwenCodexRunner(
         enabled=True,
         health_probe=lambda: health_calls.append(True) or healthy_bridge(),
-        command_runner=lambda *a, **k: process_calls.append(True) or Completed(),
+        popen_factory=lambda *a, **k: process_calls.append(True) or FakeProcess(),
         trace_root=tmp_path/"traces",
     )
     base = task_spec(root)
@@ -145,7 +178,7 @@ def test_local_qwen_bridge_identity_mismatch_blocks_process(tmp_path):
     runner = LocalQwenCodexRunner(
         enabled=True,
         health_probe=lambda: {"status": "healthy", "backend": "wrong", "tool": "exec_command"},
-        command_runner=lambda *a, **k: process_calls.append(True) or Completed(),
+        popen_factory=lambda *a, **k: process_calls.append(True) or FakeProcess(),
         trace_root=tmp_path/"traces",
     )
     result = runner.run_task(task_spec(root), str(uuid.uuid4()))
@@ -157,32 +190,28 @@ def test_local_qwen_bridge_identity_mismatch_blocks_process(tmp_path):
 def test_local_qwen_timeout_is_execution_uncertainty(tmp_path):
     root = make_feature_repo(tmp_path)
 
-    def timeout(command, **kwargs):
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
+    process=FakeProcess(timeout=True)
     runner = LocalQwenCodexRunner(
         enabled=True,
         health_probe=healthy_bridge,
-        command_runner=timeout,
+        **fake_process_kwargs(process),
         trace_root=tmp_path/"traces",
     )
-    with pytest.raises(LocalProducerExecutionUncertain, match="LOCAL_QWEN_CODEX_TIMEOUT"):
+    with pytest.raises(LocalProducerExecutionUncertain, match="LOCAL_QWEN_CODEX_TIMEOUT_TERMINATED"):
         runner.run_task(task_spec(root), str(uuid.uuid4()))
+    assert process.signals==[15] and process.poll() is not None
 
 
 def test_execution_trace_keeps_only_bounded_structural_events(tmp_path):
     root=make_feature_repo(tmp_path)
     execution_id=str(uuid.uuid4())
-    class Output:
-        returncode=0
-        stdout=(
+    process=FakeProcess(stdout=(
             json.dumps({"type":"item.started","item":{"type":"command_execution","command":"SECRET COMMAND"}})+"\n"
             +json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"PRIVATE MODEL REPLY"}})+"\n"
             +"malformed raw tool output SECRET_VALUE\n"
-        )
-        stderr="private stderr body SECRET_STDERR\n"
+        ),stderr="private stderr body SECRET_STDERR\n")
     result=LocalQwenCodexRunner(
-        enabled=True,health_probe=healthy_bridge,command_runner=lambda *a,**k:Output(),
+        enabled=True,health_probe=healthy_bridge,**fake_process_kwargs(process),
         trace_root=tmp_path/"runtime"/"executions",
     ).run_task(task_spec(root),execution_id)
     trace_path=tmp_path/"runtime"/"executions"/f"{execution_id}.json"
@@ -200,10 +229,9 @@ def test_timeout_trace_summarizes_partial_stream_without_raw_content(tmp_path):
     root=make_feature_repo(tmp_path)
     execution_id=str(uuid.uuid4())
     partial=(json.dumps({"type":"item.started","item":{"type":"command_execution","command":"do not persist"}})+"\n").encode()
-    def timeout(command,**kwargs):
-        raise subprocess.TimeoutExpired(command,kwargs["timeout"],output=partial,stderr=b"private error")
+    process=FakeProcess(stdout=partial,stderr=b"private error",timeout=True)
     runner=LocalQwenCodexRunner(
-        enabled=True,health_probe=healthy_bridge,command_runner=timeout,
+        enabled=True,health_probe=healthy_bridge,**fake_process_kwargs(process),
         trace_root=tmp_path/"runtime"/"executions",
     )
     with pytest.raises(LocalProducerExecutionUncertain):
@@ -214,7 +242,78 @@ def test_timeout_trace_summarizes_partial_stream_without_raw_content(tmp_path):
     assert "do not persist" not in path.read_text() and "private error" not in path.read_text()
 
 
-def prepare_durable_producer(tmp_path, command_runner):
+def test_exact_execution_cancel_stops_owned_group_and_not_unrelated(tmp_path):
+    owned=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"],start_new_session=True)
+    unrelated=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"],start_new_session=True)
+    execution_id=str(uuid.uuid4())
+    runner=LocalQwenCodexRunner(trace_root=tmp_path/"traces",cancel_wait_seconds=1)
+    try:
+        runner._register(execution_id,owned)
+        assert runner.cancel(str(uuid.uuid4())) is False
+        assert runner.cancel(execution_id,reason="test") is True
+        assert owned.poll() is not None
+        assert unrelated.poll() is None
+        assert runner._executions=={}
+        assert runner.cancel(execution_id) is False
+    finally:
+        if owned.poll() is None:
+            owned.terminate(); owned.wait(timeout=5)
+        if unrelated.poll() is None:
+            unrelated.terminate(); unrelated.wait(timeout=5)
+
+
+def test_cancel_escalates_exact_group_after_bounded_term_timeout(tmp_path):
+    process=FakeProcess(timeout=True,ignore_term=True)
+    execution_id=str(uuid.uuid4())
+    runner=LocalQwenCodexRunner(trace_root=tmp_path/"traces",**fake_process_kwargs(process))
+    runner._register(execution_id,process)
+    assert runner.cancel(execution_id) is True
+    assert process.signals==[signal.SIGTERM,signal.SIGKILL]
+    assert process.wait_calls==2 and runner._executions=={}
+
+
+def test_already_completed_owned_process_is_reaped_without_signal(tmp_path):
+    process=FakeProcess(); process.returncode=0
+    execution_id=str(uuid.uuid4())
+    runner=LocalQwenCodexRunner(trace_root=tmp_path/"traces",**fake_process_kwargs(process))
+    runner._register(execution_id,process)
+    assert runner.cancel(execution_id) is False
+    assert process.signals==[] and runner._executions=={}
+
+
+def test_registration_failure_reaps_exact_spawned_child(tmp_path):
+    root=make_feature_repo(tmp_path)
+    process=FakeProcess(timeout=True)
+    runner=LocalQwenCodexRunner(
+        enabled=True,health_probe=healthy_bridge,popen_factory=lambda *a,**k:process,
+        pgid_resolver=lambda pid:(_ for _ in ()).throw(OSError("metadata unavailable")),
+        trace_root=tmp_path/"traces",
+    )
+    result=runner.run_task(task_spec(root),str(uuid.uuid4()))
+    assert result.status is StageResultStatus.BLOCKED
+    assert process.poll()==-15 and process.wait_calls==1
+
+
+def test_concurrent_cancel_only_one_caller_owns_termination(tmp_path):
+    process=FakeProcess(timeout=True)
+    execution_id=str(uuid.uuid4())
+    runner=LocalQwenCodexRunner(trace_root=tmp_path/"traces",**fake_process_kwargs(process))
+    runner._register(execution_id,process)
+    results=[]
+    threads=[threading.Thread(target=lambda:results.append(runner.cancel(execution_id))) for _ in range(4)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+    assert results.count(True)==1
+    assert process.signals==[signal.SIGTERM]
+    assert runner._executions=={}
+
+
+def test_cancel_implementation_has_no_broad_process_scan():
+    source=inspect.getsource(LocalQwenCodexRunner)
+    assert not any(token in source for token in ("pkill","killall","pgrep"))
+
+
+def prepare_durable_producer(tmp_path, process):
     root = make_feature_repo(tmp_path)
     repo = LocalWorktreeSupervisorRepository(root, tmp_path / "runtime/supervisor.db")
     repo.migrate()
@@ -234,7 +333,7 @@ def prepare_durable_producer(tmp_path, command_runner):
     inner = LocalQwenCodexRunner(
         enabled=True,
         health_probe=healthy_bridge,
-        command_runner=command_runner,
+        **fake_process_kwargs(process),
         trace_root=tmp_path/"traces",
     )
     return root, repo, unit, context, PersistedCodexStageRunner(inner), run_id
@@ -242,7 +341,7 @@ def prepare_durable_producer(tmp_path, command_runner):
 
 def test_persisted_local_qwen_execution_is_confirmed_in_durable_ledger(tmp_path):
     root, repo, unit, context, runner, _run_id = prepare_durable_producer(
-        tmp_path, lambda *a, **k: Completed()
+        tmp_path, FakeProcess()
     )
     result = runner.run(context)
     assert result.status is StageResultStatus.PASS
@@ -258,10 +357,7 @@ def test_persisted_local_qwen_execution_is_confirmed_in_durable_ledger(tmp_path)
 
 
 def test_uncertain_local_qwen_execution_creates_mutation_fence(tmp_path):
-    def timeout(command, **kwargs):
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-    _root, repo, unit, context, runner, _run_id = prepare_durable_producer(tmp_path, timeout)
+    _root, repo, unit, context, runner, _run_id = prepare_durable_producer(tmp_path, FakeProcess(timeout=True))
     with pytest.raises(LocalProducerExecutionUncertain):
         runner.run(context)
     fence = repo.active_mutation_fence()

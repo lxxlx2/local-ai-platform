@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -511,25 +513,106 @@ class LocalWorktreeSupervisorRepository(Round2SupervisorRepository):
 class LocalQwenCodexRunner:
     """Explicitly enabled local Qwen planner using Codex as the execution shell."""
 
-    cancellation_supported = False
+    cancellation_supported = True
 
     def __init__(
         self,
         *,
         enabled: bool = False,
         health_probe=None,
-        command_runner=subprocess.run,
+        popen_factory=subprocess.Popen,
         bridge_health_url: str = DEFAULT_BRIDGE_HEALTH_URL,
         trace_root: Path = LOCAL_QWEN_EXECUTION_TRACE_ROOT,
+        pgid_resolver=os.getpgid,
+        group_signaler=os.killpg,
+        cancel_wait_seconds: float = 5.0,
     ):
         self.enabled = enabled is True
         self.health_probe = health_probe or self._probe_bridge
-        self.command_runner = command_runner
+        self.popen_factory = popen_factory
         self.bridge_health_url = bridge_health_url
         self.trace_store = LocalQwenExecutionTrace(trace_root)
+        self.pgid_resolver = pgid_resolver
+        self.group_signaler = group_signaler
+        self.cancel_wait_seconds = max(0.05,min(float(cancel_wait_seconds),30.0))
+        self._executions: dict[str, tuple[object,int,int]] = {}
+        self._canceling: set[str] = set()
+        self._execution_lock = threading.RLock()
 
     def cancel(self, execution_id=None, reason=None) -> bool:
-        return False
+        try:
+            identifier=str(uuid.UUID(str(execution_id)))
+        except (ValueError,AttributeError,TypeError):
+            return False
+        with self._execution_lock:
+            owned=self._executions.get(identifier)
+            if owned is not None and identifier in self._canceling:
+                return False
+            if owned is not None:
+                self._canceling.add(identifier)
+        if owned is None:
+            return False
+        process,pid,pgid=owned
+        if process.pid != pid or process.poll() is not None:
+            with self._execution_lock:
+                self._canceling.discard(identifier)
+                if self._executions.get(identifier) is owned:
+                    self._executions.pop(identifier,None)
+            return False
+        try:
+            if self.pgid_resolver(pid) != pgid:
+                return False
+            self.group_signaler(pgid,signal.SIGTERM)
+            try:
+                process.wait(timeout=self.cancel_wait_seconds)
+            except subprocess.TimeoutExpired:
+                if process.poll() is not None or self.pgid_resolver(pid) != pgid:
+                    process.wait(timeout=self.cancel_wait_seconds)
+                else:
+                    self.group_signaler(pgid,signal.SIGKILL)
+                    process.wait(timeout=self.cancel_wait_seconds)
+        except (OSError,subprocess.SubprocessError):
+            return False
+        finally:
+            with self._execution_lock:
+                self._canceling.discard(identifier)
+                if process.poll() is not None:
+                    if self._executions.get(identifier) is owned:
+                        self._executions.pop(identifier,None)
+        return process.poll() is not None
+
+    def _register(self,execution_id: str,process) -> tuple[object,int,int]:
+        pid=int(process.pid)
+        pgid=int(self.pgid_resolver(pid))
+        owned=(process,pid,pgid)
+        with self._execution_lock:
+            if execution_id in self._executions:
+                raise RuntimeError("LOCAL_QWEN_EXECUTION_ALREADY_ACTIVE")
+            self._executions[execution_id]=owned
+        return owned
+
+    def _unregister(self,execution_id: str,owned) -> None:
+        with self._execution_lock:
+            if self._executions.get(execution_id) is owned:
+                self._executions.pop(execution_id,None)
+
+    @staticmethod
+    def _reap_spawned_child(process) -> bool:
+        """Stop only the exact Popen child when ownership registration failed."""
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+            else:
+                process.wait(timeout=5)
+            return process.poll() is not None
+        except (OSError,subprocess.SubprocessError):
+            return False
 
     def _probe_bridge(self):
         request = urllib.request.Request(self.bridge_health_url, method="GET")
@@ -623,8 +706,10 @@ class LocalQwenCodexRunner:
         )
         started = time.monotonic()
         started_at = utc_now()
+        process=None
+        owned=None
         try:
-            completed = self.command_runner(
+            process = self.popen_factory(
                 command,
                 cwd=root,
                 env=self._safe_env(),
@@ -633,18 +718,31 @@ class LocalQwenCodexRunner:
                 stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
-                timeout=float(spec.timeout_seconds),
-                check=False,
+                start_new_session=True,
             )
+            owned=self._register(execution_id,process)
+            stdout,stderr=process.communicate(timeout=float(spec.timeout_seconds))
         except subprocess.TimeoutExpired as error:
+            terminated=self.cancel(execution_id,reason="TIMEOUT")
+            terminated=terminated or (process is not None and process.poll() is not None)
+            if terminated and process is not None:
+                try:
+                    stdout,stderr=process.communicate(timeout=self.cancel_wait_seconds)
+                except (OSError,subprocess.SubprocessError):
+                    stdout,stderr=error.stdout,error.stderr
+            else:
+                stdout,stderr=error.stdout,error.stderr
             duration = round(time.monotonic() - started, 3)
             trace=self.trace_store.summarize(
                 execution_id,started_at=started_at,ended_at=utc_now(),duration_seconds=duration,
-                timed_out=True,return_code=None,stdout=error.stdout,stderr=error.stderr,
+                timed_out=True,return_code=getattr(process,"returncode",None),stdout=stdout,stderr=stderr,
             )
             self.trace_store.persist(trace)
-            raise LocalProducerExecutionUncertain("LOCAL_QWEN_CODEX_TIMEOUT") from error
+            category="LOCAL_QWEN_CODEX_TIMEOUT_TERMINATED" if terminated else "LOCAL_QWEN_CODEX_TIMEOUT_ACTIVE_UNCERTAIN"
+            raise LocalProducerExecutionUncertain(category) from error
         except OSError as error:
+            if process is not None and owned is None and not self._reap_spawned_child(process):
+                raise LocalProducerExecutionUncertain("LOCAL_QWEN_LAUNCH_CHILD_UNREAPED") from error
             return StageResult(
                 StageResultStatus.BLOCKED,
                 "Codex local launcher could not start",
@@ -652,13 +750,19 @@ class LocalQwenCodexRunner:
                 metrics={"category": type(error).__name__},
             )
         except Exception as error:
+            if process is not None and owned is None:
+                self._reap_spawned_child(process)
+            elif process is not None and process.poll() is None:
+                self.cancel(execution_id,reason="RUNNER_EXCEPTION")
             raise LocalProducerExecutionUncertain(type(error).__name__) from error
+        finally:
+            if owned is not None and process is not None and process.poll() is not None:
+                self._unregister(execution_id,owned)
         duration = round(time.monotonic() - started, 3)
-        return_code = int(getattr(completed, "returncode", -1))
+        return_code = int(getattr(process, "returncode", -1))
         trace=self.trace_store.summarize(
             execution_id,started_at=started_at,ended_at=utc_now(),duration_seconds=duration,
-            timed_out=False,return_code=return_code,stdout=getattr(completed,"stdout",None),
-            stderr=getattr(completed,"stderr",None),
+            timed_out=False,return_code=return_code,stdout=stdout,stderr=stderr,
         )
         trace_written=self.trace_store.persist(trace)
         metrics = {
