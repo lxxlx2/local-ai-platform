@@ -4,21 +4,22 @@ Status type: CANONICAL CROSS-BRANCH SNAPSHOT
 
 Last consolidated: 2026-08-29
 
-Stable `main` HEAD at consolidation: `1311f7d05309d75af61bbd8990d4a0641ba70d56`
+Stable `main` HEAD at consolidation: `fcbb71d6f10f850ccfbb8dbb28015eae4ceed105`
 
 This file describes the whole project across active/review/reference branches. It does not claim that feature-branch work is merged or deployed.
 
 ## 1. Executive summary
 
-The platform foundation is substantially implemented, but the repository history has outgrown the old main-branch status document. Current work is therefore split between stable `main`, qualified/review-pending feature branches, and one active Context Architecture V2 implementation branch.
+Repository governance has been substantially consolidated. PR #20 merged the new README, Governance V2, ADR index, architecture decisions and audited download status into `main`. Historical Issue/branch cleanup then reduced the active GitHub surface without deleting unique implementation/evidence.
 
 Immediate sequence:
 
-1. finish repository governance consolidation on `docs/architecture-ledger`;
-2. return to Context Architecture V2 Phase 1 and finish static verification/commit/push without rerunning the already-passed full suite;
-3. keep model downloads paused until network conditions improve and download-state drift is reconciled;
-4. resume independent Codex review when model quota is available;
-5. then continue the master roadmap.
+1. finish the final legacy-doc branch retirement and review the new evidence-preservation commits on `docs/architecture-ledger`;
+2. merge those docs only after independent review and explicit Owner merge authorization;
+3. return to Context Architecture V2 Phase 1 and finish static verification/commit/push without rerunning the already-passed full suite unless code changes again;
+4. keep model downloads paused until network conditions improve and download-state drift is reconciled;
+5. resume independent Codex review when model quota is available;
+6. continue the master roadmap.
 
 No current docs/feature status implies merge, deployment or production activation.
 
@@ -44,7 +45,8 @@ See `docs/GOVERNANCE.md`.
 - Role: local MAIN/private reasoning and routine production.
 - Qualified production context remains 16K until a separate 24K/32K qualification changes policy.
 - Local Responses bridge / tool-loop foundation is implemented and previously qualified.
-- Qwen is suitable for bounded coding/repair and routine local work; long autonomous engineering loops have shown poor convergence and must remain bounded/decomposed.
+- Qwen is suitable for bounded coding/repair and routine local work; long autonomous engineering/review loops have shown poor convergence and must remain bounded/decomposed.
+- A two-file independent review attempt of the Gemini robustness fix timed out at 300 seconds with no verdict after workspace-policy blockers were removed. See `docs/qualification/QWEN_BOUNDED_REVIEW_2026-08-29.md` on the architecture ledger until its docs PR is merged.
 
 ### Local Qwen3.6 FAST/FALLBACK
 
@@ -57,7 +59,7 @@ See `docs/GOVERNANCE.md`.
 - Large review bundles for routing, exact cancellation and durable-state/security returned PASS with zero findings after sanitization-aware review packaging.
 - Gemini provider robustness fix is committed/pushed on `fix/gemini-large-review-v01` at `4d229c08adf1ed0716b3922322dca258b625b569`.
 - Focused/failover/full tests passed for that fix, plus real Gemini API smoke.
-- Final independent non-Gemini review of that fix is still pending. A bounded Qwen review timed out at 300 seconds and produced no verdict.
+- Final independent non-Gemini review of that fix is still pending. The bounded Qwen review produced no verdict within 300 seconds.
 - Gemini supplementary execution/P3 structured patch path is not yet fully implemented or activated.
 
 ### Codex
@@ -66,22 +68,45 @@ See `docs/GOVERNANCE.md`.
 - Codex model quota is currently unavailable, so independent Codex review work is paused.
 - Codex CLI may still be used as a local harness only when configured to the local Qwen provider and route attribution proves no OpenAI model usage.
 
-## 4. Important branches
+## 4. Repository governance state
+
+Governance baseline merged through PR #20 at `fcbb71d6f10f850ccfbb8dbb28015eae4ceed105` after Gemini independent review PASS with zero findings.
+
+Issue cleanup completed:
+
+- closed/superseded/completed: #1, #2, #3, #4, #5, #6;
+- active roadmap/execution issues: #13, #14, #15, #16, #17, #18, #19.
+
+Remote branch cleanup completed in two stages:
+
+- 10 branches with no remaining execution value were deleted after containment review;
+- three historical branches with unique commits were first preserved through annotated archive tags, verified against exact target SHAs, then deleted.
+
+Archive tags:
+
+- `archive/media-v02-quota-cutoff-20260828` -> `59a5cf22e774f26c0b103eeddc77680f8708d2b7`;
+- `archive/local-producer-v01` -> `c7887cb9c40675e113a1154f7f5528d8c6cfc721`;
+- `archive/supervisor-start-identity-v01` -> `c09fe9c80bd5c01fa9005c63a4c7cea7514c3aea`.
+
+`docs/architecture-ledger` was fast-forwarded to the merged governance baseline before new evidence-preservation commits were added.
+
+The remaining legacy docs branch `docs/context-architecture-v2` was audited against frozen failover base `d218f82d39b06b41aac27aaf867ad54a66443563`. Its 11 unique commits are documentation-only. Long-term-value design/qualification records have now been copied to `docs/architecture-ledger`; the old Architecture Change Protocol is intentionally not restored because `main` contains the newer Governance V2 protocol. Preserve the exact legacy head with an archive tag before deleting that branch.
+
+## 5. Important surviving branches
 
 | Branch | State | Purpose / current status |
 |---|---|---|
-| `main` | STABLE | Stable baseline `1311f7d...`; does not contain all latest qualified features. |
-| `docs/architecture-ledger` | ACTIVE | Single governance/ADR/current-status branch. Replaces the pattern of one docs branch per decision. |
-| `feat/context-budget-manager-v01` | ACTIVE | Context V2 Phase 1. Local worktree currently has uncommitted implementation; compatibility test PASS, focused 57 PASS, full suite 686 PASS, diff check PASS. Post-test verification command failed only because PYTHONPATH was missing after returning to repo root. |
+| `main` | STABLE | Governance consolidation merged at `fcbb71d...`; stable code baseline still does not include all latest qualified feature work. |
+| `docs/architecture-ledger` | ACTIVE | Single long-lived docs/ADR/qualification ledger. Currently contains post-PR#20 evidence-preservation commits awaiting docs review/merge. |
+| `docs/context-architecture-v2` | RETIRING | Legacy aggregate docs branch at `1806d755...`. Its 11 unique commits beyond `d218f82...` are docs-only and their durable value has been migrated. Archive exact head before deletion. |
+| `feat/context-budget-manager-v01` | ACTIVE | Context V2 Phase 1. Local worktree has uncommitted implementation; compatibility test PASS, focused 57 PASS, full suite 686 PASS, diff check PASS. Post-test verification failed only because PYTHONPATH was missing after returning to repo root. |
 | `feat/codex-desktop-auto-failover-v01` | FROZEN_REVIEW | Qualified Codex -> Qwen same-job failover baseline at `d218f82d39b06b41aac27aaf867ad54a66443563`; independent Codex review paused by quota. Do not mutate baseline. |
 | `fix/gemini-large-review-v01` | FROZEN_REVIEW | Gemini large structured review robustness fix at `4d229c08...`; tests and real API smoke passed; non-Gemini independent review pending. |
-| `feat/production-capabilities-v01` | REFERENCE | Contains download manager and earlier production-capability work; current download audit should be read from `docs/DOWNLOAD_STATUS.md`, not old percentages in historical docs. |
-| `feat/local-qwen-owner-raw-v04` | REFERENCE / PLAN SOURCE | Contains approved local-first/product/model plan and earlier RAW target planning. RAW target needs reconciliation before resume. |
-| older per-decision docs branches | REFERENCE | Preserve history until ADR migration/merge makes them safely retireable. Do not add new architecture work there. |
+| `feat/local-qwen-generic-project-v03` | REFERENCE / FUTURE WORK | Generic-project implementation history for Issue #13; future work should align with shared provider/router architecture rather than assume the old Qwen-only path is canonical. |
+| `feat/local-qwen-owner-raw-v04` | REFERENCE / PLAN SOURCE | Earlier RAW/provider/product planning. RAW download target must be reconciled before resume. |
+| `feat/private-learning-engine-v01` | REFERENCE / FUTURE WORK | Training/learning-engine implementation history; not a currently active production path. |
 
-Branch cleanup will happen only after unique decisions/evidence are durable elsewhere.
-
-## 5. Context Architecture V2
+## 6. Context Architecture V2
 
 Architecture: ACCEPTED.
 
@@ -104,7 +129,9 @@ Current local implementation evidence on `feat/context-budget-manager-v01`:
 
 Later phases: Qwen 24K/32K qualification, Gemini token-aware context tiers, then shared context/retrieval contracts for coding/X/novels/commerce/media.
 
-## 6. Model download state
+The full approved design is preserved as `docs/CONTEXT_ARCHITECTURE_V2.md` on the architecture ledger in addition to the concise ADR-0003.
+
+## 7. Model download state
 
 Downloads are intentionally PAUSED because network conditions are currently poor. No download-related process was present during the 2026-08-29 audit. Quarantine count was zero. About 586 GiB disk space was free.
 
@@ -135,11 +162,19 @@ Do not resume RAW until target/revision/runtime/local-dir state is explicitly re
 
 See `docs/DOWNLOAD_STATUS.md`.
 
-## 7. Roadmap status
+## 8. Roadmap status
 
 Master infrastructure roadmap: Issue #14.
 
 Product end-state: Issue #15.
+
+Active execution/workflow issues:
+
+- #13 Generic project adapter;
+- #16 Novel workflow engine;
+- #17 Revenue workflows;
+- #18 Interactive provider priority / P3 implementation;
+- #19 Context Architecture V2.
 
 Major remaining work includes:
 
@@ -159,24 +194,23 @@ Major remaining work includes:
 - eventual external multi-user isolation;
 - final integrated E2E/independent review/merge gate.
 
-Historical Issue bodies such as Issue #1 may still describe Gemini as roadmap-only. Those bodies are historical and no longer represent implementation state; this file and ADR/index records take precedence until Issues are individually normalized.
+Closed Issues #1-#6 are historical/superseded/completed records and are no longer active sources of execution state.
 
-## 8. Repository governance transition
+## 9. Branch protection constraint
 
-Repository governance is being normalized on `docs/architecture-ledger`:
+`main` currently reports `protected=false`.
 
-- one README entrypoint;
-- one canonical current-status snapshot;
-- one ADR index;
-- ADR files for approved architecture decisions;
-- Issues for execution rather than architecture canon;
-- feature branches for implementation;
-- qualification records for evidence;
-- one long-lived docs ledger only when an implementation branch is frozen.
+The GitHub repository is private. Repository rulesets returned a plan-level 403 indicating that this feature requires GitHub Pro or a public repository. Classic branch-protection access through the current integration also returned 403. Do not claim `main` is protected until this is changed and re-verified through an eligible GitHub plan/UI/API.
 
-After this governance branch is reviewed and explicitly merged, old docs branches can be classified/retired gradually instead of being cleaned up blindly.
+Until then, protection is procedural:
 
-## 9. Hard safety constraints
+- no direct feature merge without the documented review/Owner gate;
+- no force push to `main`;
+- no deleting `main`;
+- keep implementation on feature branches/worktrees;
+- verify exact refs before push/merge.
+
+## 10. Hard safety constraints
 
 - Local-first routine production.
 - Host/Supervisor owns permissions.
@@ -187,6 +221,10 @@ After this governance branch is reviewed and explicitly merged, old docs branche
 - Downloaded != qualified != deployed.
 - No merge/deploy/external publish/irreversible action is implied by a feature/docs commit.
 
-## 10. Next action after governance
+## 11. Next action after governance
 
-Return to `feat/context-budget-manager-v01` and rerun only the remaining post-test verification with correct `PYTHONPATH`; do not repeat the already-passed 686-test full suite unless the code changes again. Then inspect final diff, commit/push Phase 1, update Issue #19, and proceed to review.
+1. archive tag and delete `docs/context-architecture-v2` after verifying its exact head;
+2. independently review the docs-only delta currently on `docs/architecture-ledger` and merge it to `main` only after explicit Owner authorization;
+3. return to `feat/context-budget-manager-v01` and rerun only the remaining post-test verification with correct `PYTHONPATH`;
+4. do not repeat the already-passed 686-test full suite unless the implementation changes again;
+5. inspect final Context V2 Phase 1 diff, commit/push, update Issue #19, then proceed to independent review.

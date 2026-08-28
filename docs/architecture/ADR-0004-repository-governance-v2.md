@@ -1,10 +1,10 @@
 # ADR-0004: Repository Governance V2
 
-Status: ACCEPTED / IMPLEMENTING
+Status: ACCEPTED / IMPLEMENTED / CONTINUOUSLY MAINTAINED
 
 ## Context
 
-Project decisions, qualification evidence and implementation state have accumulated across many feature/docs branches and Issue bodies. Several historical records are accurate for their original moment but stale as a description of the current platform. Creating one docs branch per architecture change would increase branch sprawl and make source-of-truth recovery harder.
+Project decisions, qualification evidence and implementation state had accumulated across many feature/docs branches and Issue bodies. Several historical records were accurate for their original moment but stale as a description of the current platform. Creating one docs branch per architecture change would increase branch sprawl and make source-of-truth recovery harder.
 
 ## Decision
 
@@ -40,8 +40,23 @@ Use `ACTIVE`, `FROZEN_REVIEW`, `REFERENCE`, `MERGED`, `RETIRED` in the current-s
 
 A model is complete only when the completion marker and snapshot validation pass. Partial-cache bytes are resumable work and must be reported separately from completed payload; duplicate `.incomplete` fragments must not inflate a canonical percent-complete number.
 
+## Implementation evidence
+
+Repository Governance V2 was independently reviewed by Gemini on 2026-08-29 with verdict PASS and zero findings, then merged to `main` through PR #20 at merge commit `fcbb71d6f10f850ccfbb8dbb28015eae4ceed105`.
+
+Post-merge cleanup then:
+
+- closed superseded/completed Issues #1-#6;
+- reduced active Issues to #13-#19 as applicable;
+- retired ten obsolete remote branches after containment review;
+- preserved three unique historical branches as verified annotated archive tags before deleting their remote branches;
+- migrated unique long-term architecture/qualification evidence from the legacy `docs/context-architecture-v2` aggregate branch into the single `docs/architecture-ledger`.
+
+Governance remains a continuously maintained process rather than a one-time migration.
+
 ## Consequences
 
 - Future agents should recover project state by reading a few canonical files before historical branches/issues.
 - Architecture decisions remain durable without branch proliferation.
-- Main remains protected by review/merge gates; this governance branch does not imply automatic merge.
+- `main` is the stable baseline, while merge, deployment and production activation remain separate gates.
+- On the current private-repository plan, GitHub reports `main` as unprotected and ruleset/branch-protection APIs are not currently available through the connected account/integration; procedural review/merge gates remain mandatory until technical protection can be enabled and verified.
