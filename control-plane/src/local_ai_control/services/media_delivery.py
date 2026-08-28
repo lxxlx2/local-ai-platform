@@ -110,24 +110,213 @@ class MediaPublisher:
 
 
 class MediaCleanup:
-    """Deletes only derived duplicates after verified publish, never source/evidence/state."""
-    ELIGIBLE_DIRS=("audio","visual","segments")
-    ELIGIBLE_FILES=("generated/presentation.pptx",)
-    def cleanup(self, workspace: MediaWorkspace, *, keep_local=False) -> dict:
-        job=workspace.load()
-        if job.state is not MediaWorkflowState.PUBLISHED or not job.publish: raise MediaWorkflowError("MEDIA_CLEANUP_PUBLISH_REQUIRED")
-        workspace.transition(MediaWorkflowState.CLEANUP_PENDING,reason="verified publish cleanup")
-        removed=[]
+    """Delete only verified, derived media artifacts after successful publish."""
+
+    ELIGIBLE_DIRS = ("audio", "visual", "segments")
+    ELIGIBLE_FILES = (
+        "generated/presentation.pptx",
+        "output/final.mp4",
+    )
+
+    PRESENTATION_DIRS = (
+        "audio",
+        "slides",
+        "segments",
+    )
+
+    PRESENTATION_FILES = (
+        "output/presentation.mp4",
+        "source/presentation.pdf",
+    )
+
+    def __init__(self, *, allowed_derived_roots=()):
+        self.allowed_derived_roots = tuple(
+            Path(item).resolve() for item in allowed_derived_roots
+        )
+
+    def _validate_derived_workspace(self, path: Path) -> Path:
+        path = Path(path)
+
+        if path.is_symlink():
+            raise MediaWorkflowError("MEDIA_CLEANUP_SYMLINK_DENIED")
+
+        resolved = path.resolve()
+
+        if not self.allowed_derived_roots:
+            raise MediaWorkflowError("MEDIA_CLEANUP_DERIVED_ROOT_DENIED")
+
+        allowed = False
+        for root in self.allowed_derived_roots:
+            try:
+                resolved.relative_to(root)
+                allowed = True
+                break
+            except ValueError:
+                continue
+
+        if not allowed:
+            raise MediaWorkflowError("MEDIA_CLEANUP_DERIVED_ROOT_DENIED")
+
+        return resolved
+
+    @staticmethod
+    def _remove_file(path: Path, removed: list[str], label: str) -> None:
+        if path.is_symlink():
+            raise MediaWorkflowError("MEDIA_CLEANUP_SYMLINK_DENIED")
+
+        if path.is_file():
+            path.unlink()
+            removed.append(label)
+
+    @staticmethod
+    def _remove_dir_files(
+        directory: Path,
+        removed: list[str],
+        prefix: str,
+    ) -> None:
+        if directory.is_symlink():
+            raise MediaWorkflowError("MEDIA_CLEANUP_SYMLINK_DENIED")
+
+        if not directory.is_dir():
+            return
+
+        for item in sorted(directory.rglob("*"), reverse=True):
+            if item.is_symlink():
+                raise MediaWorkflowError("MEDIA_CLEANUP_SYMLINK_DENIED")
+
+            if item.is_file():
+                relative = item.relative_to(directory)
+                item.unlink()
+                removed.append(f"{prefix}/{relative}")
+
+        for item in sorted(directory.rglob("*"), reverse=True):
+            if item.is_dir():
+                try:
+                    item.rmdir()
+                except OSError:
+                    pass
+
+    def cleanup(
+        self,
+        workspace: MediaWorkspace,
+        *,
+        keep_local=False,
+        derived_workspaces=(),
+    ) -> dict:
+        job = workspace.load()
+
+        if job.state is not MediaWorkflowState.PUBLISHED or not job.publish:
+            raise MediaWorkflowError("MEDIA_CLEANUP_PUBLISH_REQUIRED")
+
+        candidate = json.loads(
+            workspace.read_artifact("metadata/candidate.json")
+        )
+
+        approval = job.approval or {}
+        publish = job.publish or {}
+
+        expected_hash = approval.get("output_sha256")
+
+        if (
+            not expected_hash
+            or candidate.get("output_sha256") != expected_hash
+            or publish.get("output_sha256") != expected_hash
+        ):
+            raise MediaWorkflowError("MEDIA_CLEANUP_PUBLISH_VERIFY_REQUIRED")
+
+        workspace.transition(
+            MediaWorkflowState.CLEANUP_PENDING,
+            reason="verified publish cleanup",
+        )
+
+        removed = []
+
         if not keep_local:
+            candidate_relative = candidate.get("output_path")
+
+            if (
+                not isinstance(candidate_relative, str)
+                or not candidate_relative
+            ):
+                raise MediaWorkflowError(
+                    "MEDIA_CLEANUP_CANDIDATE_PATH_INVALID"
+                )
+
+            candidate_path = workspace._inside(candidate_relative)
+
+            if candidate_path.is_file():
+                if sha256_file(candidate_path) != expected_hash:
+                    raise MediaWorkflowError(
+                        "MEDIA_CLEANUP_CANDIDATE_CHANGED"
+                    )
+
+                self._remove_file(
+                    candidate_path,
+                    removed,
+                    candidate_relative,
+                )
+
             for relative in self.ELIGIBLE_DIRS:
-                directory=workspace.path/relative
-                if directory.is_symlink(): raise MediaWorkflowError("MEDIA_CLEANUP_SYMLINK_DENIED")
-                if directory.is_dir():
-                    for path in directory.rglob("*"):
-                        if path.is_file() and not path.is_symlink(): path.unlink(); removed.append(str(path.relative_to(workspace.path)))
+                self._remove_dir_files(
+                    workspace.path / relative,
+                    removed,
+                    relative,
+                )
+
             for relative in self.ELIGIBLE_FILES:
-                path=workspace.path/relative
-                if path.is_file() and not path.is_symlink(): path.unlink(); removed.append(relative)
-        workspace.write_artifact("metadata/cleanup.json",{"schema_version":"0.2","keep_local":keep_local,"removed":removed,"at":utc_now()})
-        workspace.transition(MediaWorkflowState.ARCHIVED,reason="cleanup complete")
-        return {"removed":removed,"retained":["job.json","source_evidence.json","requirements.json","requirements.md","production_brief.md","script.txt","scene_plan.json","prompt_pack.json","metadata/approval.json"]}
+                self._remove_file(
+                    workspace.path / relative,
+                    removed,
+                    relative,
+                )
+
+            for derived in derived_workspaces:
+                derived_path = self._validate_derived_workspace(
+                    Path(derived)
+                )
+
+                for relative in self.PRESENTATION_DIRS:
+                    self._remove_dir_files(
+                        derived_path / relative,
+                        removed,
+                        f"derived:{derived_path.name}/{relative}",
+                    )
+
+                for relative in self.PRESENTATION_FILES:
+                    self._remove_file(
+                        derived_path / relative,
+                        removed,
+                        f"derived:{derived_path.name}/{relative}",
+                    )
+
+        workspace.write_artifact(
+            "metadata/cleanup.json",
+            {
+                "schema_version": "0.2",
+                "keep_local": keep_local,
+                "removed": removed,
+                "at": utc_now(),
+            },
+        )
+
+        workspace.transition(
+            MediaWorkflowState.ARCHIVED,
+            reason="cleanup complete",
+        )
+
+        return {
+            "removed": removed,
+            "retained": [
+                "job.json",
+                "source_evidence.json",
+                "requirements.json",
+                "requirements.md",
+                "production_brief.md",
+                "script.txt",
+                "scene_plan.json",
+                "prompt_pack.json",
+                "metadata/approval.json",
+                "metadata/candidate.json",
+                "metadata/cleanup.json",
+            ],
+        }

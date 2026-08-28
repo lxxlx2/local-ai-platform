@@ -66,3 +66,83 @@ def test_publisher_requires_approval_fixed_remote_clean_repo_and_lfs(tmp_path):
 def test_metadata_rejects_sensitive_or_local_fields():
     with pytest.raises(MediaWorkflowError): MediaPublisher._validate_metadata({"token":"x"})
     with pytest.raises(MediaWorkflowError): MediaPublisher._validate_metadata({"job_id":"/Users/private"})
+
+
+def test_cleanup_removes_published_local_video_and_bounded_presentation_artifacts(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+    MediaApprovalService().approve(
+        workspace,
+        owner_id="owner",
+        **candidate,
+    )
+
+    repo,bare=temp_public_repo(tmp_path)
+
+    MediaPublisher(
+        repo,
+        expected_remote=str(bare),
+    ).publish(workspace)
+
+    presentation_root=tmp_path/"presentation-jobs"
+    presentation=presentation_root/"presentation-test"
+
+    (presentation/"audio").mkdir(parents=True)
+    (presentation/"slides").mkdir()
+    (presentation/"segments").mkdir()
+    (presentation/"output").mkdir()
+
+    (presentation/"audio"/"slide.wav").write_bytes(b"audio")
+    (presentation/"slides"/"slide.png").write_bytes(b"png")
+    (presentation/"segments"/"slide.mp4").write_bytes(b"segment")
+    (presentation/"output"/"presentation.mp4").write_bytes(b"video")
+    (presentation/"manifest.json").write_text("retain")
+
+    result=MediaCleanup(
+        allowed_derived_roots=(presentation_root,)
+    ).cleanup(
+        workspace,
+        derived_workspaces=(presentation,),
+    )
+
+    assert workspace.load().state is MediaWorkflowState.ARCHIVED
+
+    assert not (workspace.path/"output"/"presentation.mp4").exists()
+    assert not (presentation/"audio"/"slide.wav").exists()
+    assert not (presentation/"slides"/"slide.png").exists()
+    assert not (presentation/"segments"/"slide.mp4").exists()
+    assert not (presentation/"output"/"presentation.mp4").exists()
+
+    assert (presentation/"manifest.json").is_file()
+
+    assert any(
+        item == "output/presentation.mp4"
+        for item in result["removed"]
+    )
+
+
+def test_cleanup_rejects_derived_workspace_outside_allowlist(tmp_path):
+    workspace,candidate=workspace_at_review(tmp_path)
+
+    MediaApprovalService().approve(
+        workspace,
+        owner_id="owner",
+        **candidate,
+    )
+
+    repo,bare=temp_public_repo(tmp_path)
+
+    MediaPublisher(
+        repo,
+        expected_remote=str(bare),
+    ).publish(workspace)
+
+    outside=tmp_path/"outside"
+    outside.mkdir()
+
+    with pytest.raises(MediaWorkflowError,match="DERIVED_ROOT_DENIED"):
+        MediaCleanup(
+            allowed_derived_roots=(tmp_path/"allowed",)
+        ).cleanup(
+            workspace,
+            derived_workspaces=(outside,),
+        )

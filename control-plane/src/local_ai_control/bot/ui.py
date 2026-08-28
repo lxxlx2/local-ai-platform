@@ -89,6 +89,23 @@ def source_mode_menu():
     return inline([[('上传材料','mw:source:UPLOADS'),('链接','mw:source:LINKS')],[('上传与链接','mw:source:UPLOADS_AND_LINKS'),('直接说明','mw:source:DIRECT_BRIEF')],[('取消','mw:cancel')]])
 
 
+def materials_menu(mode):
+    if mode == "LINKS":
+        return inline([
+            [('继续添加链接','mw:materials:more'),('链接齐了','mw:materials:done')],
+            [('取消','mw:cancel')],
+        ])
+    if mode == "UPLOADS":
+        return inline([
+            [('继续上传','mw:materials:more'),('材料齐了','mw:materials:done')],
+            [('取消','mw:cancel')],
+        ])
+    return inline([
+        [('继续添加','mw:materials:more'),('材料齐了','mw:materials:done')],
+        [('取消','mw:cancel')],
+    ])
+
+
 def execution_mode_menu(): return inline([[('自动完成','mw:exec:AUTO'),('先审文稿','mw:exec:REVIEW_SCRIPT')],[('取消','mw:cancel')]])
 def language_menu(): return inline([[('自动识别','mw:lang:auto'),('中文','mw:lang:zh'),('English','mw:lang:en')],[('取消','mw:cancel')]])
 def voice_menu(): return inline([[('自动选择','mw:voice:auto')],[('中文声音','mw:voice:zh-male-25-default'),('English Voice','mw:voice:en-male-25-default')],[('取消','mw:cancel')]])
