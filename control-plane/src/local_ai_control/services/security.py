@@ -26,7 +26,7 @@ class SecretFirewall:
         (
             "generic_secret_assignment",
             re.compile(
-                r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9._/-]{16,}",
+                r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*(?![A-Za-z_][A-Za-z0-9_]*\s*\()['\"]?[A-Za-z0-9._/-]{16,}",
                 re.I,
             ),
         ),
