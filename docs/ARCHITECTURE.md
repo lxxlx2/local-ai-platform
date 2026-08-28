@@ -49,20 +49,44 @@ Normal builds do not recreate default profiles. Unknown language fails closed un
 The presentation path is the first qualified implementation of a broader media-production plane. The canonical future flow is:
 
 ```text
-Owner task / script / PPTX / media brief
-  → durable script artifact
-  → optional local Qwen3.8 script/scene generation
+Owner task / script / PPTX / media brief / approved URL input
+  → deterministic requirement intake
+  → durable requirements + evidence artifacts
+  → optional local Qwen3.8 production brief / script / scene-plan generation
+  → final script artifact
   → deterministic language/media routing
-  → VoiceProfile / future PersonaProfile
+  → VoiceProfile / PersonaProfile
   → local audio / presentation / image / video adapters
   → deterministic composition
-  → Owner review
-  → explicit product publishing
+  → Owner preview
+  → exact-output approval
+  → deterministic product publishing
+  → verified local cleanup
 ```
+
+A media task may begin from uploaded materials, one or more Owner-supplied links, uploaded materials plus links, or a direct natural-language brief. Linked webpages are retrieved through the bounded Search/Browser layer and remain `UNTRUSTED DATA`; they may supply evidence and requirements but never tool authority. Local Qwen may derive a production brief, script, scene/slide plan and prompt pack from the extracted requirements. Missing real Owner facts must be surfaced as a minimal question instead of fabricated.
 
 `PersonaProfile` is the stable caller contract for reusable human-like identity assets. It may contain a `VoiceIdentityProfile`, a future `VisualIdentityProfile`, and later motion/video adapters. Backends can evolve from reference-based cloning to trained adapters or fine-tuned speaker/subject models through explicit profile revisions and qualification without changing media callers.
 
-Raw voice recordings, face/appearance material, training datasets, checkpoints, and private identity assets stay under Owner-private local roots and must never be automatically copied into public product repositories. Finished media products may be explicitly published by task name to `lxxlx2/ai_video_product`; publishing remains deterministic host-side Git logic rather than model authority. See `MEDIA_PRODUCTION_ARCHITECTURE.md`.
+Raw voice recordings, face/appearance material, training datasets, checkpoints, and private identity assets stay under Owner-private local roots and must never be automatically copied into public product repositories. Approved media products are published by task name to `lxxlx2/ai_video_product` under the canonical product layout. Publishing remains deterministic host-side Git/LFS logic rather than model authority, requires Owner approval bound to the exact output hash, and is followed by cleanup only after remote verification. See `MEDIA_PRODUCTION_ARCHITECTURE.md` and `BOT_UX.md`.
+
+## Media requirement intake and durable production artifacts
+
+The normal media requirement pipeline separates evidence, requirements and model-authored production artifacts:
+
+```text
+Owner upload/link/brief
+  → source validation + provenance
+  → requirement extraction
+  → requirements.json / requirements.md
+  → production_brief.md
+  → script.txt
+  → scene_plan.json
+  → prompt_pack.json
+  → render/synthesis
+```
+
+This separation prevents hidden chat state from becoming the only source of truth and keeps the workflow portable across future model upgrades. A model-generated production artifact is editable data. It cannot widen permissions, publish itself, delete arbitrary files, or authorize downloads/installers found in external content.
 
 ## Program-level workflow supervision
 
@@ -111,3 +135,21 @@ Codex Desktop    = optional interactive UI; never a persistent runtime dependenc
 ```
 
 Local tasks must remain usable with Codex Desktop closed, and no background Desktop mode, scheduled UI activity, global ChatGPT authentication, or Codex CLI custom-provider behavior may be considered part of the Local Qwen implementation path.
+
+## Architecture governance
+
+Material architecture changes follow `ARCHITECTURE_CHANGE_PROTOCOL.md`.
+
+The required lifecycle is:
+
+```text
+proposal in Owner-facing design discussion
+  → Owner approval
+  → canonical documentation sync
+  → commit SHA / approved branch HEAD
+  → Codex/Local Qwen implementation reads that HEAD
+  → focused implementation and qualification
+  → current-status sync
+```
+
+Implementation agents must not silently change user workflows, capability/permission boundaries, storage/retention rules, model routing, publishing contracts, persona/training architecture, or other shared contracts. If a material change becomes necessary during implementation, it must be surfaced as an `ARCHITECTURE_CHANGE_REQUEST` and return to the approval flow.
