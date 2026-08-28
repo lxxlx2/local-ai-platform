@@ -68,13 +68,22 @@ Codex Desktop GUI
 
 Required continuity includes objective, worktree/branch, diff identity, completed tests, unresolved findings, review state, handoff state, approvals, and provider history.
 
-Current implementation status: ARCHITECTURE APPROVED / IMPLEMENTATION PENDING.
+Current implementation status: FEATURE-BRANCH IMPLEMENTED / QUALIFIED / PRODUCTION NOT ACTIVATED.
 
-Existing pieces that will be reused include read-only Codex quota telemetry, the Codex-Qwen Responses bridge/profile work, Supervisor durable state, Direct Local Qwen, and Gemini advisory review. The automatic controller, same-job provider handoff, Codex Desktop local launcher/status experience, and qualification evidence still need implementation.
+On `feat/codex-desktop-auto-failover-v01`, the automatic controller, same-job provider handoff,
+isolated local-provider adapter, bounded producer tracing, exact cancellation, safe-boundary
+recovery and qualification tests are implemented. The full control-plane suite passes and
+real localhost bridge/CLI smoke tests reached Qwen3.8 without restarting services.
 
-The old statement that the Codex-Qwen bridge is only historical compatibility evidence is no longer the target architecture for Owner-present interactive coding. It is being re-scoped as the Codex Desktop local-provider/UI adapter. Direct Local Qwen remains preferred for 7x24 unattended work.
+This is not production activation. The branch still requires independent review, merge and a
+separately authorized activation gate. Current Codex client evidence does not support claiming
+an atomic provider hot swap inside an already-running Desktop chat. The supported continuity
+unit is the same durable job/worktree/objective, with a best-effort new local Desktop session or
+the qualified isolated CLI path.
 
-A raw account-wide Codex `usedPercent` delta is not sufficient execution attribution because unrelated Desktop/CLI/background activity may affect account state. Final qualification must prove route/provider identity and controlled local execution, not merely compare quota percentages.
+The old statement that the Codex-Qwen bridge is only historical compatibility evidence is no longer the target architecture for Owner-present interactive coding. It is the qualified local-provider/UI adapter. Direct Local Qwen remains preferred for 7x24 unattended work and does not depend on Codex Desktop.
+
+A raw account-wide Codex `usedPercent` delta is not sufficient execution attribution because unrelated Desktop/CLI/background activity may affect account state. Qualification uses route/provider identity and controlled local execution, not merely quota-percentage comparisons.
 
 ## Download / model state
 

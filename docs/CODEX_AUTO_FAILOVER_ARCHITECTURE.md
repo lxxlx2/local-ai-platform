@@ -1,6 +1,6 @@
 # Codex Desktop + Local Qwen Automatic Failover Architecture
 
-Status: OWNER-APPROVED / DOC-SYNCED / IMPLEMENTATION PENDING
+Status: OWNER-APPROVED / IMPLEMENTED ON FEATURE BRANCH / QUALIFIED / NOT PRODUCTION-ACTIVATED
 
 Approved: 2026-08-28
 
@@ -224,13 +224,47 @@ Before this architecture is marked READY, qualification must demonstrate:
 
 A raw account-wide quota percentage delta is insufficient proof of OpenAI model invocation because unrelated Codex clients/background telemetry may affect account state. Qualification should use provider-route evidence and controlled requests in addition to account telemetry.
 
-## 12. Current status
+## 12. Implemented control path
 
-Architecture is approved and documented. Automatic Codex Desktop -> Local Qwen failover is not yet implemented or qualified.
+The feature branch now contains:
 
-Until implementation is complete:
+- bounded structural Local-Qwen Codex execution traces outside Git;
+- exact per-execution process-group cancellation and child reaping;
+- `ProviderFailoverController` with deterministic evidence-source policy;
+- durable provider state and append-only transition history in Supervisor SQLite;
+- immutable job/worktree/branch/objective bindings;
+- Qwen3.8, bridge, route, workspace and security-profile preflight;
+- a safe-boundary recovery policy that never interrupts a mutating local step;
+- a provider-aware stage adapter that reuses the same `StageContext` and `job_id`;
+- an isolated `CODEX_HOME` launch plan and private effective-provider status record.
 
-- Direct Local Qwen remains the qualified local coding executor;
-- Codex-Qwen bridge remains useful experimental/compatibility infrastructure;
-- manual Codex Desktop provider switching must not be claimed as automatic failover;
-- no production merge/deploy is implied by this architecture approval.
+The transition history captures candidate/diff identity, completed validation references,
+unresolved finding references, stage, execution identity when available, and safe-boundary
+state. Replaying one signal is idempotent and does not create a new job.
+
+## 13. Qualified behavior and client boundary
+
+Qualification on 2026-08-28 demonstrated:
+
+- simulated quota exhaustion follows `CLOUD_CODEX -> HANDOFF_PENDING -> LOCAL_PREFLIGHT -> LOCAL_QWEN -> CONTINUE_SAME_JOB`;
+- recognized active-request rate limiting is eligible, while ambiguous input and unattributed rate limiting fail closed;
+- local preflight failure durably blocks the existing job without discarding its candidate;
+- cloud recovery waits for a safe boundary and then routes review back to OpenAI Codex;
+- the local execution adapter invokes no OpenAI model runner;
+- Qwen3.8 health and the localhost Responses bridge match the qualified identities;
+- direct bridge and Codex CLI local-provider smoke tests complete through Qwen3.8;
+- the full control-plane suite passes.
+
+Codex CLI 0.148.0 supports an isolated `CODEX_HOME`, custom provider configuration,
+workspace selection, session resume, and `codex app <workspace>`. It does not expose a
+qualified API that proves an already-running Codex Desktop chat can atomically change its
+model provider while retaining that exact chat thread. Therefore:
+
+- same durable job, worktree, branch, objective, candidate and progress handoff: **supported**;
+- automatic provider routing in the Supervisor execution path: **implemented**;
+- isolated local Codex CLI session: **qualified**;
+- Codex Desktop opening the same workspace with the isolated environment: **best-effort new local session**;
+- exact same-thread Desktop hot swap: **not claimed / unsupported by current evidence**.
+
+Production has not been modified. The feature remains inactive until independent review,
+merge, and a separately authorized deployment/activation gate.
