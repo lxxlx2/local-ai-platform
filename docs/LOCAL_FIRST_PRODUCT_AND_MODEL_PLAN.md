@@ -827,6 +827,14 @@ Do not copy private auth/session tricks, undocumented endpoints or large reconst
 - ffmpeg edit/export
 - review/TG preview
 
+Media Product Workflow V0.2 now provides the functional presentation-video
+subset on the feature branch: durable evidence/requirements/script state,
+brief or URL-driven local-Qwen scripts, deterministic no-PPT slides, qualified
+persistent voice/TTS, MP4 composition, exact-output approval, fixed-target
+Git/LFS publishing, verified cleanup, and a durable Owner Telegram wizard.
+Whisper highlights and generative video remain separate qualification work and
+are not implied by this status.
+
 ### P8 Training/data loop
 - governed dataset capture
 - evaluation

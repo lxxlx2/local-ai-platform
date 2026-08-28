@@ -72,7 +72,7 @@ Do not delete incomplete caches or resume downloads until network conditions are
 
 Presentation Video V0.1 is READY on the feature branch and has completed real English production runs.
 
-Media Product Workflow V0.2 architecture is OWNER-APPROVED and documented. Implementation has not started yet.
+Media Product Workflow V0.2 is code-complete and locally qualified on the feature branch; it is not merged or deployed.
 
 Approved V0.2 intake/product behavior:
 
@@ -98,26 +98,22 @@ Current proven media capabilities:
 - review-before-publish policy;
 - dedicated public product repository `lxxlx2/ai_video_product` with Git LFS.
 
-Next media engineering milestone is `Media Product Workflow V0.2`:
+V0.2 qualification evidence: 56 focused media/presentation/Telegram tests pass.
+A real local three-scene run used Qwen3.8, the qualified English persistent
+voice, LibreOffice rendering and FFmpeg; it produced a 50.728-second MP4,
+bound synthetic harness approval to its exact SHA, published and verified it
+in a temporary local Git/LFS remote, performed bounded cleanup and ended in
+`ARCHIVED`. The deck was visually inspected and `slides_test.py` reported no
+overflow. No real public push, merge, deployment, Bot restart or download
+resume occurred.
 
-- durable unified MediaJob;
-- first-class `--script-file` / `--brief-file` / URL intake contracts;
-- requirement/evidence/brief/script/scene/prompt durable artifacts;
-- standalone script-to-audio;
-- template-based brief/requirements -> presentation-style video fallback without requiring FLUX/LongCat;
-- Telegram guided upload/link/brief wizard;
-- exact-output preview/review callbacks;
-- deterministic canonical product publisher;
-- remote verification + post-publish cleanup;
-- resumable/interruption-safe state.
-
-PersonaProfile foundation follows as the next milestone.
+PersonaProfile Foundation is the next milestone after independent review.
 
 ## Work that can continue while downloads stay paused
 
 Priority work that needs no new model download:
 
-1. implement Media Product Workflow V0.2 from the approved architecture;
+1. independently review, then explicitly merge/deploy Media Product Workflow V0.2;
 2. implement PersonaProfile/private dataset foundation without training a model yet;
 3. qualify already-downloaded Whisper locally;
 4. qualify already-downloaded FLUX if all required runtime dependencies are already present; do not install/download missing dependencies automatically;
@@ -133,4 +129,4 @@ Work that must remain blocked from READY qualification until downloads finish:
 
 ## Documentation note
 
-`CAPABILITY_MATRIX.md` is generated from code and is not manually edited. It currently lags recent presentation/TTS/Direct-Qwen progress; update the generator/evidence mapping in an engineering pass, then regenerate it rather than hand-editing generated output.
+`CAPABILITY_MATRIX.md` is generated from code and is not manually edited. V0.2 updates its generator/evidence mapping and regenerates the document.
