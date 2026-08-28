@@ -1,250 +1,192 @@
-# Current Production Status / Handoff
+# Current Project Status
 
-Status type: **CANONICAL CURRENT STATE**
+Status type: CANONICAL CROSS-BRANCH SNAPSHOT
 
-Last verified: `2026-08-24T19:59:40+07:00` (`Asia/Bangkok`)
+Last consolidated: 2026-08-29
 
-Runtime code baseline: `ea9bd4fa042b63d47685daef0cd74433d96fceda`
+Stable `main` HEAD at consolidation: `1311f7d05309d75af61bbd8990d4a0641ba70d56`
 
-The runtime code baseline is the last functional-code baseline. When reading
-this file, still run `git rev-parse origin/main` to obtain the latest docs-only
-HEAD.
+This file describes the whole project across active/review/reference branches. It does not claim that feature-branch work is merged or deployed.
 
-## 1. TL;DR
+## 1. Executive summary
 
-- The private Telegram Bot is healthy and uses long polling; no webhook is set.
-- Production MAIN/VISION is `mlx-community/Qwen3.8-27B-8bit`.
-- Qwen3.8 is managed, resident on localhost port 8001, identity-verified, and
-  qualified through 16K context. A real 24K run hit Metal OOM, so 32K was
-  correctly skipped after that resource limit.
-- `mlx-community/Qwen3.6-35B-A3B-4bit` is the downloaded, validated, on-demand
-  FAST/FALLBACK model. It is normally not resident; port 8000 is empty.
-- Real-Mac MAIN → FAST → MAIN and cold FAST → MAIN lifecycle validation passed.
-- Auxiliary downloads are intentionally PAUSED with zero workers and no
-  quarantine blocker. Partial data is preserved.
-- Whisper Large V3 and both selected Qwen3-TTS snapshots are downloaded but not
-  yet production-qualified.
-- Stage 5A source/config safety audit passed, but the controlled Supervisor
-  start failed closed during exact start-identity capture.
-- Attempted Supervisor PID `56843` is dead, its lease expired, and no old job,
-  execution, review, or mutation fence exists.
-- Supervisor remains STOPPED; Real Codex and any real Producer remain disabled.
-- Next: fix and independently review the Supervisor process-identity startup
-  incompatibility, then rerun Stage 5A before Stage 5B.
-- Gemini integration remains an unimplemented roadmap item in Issue #1.
+The platform foundation is substantially implemented, but the repository history has outgrown the old main-branch status document. Current work is therefore split between stable `main`, qualified/review-pending feature branches, and one active Context Architecture V2 implementation branch.
 
-## 2. Source-of-Truth Rules
+Immediate sequence:
 
-- Live runtime evidence overrides this snapshot for current PIDs and resources.
-- Git `main` overrides old conversation notes.
-- This file is the latest canonical handoff.
-- Historical review documents retain their historical meaning.
-- Downloaded does not mean qualified; qualified does not mean deployed/resident.
+1. finish repository governance consolidation on `docs/architecture-ledger`;
+2. return to Context Architecture V2 Phase 1 and finish static verification/commit/push without rerunning the already-passed full suite;
+3. keep model downloads paused until network conditions improve and download-state drift is reconciled;
+4. resume independent Codex review when model quota is available;
+5. then continue the master roadmap.
 
-## 3. Current Git State
+No current docs/feature status implies merge, deployment or production activation.
 
-- Repository: `lxxlx2/local-ai-platform` (PRIVATE).
-- Local path: `/Users/jerson/AI`; production branch: `main`.
-- Runtime code baseline: `ea9bd4fa042b63d47685daef0cd74433d96fceda`.
-- At task start local `main` and `origin/main` matched that baseline and the
-  worktree was clean.
-- Expected steady state is clean. Models, secrets, caches, runtime databases,
-  logs, downloads, and `.incomplete` files remain outside Git.
+## 2. Source-of-truth rules
 
-## 4. Current Production Runtime
+Read in this order:
 
-### Telegram Bot
+1. live runtime evidence for current process/resource facts;
+2. merged `main` for stable code;
+3. this file for current cross-branch project state;
+4. `docs/architecture/INDEX.md` and accepted ADRs;
+5. active implementation Issue + exact branch/commit;
+6. qualification evidence;
+7. historical Issue bodies/docs;
+8. chat memory.
 
-- HEALTHY; one process, PID `26855` at verification time.
-- Telegram `getMe`: PASS for `@Jersonliu_bot`.
-- Long polling; webhook absent; pending updates 0; no webhook error.
-- The Bot was not restarted by Stage 5A.
+See `docs/GOVERNANCE.md`.
 
-### Qwen3.8 MAIN / VISION
+## 3. Core provider/runtime state
 
-- Model/path: `mlx-community/Qwen3.8-27B-8bit` at
-  `/Users/jerson/AI/models/qwen38-27b-8bit`.
-- Resident, managed, healthy, identity `MATCH`; verification PID `38697`.
-- One listener on `127.0.0.1:8001`; `/health` returned HTTP 200/healthy.
-- Production MAIN and VISION; max qualified context 16,384 tokens.
+### Local Qwen3.8 MAIN
 
-### Qwen3.6 FAST / FALLBACK
+- Role: local MAIN/private reasoning and routine production.
+- Qualified production context remains 16K until a separate 24K/32K qualification changes policy.
+- Local Responses bridge / tool-loop foundation is implemented and previously qualified.
+- Qwen is suitable for bounded coding/repair and routine local work; long autonomous engineering loops have shown poor convergence and must remain bounded/decomposed.
 
-- Model/path: `mlx-community/Qwen3.6-35B-A3B-4bit` at
-  `/Users/jerson/AI/models/mlx-community/Qwen3.6-35B-A3B-4bit`.
-- On-demand FAST/FALLBACK through oMLX; stopped, identity `DEAD`, port 8000 empty.
-- Post-setproctitle real-Mac form: executable `/Users/jerson/AI/omlx-server`,
-  argv `("omlx-server",)`.
-- True Codex-style autonomous structured tool looping is not qualified; an
-  external Codex Producer remains responsible for coding-agent work.
+### Local Qwen3.6 FAST/FALLBACK
 
-### Supervisor
+- Downloaded and validated as FAST/FALLBACK.
+- Normally stopped/on-demand.
 
-- Actual state: STOPPED / STAGE 5A BLOCKED.
-- Existing entrypoint: `control-plane/scripts/start-supervisor.sh` →
-  `python -m local_ai_control.supervisor.app daemon`.
-- The controlled start returned `ORPHAN_RECONCILIATION_REQUIRED` during exact
-  start-identity capture. PID `56843` is confirmed dead; no signal or arbitrary
-  process control was used. Its lease expired at
-  `2026-08-24T19:59:10.571506+07:00`.
-- Durable state: queue 0, running 0, executions 0, review results 0, active
-  mutation fences 0, unresolved reconciliation 0.
-- Real Codex/Producer are disabled; auto merge/deploy do not exist in V0.1.
+### Gemini
 
-### Downloads, Ports, Security
+- Advisory reviewer/provider path with official Google API, privacy/egress controls and structured review is implemented on feature branches.
+- Large review bundles for routing, exact cancellation and durable-state/security returned PASS with zero findings after sanitization-aware review packaging.
+- Gemini provider robustness fix is committed/pushed on `fix/gemini-large-review-v01` at `4d229c08adf1ed0716b3922322dca258b625b569`.
+- Focused/failover/full tests passed for that fix, plus real Gemini API smoke.
+- Final independent non-Gemini review of that fix is still pending. A bounded Qwen review timed out at 300 seconds and produced no verdict.
+- Gemini supplementary execution/P3 structured patch path is not yet fully implemented or activated.
 
-- Downloads: PAUSED; stored manager identity `DEAD`, active 0, quarantine 0.
-- Port 8000 EMPTY; port 8001 has one exact managed Qwen3.8 listener.
-- Localhost-only model services; no new public port, webhook, or Funnel.
-- Supervisor control is Owner-authorized before lookup/mutation. Public has no
-  Supervisor navigation; forged callbacks pass through the Owner gate.
-- Supervisor runtime is 0700; DB/WAL/SHM are 0600. Runtime/secrets/models/logs
-  are ignored by Git.
+### Codex
 
-## 5. Stage Completion Matrix
+- Interactive provider priority is Codex -> Qwen -> Gemini supplementary for Owner-present engineering, while unattended/routine production remains local-first.
+- Codex model quota is currently unavailable, so independent Codex review work is paused.
+- Codex CLI may still be used as a local harness only when configured to the local Qwen provider and route attribution proves no OpenAI model usage.
 
-| Stage / gate | State | Commit or evidence | Notes |
-|---|---|---|---|
-| Stage 1 Bot deployment | PASS | `29aaea5`, PID 26855, Telegram API | Private long-polling Bot deployed. |
-| Stage 2 acceptance/readiness | PASS | `6c43ec1`, production acceptance history | Telegram UX/security gates completed. |
-| Stage 3 managed Qwen3.8 adoption | PASS | `04d8098`, port 8001 identity MATCH | Qwen3.8 is MAIN/VISION. |
-| Stage 4 MAIN/FAST lifecycle | PASS | `ea9bd4f`, real-Mac evidence | MAIN → FAST → MAIN and cold FAST → MAIN passed. |
-| oMLX identity compatibility | PASS | `27e47a0`, real-Mac validation | Exact saved identity remains required. |
-| Heavy transition preflight | PASS | `ea9bd4f` | Preflight follows exact-owned resident reclaim. |
-| Stage 5A disabled Supervisor start | BLOCKED | failed PID 56843 | Exact start identity not captured; daemon stopped. |
-| Stage 5B recovery acceptance | PENDING | requires Stage 5A PASS | Do not begin yet. |
-| Real Codex activation | PENDING | `REAL_CODEX_EXECUTION_REVIEW_PENDING` | Explicit review/authorization required. |
-| Gemini MCP bridge | PENDING | GitHub Issue #1 | Roadmap only. |
+## 4. Important branches
 
-## 6. Model Capability Matrix
+| Branch | State | Purpose / current status |
+|---|---|---|
+| `main` | STABLE | Stable baseline `1311f7d...`; does not contain all latest qualified features. |
+| `docs/architecture-ledger` | ACTIVE | Single governance/ADR/current-status branch. Replaces the pattern of one docs branch per decision. |
+| `feat/context-budget-manager-v01` | ACTIVE | Context V2 Phase 1. Local worktree currently has uncommitted implementation; compatibility test PASS, focused 57 PASS, full suite 686 PASS, diff check PASS. Post-test verification command failed only because PYTHONPATH was missing after returning to repo root. |
+| `feat/codex-desktop-auto-failover-v01` | FROZEN_REVIEW | Qualified Codex -> Qwen same-job failover baseline at `d218f82d39b06b41aac27aaf867ad54a66443563`; independent Codex review paused by quota. Do not mutate baseline. |
+| `fix/gemini-large-review-v01` | FROZEN_REVIEW | Gemini large structured review robustness fix at `4d229c08...`; tests and real API smoke passed; non-Gemini independent review pending. |
+| `feat/production-capabilities-v01` | REFERENCE | Contains download manager and earlier production-capability work; current download audit should be read from `docs/DOWNLOAD_STATUS.md`, not old percentages in historical docs. |
+| `feat/local-qwen-owner-raw-v04` | REFERENCE / PLAN SOURCE | Contains approved local-first/product/model plan and earlier RAW target planning. RAW target needs reconciliation before resume. |
+| older per-decision docs branches | REFERENCE | Preserve history until ADR migration/merge makes them safely retireable. Do not add new architecture work there. |
 
-| Model | Download | Qualification | Role / resident | Context or modality | Limitation |
-|---|---|---|---|---|---|
-| `mlx-community/Qwen3.8-27B-8bit` | COMPLETE (30,499,409,920 `du` bytes) | MAIN + VISION PASS | MAIN/VISION; YES | 16K; vision PASS | 24K Metal OOM; 32K skipped. |
-| `mlx-community/Qwen3.6-35B-A3B-4bit` | COMPLETE (20,451,217,408 `du` bytes) | VALIDATED | FAST/FALLBACK; NO | 8K/32K capable; 64K special evidence | Autonomous Codex loop not qualified. |
-| `mlx-community/whisper-large-v3-mlx` | COMPLETE; payload 3,083,522,487 bytes | NOT STARTED | future STT_MAIN; NO | transcription | Runtime qualification required. |
-| `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16` | COMPLETE; 4,544,212,739 bytes | NOT STARTED | future TTS_MAIN; NO | speech synthesis | MLX Audio qualification required. |
-| `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16` | COMPLETE; 4,520,194,992 bytes | NOT STARTED | future TTS_DESIGN; NO | voice design | Owner policy/runtime qualification required. |
-| `mlx-community/FLUX.2-klein-4B-bf16` | PARTIAL 60.09% | NOT STARTED | future IMAGE_MAIN; NO | image generation | Download and adapter qualification incomplete. |
-| `Qwen/Qwen3-Embedding-8B` | PARTIAL 40.66% | NOT STARTED | future EMBED; NO | embeddings/RAG | Download/Apple Silicon qualification incomplete. |
-| `Qwen/Qwen3-Reranker-8B` | PARTIAL 55.65% | NOT STARTED | future RERANK; NO | reranking/RAG | Download/Apple Silicon qualification incomplete. |
-| `mlx-community/LongCat-Video-q8` | PENDING 0% | NOT STARTED | future VIDEO_HIGH; NO | video generation | Strict 48 GB machine gate. |
-| `orcarouter/Qwen3.8-27B-Uncensored-MLX` (`8-bit/*`) | PENDING 0% | NOT STARTED | future RAW Owner-only; NO | raw candidate | Full qualification/security boundary required. |
+Branch cleanup will happen only after unique decisions/evidence are durable elsewhere.
 
-## 7. Download Queue Snapshot
+## 5. Context Architecture V2
 
-Verified at `2026-08-24T19:57:00+07:00`:
+Architecture: ACCEPTED.
 
-- Manager PAUSED; stored PID 46236 not live/verified; active 0, quarantine 0.
-- Expected: `130,583,856,831` bytes (121.616 GiB).
-- Verified completed payload credited: `12,147,930,218` bytes (11.314 GiB).
-- Non-complete payload present: `1,802,705,808` bytes (1.679 GiB).
-- Non-complete `.incomplete` cache: `27,745,320,960` bytes (25.840 GiB).
-- Credited present: `41,695,956,986` bytes (38.832 GiB).
-- Remaining: `88,887,899,845` bytes (82.783 GiB); progress 31.93%.
+Tracker: Issue #19.
 
-Completed items are capped at configured expected bytes. Payload plus resumable
-`.incomplete` bytes count for non-complete items. The completed TTS Base
-73,400,320-byte residual cache is reported but not credited as extra progress.
-See `docs/MODEL_DOWNLOAD_QUEUE.md` for per-item bytes.
+Phase 1 goal: add a host-side ContextBudgetManager so Chat/Memory can use more of the already-qualified context envelope without changing the Qwen production ceiling.
 
-## 8. Supervisor State
+Current local implementation evidence on `feat/context-budget-manager-v01`:
 
-- Stage 5A: BLOCKED; Supervisor STOPPED.
-- Runtime: `/Users/jerson/AI/runtime/supervisor` (0700).
-- DB: `/Users/jerson/AI/runtime/supervisor/supervisor.db` (0600), SQLite 3.53.4;
-  migrations are table/column based and `user_version=0`.
-- Log: `runtime/supervisor/supervisor.log` (0600, rotating 1 MB × 3 backups).
-- Counts: jobs/queued/running/approvals/retries/recoveries/failed/stale/executions/
-  reviews/fences all 0. Active lease/lock count is 0 after TTL expiry.
-- Last heartbeat: `2026-08-24T19:56:10.571506+07:00`; last clean shutdown:
-  NOT RECORDED.
-- Real Codex DISABLED; real Producer DISABLED; no silent real fallback.
-- Functional probe NOT RUN because the daemon failed before identity capture.
-- Stale historical wording remains in `docs/WORKFLOW_SUPERVISOR.md`,
-  `docs/ARCHITECTURE.md`, and parts of `docs/ROADMAP.md`; this file is current.
-- Next: repair macOS/venv exact process-signature capture, add regression,
-  independent review, then repeat the controlled disabled-mode start.
+- prior compatibility failure reproduced and fixed;
+- exact previous failure test: 1 PASS;
+- focused Context/Chat/Gateway tests: 57 PASS;
+- full control-plane suite: 686 PASS, 2 pre-existing Pytest collection warnings;
+- `git diff --check`: PASS;
+- runtime/model registry intentionally unchanged;
+- final standalone verification needs rerun with correct `PYTHONPATH`;
+- implementation not yet committed/pushed;
+- independent review not yet completed;
+- no production activation.
 
-## 9. Gemini / Google AI Roadmap
+Later phases: Qwen 24K/32K qualification, Gemini token-aware context tiers, then shared context/retrieval contracts for coding/X/novels/commerce/media.
 
-- [Issue #1 — Codex ↔ Gemini MCP Bridge 独立 Reviewer MVP](https://github.com/lxxlx2/local-ai-platform/issues/1)
-  is OPEN and says ROADMAP / HOLD; implementation is NOT STARTED.
-- Codex is primary Producer; Gemini is an untrusted external secondary
-  expert/reviewer/multimodal provider; Qwen Local is private/local MAIN/FAST.
-- Gemini cannot own repository writes, Git, shell, tests, merge, deployment, or
-  final technical decisions.
-- Proposed standalone `gemini-codex-bridge/`: MCP STDIO, official MCP Python SDK,
-  Google GenAI SDK; tools `ask`, `review_code`, `review_architecture`,
-  `multimodal`.
-- Private-repo egress requires explicit policy, secret/PII scanning,
-  minimization and manifests. Free Tier is not safe for confidential whole-repo
-  upload.
-- Build/evaluate the MVP after Supervisor disabled-mode acceptance and before or
-  alongside Real Codex activation. Stage 5A adds no Gemini code.
+## 6. Model download state
 
-## 10. Open Risks / Known Gaps
+Downloads are intentionally PAUSED because network conditions are currently poor. No download-related process was present during the 2026-08-29 audit. Quarantine count was zero. About 586 GiB disk space was free.
 
-- Supervisor exact start-identity capture fails on this Mac; Stage 5A is blocked.
-- Rollback preflight is reviewed/tested, but no intentional real-Mac
-  partial-start fault injection has been performed.
-- Real Codex execution remains disabled/unreviewed for activation.
-- Auxiliary models still need qualification after download.
-- Embedding/Reranker/RAG, FLUX, LongCat, and RAW are not production complete.
-- LongCat remains unqualified for this 48 GB machine.
-- Gemini Bridge is not implemented; privacy/egress gates remain design work.
-- The 6 GiB swap ceiling remains mandatory before every new heavy start.
+Physically complete and marker/snapshot validated:
 
-## 11. Next Recommended Sequence
+- Whisper Large V3: 2.872 GiB.
+- Qwen3-TTS Base: 4.232 GiB.
+- Qwen3-TTS VoiceDesign: 4.210 GiB.
+- FLUX.2 klein 4B bf16: 22.110 GiB.
 
-```text
-Fix + independently review Supervisor process-identity startup blocker
-  → repeat Stage 5A controlled start
-  → Stage 5B disabled-mode acceptance/recovery
-  → Gemini MCP Bridge MVP
-  → Real Codex review/activation
-  → Codex + Gemini + Qwen router
-  → resume auxiliary downloads
-  → Embedding/Reranker/RAG
-  → FLUX image
-  → LongCat video
-  → RAW owner-only model
-```
+These still need role-specific qualification before production use.
 
-## 12. Hard Safety Constraints
+Incomplete/paused, using completed payload percentage rather than misleading cache-inflated percentage:
 
-- Exactly one heavy runtime; never control an unknown listener.
-- No arbitrary PID kill or broad process matching; use exact ownership.
-- Secrets/runtime/models/cache/`.incomplete`/private data never enter Git.
-- Public cannot own/admin private Supervisor workflows.
-- Human approval precedes real executor activation, merge, and deploy.
-- Gemini cannot directly own Git, repository writes, shell, or deployment.
-- Model download is not qualification; qualification is not deployment.
+- Qwen3 Embedding 8B: 9.469 / 14.110 GiB payload, about 67.1%; 10.723 GiB partial cache.
+- Qwen3 Reranker 8B: 3.969 / 15.267 GiB payload, about 26.0%; 23.633 GiB partial cache.
+- LongCat Video q8: 0.625 / 31.315 GiB, about 2.0%.
+- configured RAW MLX target: 0 / 27.500 GiB in its configured directory.
 
-## 13. New-Conversation Bootstrap
+Known download-state defects/drift:
 
-Read `README.md`, this file, `docs/MODEL_DOWNLOAD_QUEUE.md`,
-`config/model-download-queue-v0.1.json`, and GitHub Issue #1. Then verify
-`git rev-parse origin/main`, live runtime, downloads, and Supervisor state.
-Never assume old PIDs remain current, paused downloads run, Real Codex is
-enabled, or the Gemini Bridge exists.
+1. the old status command reports Embedding/Reranker as 99.9% because duplicate/resumable `.incomplete` fragments can exceed expected size; canonical human progress must use payload percentage plus separate partial-cache bytes;
+2. stored manager state still contains stale PID/identity metadata even though no manager process exists;
+3. RAW queue config currently targets `raw-qwen38-27b-8bit` / `orcarouter/Qwen3.8-27B-Uncensored-MLX`, while historical runtime state tracks `raw-qwen38-27b-q6k` / `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`; partial data exists in the historical target directory;
+4. unrelated/older `.incomplete` files also exist under the main Qwen3.8 model directory and must not be deleted automatically.
 
-## 14. Machine-Readable Summary
+Do not resume RAW until target/revision/runtime/local-dir state is explicitly reconciled.
 
-```yaml
-status_schema: "1"
-runtime_code_baseline: "ea9bd4fa042b63d47685daef0cd74433d96fceda"
-stage4: PASS
-stage5a: BLOCKED
-bot: HEALTHY
-main_model: mlx-community/Qwen3.8-27B-8bit
-main_role: MAIN
-fast_model: mlx-community/Qwen3.6-35B-A3B-4bit
-fast_role: FAST_FALLBACK
-qwen36_resident: false
-supervisor: STOPPED_START_IDENTITY_BLOCKED
-real_codex: DISABLED
-gemini_bridge: NOT_IMPLEMENTED
-downloads: PAUSED
-next_stage: FIX_SUPERVISOR_START_IDENTITY_THEN_REPEAT_STAGE5A
-```
+See `docs/DOWNLOAD_STATUS.md`.
+
+## 7. Roadmap status
+
+Master infrastructure roadmap: Issue #14.
+
+Product end-state: Issue #15.
+
+Major remaining work includes:
+
+- Context V2 remaining phases;
+- Gemini supplementary execution/P3;
+- generic project adapter completion on shared provider/router abstractions;
+- download cleanup/resume and model qualification;
+- Embedding/Reranker/RAG;
+- FLUX/image production and Code Canvas/Qwen-Image evaluation;
+- Whisper/TTS providers;
+- X/Twitter production workflow;
+- commerce research agent;
+- novel project adapters/orchestration;
+- video/livestream pipeline;
+- Telegram unified task/review control surface;
+- training/adaptation pipeline;
+- eventual external multi-user isolation;
+- final integrated E2E/independent review/merge gate.
+
+Historical Issue bodies such as Issue #1 may still describe Gemini as roadmap-only. Those bodies are historical and no longer represent implementation state; this file and ADR/index records take precedence until Issues are individually normalized.
+
+## 8. Repository governance transition
+
+Repository governance is being normalized on `docs/architecture-ledger`:
+
+- one README entrypoint;
+- one canonical current-status snapshot;
+- one ADR index;
+- ADR files for approved architecture decisions;
+- Issues for execution rather than architecture canon;
+- feature branches for implementation;
+- qualification records for evidence;
+- one long-lived docs ledger only when an implementation branch is frozen.
+
+After this governance branch is reviewed and explicitly merged, old docs branches can be classified/retired gradually instead of being cleaned up blindly.
+
+## 9. Hard safety constraints
+
+- Local-first routine production.
+- Host/Supervisor owns permissions.
+- No arbitrary PID kill or fuzzy process ownership.
+- Producer cannot satisfy its own required independent review.
+- Gemini/cloud egress remains privacy gated; no silent paid billing.
+- Models, secrets, runtime state, raw credentials, private caches, `.incomplete` download data and sensitive DBs remain outside Git.
+- Downloaded != qualified != deployed.
+- No merge/deploy/external publish/irreversible action is implied by a feature/docs commit.
+
+## 10. Next action after governance
+
+Return to `feat/context-budget-manager-v01` and rerun only the remaining post-test verification with correct `PYTHONPATH`; do not repeat the already-passed 686-test full suite unless the code changes again. Then inspect final diff, commit/push Phase 1, update Issue #19, and proceed to review.
