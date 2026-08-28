@@ -1,4 +1,5 @@
 import asyncio
+from io import BytesIO
 import hashlib
 import logging
 import subprocess
@@ -11,9 +12,9 @@ from local_ai_control.bot.ui import (
     BACK, back_for, inline, media_menu, owner_dashboard, owner_task_menu,
     public_dashboard, system_menu, workflow_controls, workflow_menu, video_production_menu,
     source_mode_menu, execution_mode_menu, language_menu, voice_menu, completion_mode_menu,
-    confirmation_menu,
+    confirmation_menu, materials_menu,
 )
-from local_ai_control.bot.media_wizard import MediaWizardController,MediaWizardStore,WizardStep,wizard_summary
+from local_ai_control.bot.media_wizard import MediaWizardController,MediaWizardStore,WizardStep,wizard_summary,material_summary
 from local_ai_control.services.capabilities import capability_intro, model_identity, routed_capability_text
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
@@ -117,6 +118,40 @@ async def run():
     def identity(update):
         return identity_from_telegram(update.from_user.id, settings.owner_id)
 
+    def wizard_session(update):
+        ctx = identity(update)
+        return media_wizard_store.get(ctx.internal_user_id)
+
+    def wizard_accepts_text(message):
+        session = wizard_session(message)
+        return bool(
+            session
+            and session.step in {
+                WizardStep.TASK_NAME,
+                WizardStep.MATERIALS,
+            }
+        )
+
+    def wizard_accepts_document(message):
+        session = wizard_session(message)
+        return bool(
+            session
+            and session.step is WizardStep.MATERIALS
+            and session.values.get("source_mode")
+            in {"UPLOADS", "UPLOADS_AND_LINKS"}
+        )
+
+    def outside_active_media_wizard(message):
+        session = wizard_session(message)
+        return not bool(
+            session
+            and session.step
+            in {
+                WizardStep.TASK_NAME,
+                WizardStep.MATERIALS,
+            }
+        )
+
     def repo_for(ctx):
         return private_repo if ctx.role is Role.OWNER else public_repo
 
@@ -140,7 +175,7 @@ async def run():
     async def start(message: Message):
         await respond_home(message, identity(message))
 
-    @dp.message(F.photo | F.video | F.audio | F.voice)
+    @dp.message(outside_active_media_wizard, F.photo | F.video | F.audio | F.voice)
     async def media_input(message: Message):
         ctx = identity(message)
         if ctx.role is not Role.OWNER:
@@ -163,7 +198,7 @@ async def run():
         runtime_health=await runtime_executor.runtime_health()
         await send_chat_output(message, routed_capability_text(decision,registry=registry,runtime_health=runtime_health))
 
-    @dp.message(F.text)
+    @dp.message(outside_active_media_wizard, F.text)
     async def plain_chat(message: Message):
         ctx = identity(message)
         decision = firewall.inspect(message.text)
@@ -262,28 +297,171 @@ async def run():
         except PermissionError: await query.answer("当前账号没有此操作权限。",show_alert=True); return
         await edit_page(query,"新建视频\n\n请发送一个简短的任务名称。",inline([[('取消','mw:cancel')]]))
 
-    async def active_media_wizard(message:Message):
-        ctx=identity(message); session=media_wizard_store.get(ctx.internal_user_id)
-        return bool(session and session.step in {WizardStep.TASK_NAME,WizardStep.MATERIALS})
+    @dp.message(wizard_accepts_text, F.text)
+    async def media_wizard_text(message: Message):
+        ctx = identity(message)
 
-    @dp.message(active_media_wizard,F.text)
-    async def media_wizard_text(message:Message):
-        ctx=identity(message)
-        try: session=media_wizard.text(ctx.role,ctx.internal_user_id,message.text)
-        except (PermissionError,KeyError,ValueError): await message.answer("输入无效，请返回视频菜单重新开始。"); return
+        try:
+            session = media_wizard.text(
+                ctx.role,
+                ctx.internal_user_id,
+                message.text,
+            )
+        except (PermissionError, KeyError, ValueError):
+            await message.answer(
+                "当前输入不符合这一步的要求，请按提示重新发送。"
+            )
+            return
+
         if session.step is WizardStep.SOURCE_MODE:
-            await message.answer("请选择材料来源。",reply_markup=source_mode_menu())
-        else:
-            await message.answer("请选择执行方式。",reply_markup=execution_mode_menu())
+            await message.answer(
+                "请选择材料来源。",
+                reply_markup=source_mode_menu(),
+            )
+            return
+
+        if session.step is WizardStep.MATERIALS:
+            await message.answer(
+                material_summary(session),
+                reply_markup=materials_menu(
+                    session.values.get("source_mode")
+                ),
+            )
+            return
+
+        if session.step is WizardStep.EXECUTION_MODE:
+            await message.answer(
+                "请选择执行方式。",
+                reply_markup=execution_mode_menu(),
+            )
+            return
+
+    @dp.message(wizard_accepts_document, F.document)
+    async def media_wizard_document(message: Message):
+        ctx = identity(message)
+        document = message.document
+
+        if not document:
+            await message.answer("没有读取到文件，请重新发送。")
+            return
+
+        declared_size = document.file_size or 0
+
+        if (
+            declared_size < 1
+            or declared_size > media_wizard.MAX_UPLOAD_BYTES
+        ):
+            await message.answer("文件过大或大小无效，请换一个文件。")
+            return
+
+        buffer = BytesIO()
+
+        try:
+            await bot.download(
+                document,
+                destination=buffer,
+            )
+
+            session = media_wizard.stage_upload_bytes(
+                ctx.role,
+                ctx.internal_user_id,
+                filename=document.file_name or "upload.bin",
+                payload=buffer.getvalue(),
+            )
+        except (PermissionError, KeyError, ValueError):
+            await message.answer(
+                "这个文件暂时不支持，或当前步骤不接受该文件。"
+            )
+            return
+        except Exception as error:
+            logging.warning(
+                "media wizard upload failed type=%s",
+                type(error).__name__,
+            )
+            await message.answer(
+                "文件接收失败，请稍后重新发送。"
+            )
+            return
+
+        await message.answer(
+            material_summary(session),
+            reply_markup=materials_menu(
+                session.values.get("source_mode")
+            ),
+        )
 
     @dp.callback_query(F.data.startswith("mw:"))
     async def media_wizard_callback(query:CallbackQuery):
         ctx=identity(query); data=query.data
         try:
-            if data=="mw:cancel": media_wizard_store.cancel(ctx.internal_user_id); await edit_page(query,"视频任务已取消。",video_production_menu()); return
+            if data=="mw:cancel": media_wizard.cancel(ctx.role,ctx.internal_user_id); await edit_page(query,"视频任务已取消。",video_production_menu()); return
             if data.startswith("mw:source:"):
-                value=data.split(":",2)[2]; media_wizard.choice(ctx.role,ctx.internal_user_id,"source_mode",value)
-                await edit_page(query,"请发送材料说明、公开链接或简要需求。\n\n一次只发送一项；稍后可以在任务中补充。",inline([[('取消','mw:cancel')]])); return
+                value=data.split(":",2)[2]
+                session=media_wizard.choice(
+                    ctx.role,
+                    ctx.internal_user_id,
+                    "source_mode",
+                    value,
+                )
+
+                if value=="DIRECT_BRIEF":
+                    await edit_page(
+                        query,
+                        "请直接描述这个视频要完成什么。\n\n"
+                        "我会根据你的说明准备文稿和展示内容。",
+                        inline([[('取消','mw:cancel')]]),
+                    )
+                    return
+
+                if value=="LINKS":
+                    prompt=(
+                        "请发送相关链接。\n\n"
+                        "可以连续发送多个链接，全部发送完成后点击“链接齐了”。"
+                    )
+                elif value=="UPLOADS":
+                    prompt=(
+                        "请发送相关材料。\n\n"
+                        "可以连续发送 PPTX、TXT、DOCX 等文件，"
+                        "全部发送完成后点击“材料齐了”。"
+                    )
+                else:
+                    prompt=(
+                        "请发送材料和相关链接。\n\n"
+                        "两类内容都可以连续发送，全部完成后点击“材料齐了”。"
+                    )
+
+                await edit_page(
+                    query,
+                    prompt,
+                    materials_menu(value),
+                )
+                return
+
+            if data=="mw:materials:more":
+                session=media_wizard_store.get(ctx.internal_user_id)
+                if not session or session.step is not WizardStep.MATERIALS:
+                    raise ValueError("materials step unavailable")
+                await edit_page(
+                    query,
+                    material_summary(session)
+                    + "\n\n请继续发送下一项。",
+                    materials_menu(
+                        session.values.get("source_mode")
+                    ),
+                )
+                return
+
+            if data=="mw:materials:done":
+                session=media_wizard.finish_materials(
+                    ctx.role,
+                    ctx.internal_user_id,
+                )
+                await edit_page(
+                    query,
+                    "材料已确认。\n\n请选择执行方式。",
+                    execution_mode_menu(),
+                )
+                return
             if data.startswith("mw:exec:"):
                 media_wizard.choice(ctx.role,ctx.internal_user_id,"execution_mode",data.split(":",2)[2]); await edit_page(query,"请选择主要语言。",language_menu()); return
             if data.startswith("mw:lang:"):
