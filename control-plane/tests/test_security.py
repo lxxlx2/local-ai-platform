@@ -13,7 +13,8 @@ def test_secret_firewall_allows_secret_loader_function_assignment():
 def test_secret_firewall_still_blocks_literal_api_key_assignment():
     from local_ai_control.services.security import SecretFirewall
 
-    text = 'api_key = "abcdefghijklmnop1234567890"'
+    value = "abcdefghijklmnop" + "1234567890"
+    text = f'api_key = "{value}"'
 
     decision = SecretFirewall().inspect(text)
 
