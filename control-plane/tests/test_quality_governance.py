@@ -70,7 +70,7 @@ def test_remote_classification_and_golden_runner_are_enforced():
 def test_capability_matrix_is_single_source_of_truth_and_review_completion_reconciles():
     fixture = (Capability("a", CapabilityStatus.NOT_STARTED, "x"), Capability("b", CapabilityStatus.FOUNDATION, "x"), Capability("c", CapabilityStatus.PARTIAL, "x"), Capability("d", CapabilityStatus.FUNCTIONAL, "x"), Capability("e", CapabilityStatus.PRODUCTION_READY, "x"))
     assert summary(fixture) == {"TOTAL_CAPABILITIES": 5, "FUNCTIONAL_COUNT": 2, "PRODUCTION_READY_COUNT": 1, "FUNCTIONAL_COVERAGE": 0.4, "PRODUCTION_READY_COVERAGE": 0.2}
-    assert summary(CAPABILITIES)["TOTAL_CAPABILITIES"] == 30
+    assert summary(CAPABILITIES)["TOTAL_CAPABILITIES"] == 31
     assert (Path(__file__).parents[2] / "docs/CAPABILITY_MATRIX.md").read_text() == render_document()
     assert reconcile_review_completion(ReviewState.IN_REVIEW, "FAIL", active_candidate_id="c1", result_candidate_id="c1") is ReviewState.REVISION
     assert reconcile_review_completion(ReviewState.IN_REVIEW, "PASS", active_candidate_id="c1", result_candidate_id="c1") is ReviewState.REVIEW_PASSED
