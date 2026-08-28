@@ -44,6 +44,26 @@ PPTX / narration script
 
 Normal builds do not recreate default profiles. Unknown language fails closed unless the owner supplies an explicit language/profile override. Mixed-language presentations use one dominant profile by default and require an explicit mode for per-slide switching. PPT content, notes, and generated scripts are untrusted data and cannot create profiles, change authorization, enable cloud fallback, or gain host/tool authority. See `PRESENTATION_VOICE_ARCHITECTURE.md`.
 
+## Local media production and trainable personas
+
+The presentation path is the first qualified implementation of a broader media-production plane. The canonical future flow is:
+
+```text
+Owner task / script / PPTX / media brief
+  → durable script artifact
+  → optional local Qwen3.8 script/scene generation
+  → deterministic language/media routing
+  → VoiceProfile / future PersonaProfile
+  → local audio / presentation / image / video adapters
+  → deterministic composition
+  → Owner review
+  → explicit product publishing
+```
+
+`PersonaProfile` is the stable caller contract for reusable human-like identity assets. It may contain a `VoiceIdentityProfile`, a future `VisualIdentityProfile`, and later motion/video adapters. Backends can evolve from reference-based cloning to trained adapters or fine-tuned speaker/subject models through explicit profile revisions and qualification without changing media callers.
+
+Raw voice recordings, face/appearance material, training datasets, checkpoints, and private identity assets stay under Owner-private local roots and must never be automatically copied into public product repositories. Finished media products may be explicitly published by task name to `lxxlx2/ai_video_product`; publishing remains deterministic host-side Git logic rather than model authority. See `MEDIA_PRODUCTION_ARCHITECTURE.md`.
+
 ## Program-level workflow supervision
 
 Workflow Supervisor V0.1 is an experimental Owner-private service on a feature branch. Its deterministic state machine and SQLite journal continue multi-stage workflows independently of a ChatGPT/Codex turn. Stage runners are adapters; they do not control transitions. A leased singleton lock limits execution to one active job, and interrupted potentially mutating stages require reconciliation rather than blind replay. See `WORKFLOW_SUPERVISOR.md`.
