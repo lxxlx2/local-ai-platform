@@ -1,97 +1,159 @@
 # Local Producer V2: Supervisor integration
 
-Status: FEATURE BRANCH / DISABLED BY DEFAULT / REVIEW PENDING
+Status: HISTORICAL V2 BASELINE / SUPERSEDED WHERE CONFLICTING BY AUTO-FAILOVER ARCHITECTURE
 
-Branch: `feat/codex-qwen-supervisor-v02`
+Original branch: `feat/codex-qwen-supervisor-v02`
 
-Qualified V1 baseline: `2825c4afe1a5b7a3ad40768c12cf480938a13d37`.
+Qualified V1 baseline referenced by the original design: `2825c4afe1a5b7a3ad40768c12cf480938a13d37`.
 
 ## Purpose
 
-V2 connects the real-Mac-qualified Qwen3.8 + Codex Local Producer to the durable Supervisor while keeping production activation explicit and human review separate.
+V2 introduced durable Supervisor integration for the Local Qwen + Codex producer while keeping worktree scope, review, validation, and Git gates separate.
 
-The default production Supervisor classes and Real Codex path remain unchanged. V2 adds separate `LocalWorktree*` classes that are bound to one explicit feature worktree and a separate Supervisor database.
+On 2026-08-28 the Owner approved a broader requirement: when an interactive Codex task encounters verified quota exhaustion/rate-limit/provider unavailability, Local Qwen must automatically take over the same durable task while Codex Desktop remains the primary Owner-facing GUI. See `CODEX_AUTO_FAILOVER_ARCHITECTURE.md`.
+
+Therefore the old V2 rule that Local Qwen is only activated by an explicit `enabled=True` selection is no longer the final target for interactive provider failover. Explicit enablement remains appropriate for low-level tests and for fail-closed component construction.
+
+## Durable Supervisor role
+
+Supervisor remains the continuity authority across provider changes.
+
+A durable coding job should preserve:
+
+- job/task identity;
+- objective;
+- validated feature worktree and branch;
+- current stage;
+- diff/candidate identity;
+- validation/test evidence;
+- review findings;
+- approval state;
+- provider history;
+- handoff/resume state.
+
+A provider switch from OpenAI Codex to Local Qwen must not create a fresh logical job.
+
+## Target provider-aware flow
+
+```text
+Durable Supervisor job
+        |
+        v
+ProviderFailoverController
+        |
+   +----+------------------+
+   |                       |
+CLOUD_CODEX           LOCAL_QWEN
+   |                       |
+   +----------+------------+
+              |
+              v
+      same worktree/state
+              |
+              v
+ validation -> review -> security -> Git Gate
+```
+
+The controller may enter the local route automatically only after deterministic supported evidence such as explicit quota exhaustion, a recognized active-request quota/rate-limit failure, or cloud-provider unavailability with healthy Local Qwen preflight.
 
 ## Safety model
 
-- Local Qwen execution is disabled unless `enabled=True` is passed explicitly.
-- The repository must be an exact non-symlink Git worktree root on a feature branch.
-- `main`, `master`, and detached HEAD are rejected by the V1 workspace policy.
-- Codex continues to use isolated `CODEX_HOME`, `workspace-write`, and `network_access=false`.
-- The runner inherits only a bounded environment and does not forward API keys or credential variables.
-- The Supervisor execution ledger records start and completion.
-- A timeout or ambiguous external runner failure raises `LocalProducerExecutionUncertain`; the existing persisted stage runner then creates a mutation fence that requires reconciliation.
-- Cancellation remains unsupported until exact-process cancellation is independently qualified.
-- Local Qwen has no commit, push, merge, deploy, service-control, sudo, process-termination, or credential authority.
-- Review remains a separate durable stage and Local Qwen cannot approve its own work.
+The following constraints remain:
 
-## V2 components
+- repository must be an exact non-symlink Git worktree root on a feature branch;
+- `main`, `master`, and detached HEAD are denied for mutating task execution;
+- Local Qwen route must be health-checked and route-attested;
+- bounded environment; do not forward ambient credential variables;
+- execution start/completion and provider transitions are journaled;
+- uncertain mutating failures create a reconciliation/mutation fence rather than blind replay;
+- Local Qwen cannot approve its own work;
+- commit, push, merge, deployment, sudo, credentials, and service/process control remain outside model authority.
+
+## Existing components to reuse
+
+The original V2 concepts remain useful:
 
 `LocalWorktreeSupervisorRepository`
-: Dedicated Supervisor repository bound to one validated feature worktree. Its DB defaults to `/Users/jerson/AI/runtime/supervisor-local-qwen/supervisor.db`.
+: Durable repository bound to one validated feature worktree.
 
 `LocalWorktreeCodexTaskSpec`
-: Dynamic worktree version of the existing durable Codex task contract.
-
-`LocalQwenCodexRunner`
-: Explicitly enabled `CodexTaskRunner` that checks the V1 bridge identity and invokes the qualified V1 Codex launcher.
+: Worktree-aware durable coding task contract.
 
 `LocalWorktreeValidationRunner`
-: Runs pytest against the feature worktree using the qualified control-plane Python.
+: Focused/test validation bound to the approved worktree.
 
 `LocalWorktreeSecurityRunner`
-: Applies the existing candidate and isolation security checks to the feature worktree.
+: Candidate and isolation security checks.
 
 `LocalWorktreeDurableReviewRunner`
-: Consumes a separate durable review result scoped to the feature worktree.
+: Separate durable review result; producer cannot self-approve.
 
 `LocalWorktreeGitGateRunner`
-: Read-only final gate that requires validation, review, and security PASS and still performs no Git mutation.
+: Final read-only gate requiring validation, review, and security evidence before any separately authorized Git mutation.
 
 `LocalWorktreeWorkflowSupervisor`
-: Uses feature-worktree review task contracts while retaining the existing durable workflow and lease behavior.
+: Durable stage machine and lease behavior.
 
-## Explicit construction
+The older `LocalQwenCodexRunner` may be retained as compatibility code or adapted for the interactive Desktop local-provider route, but the final routing contract is provider-aware rather than a manually selected Local-Qwen-only Supervisor.
 
-Creating these objects does not start a daemon or deploy anything.
+## New components required
 
-```python
-from pathlib import Path
-from local_ai_control.services.supervisor import (
-    LocalWorktreeSupervisorRepository,
-    LocalWorktreeWorkflowSupervisor,
-    create_local_qwen_job,
-    local_qwen_runners,
-)
+Implementation should add or formalize:
 
-root = Path("/absolute/path/to/feature-worktree")
-repo = LocalWorktreeSupervisorRepository(root)
-repo.migrate()
-job, unit = create_local_qwen_job(
-    repo,
-    title="requested change",
-    owner_id="owner",
-    task_prompt="Inspect the code, implement the requested change, run tests, and report the result.",
-)
+- `CodexAvailabilityMonitor`;
+- `ProviderFailoverController`;
+- `DurableProviderHandoff`;
+- provider-history records;
+- recognized quota/rate-limit error classification;
+- same-job resume after failover;
+- Codex Desktop local-provider launcher/adapter for Owner-present work;
+- explicit execution-provider attribution.
 
-# Still disabled. Producer/Revision will BLOCK without spawning Codex.
-supervisor = LocalWorktreeWorkflowSupervisor(repo, local_qwen_runners(root))
+The existing read-only Codex quota probe may be reused as one signal. Account-wide `usedPercent` changes alone are not enough to attribute a model turn to a task.
 
-# Explicit test/qualification opt-in only.
-enabled = LocalWorktreeWorkflowSupervisor(repo, local_qwen_runners(root, enabled=True))
+## Interactive vs unattended routes
+
+Owner-present interactive coding:
+
+```text
+Codex Desktop
+  -> Supervisor/durable task
+  -> Cloud Codex or Local Qwen provider
+  -> same worktree
 ```
 
-Production daemon wiring is intentionally absent in V2 until tests and independent review pass.
+Unattended/background coding:
 
-## Acceptance target
+```text
+Telegram / scheduler
+  -> Supervisor
+  -> Direct Local Qwen Agent
+  -> same durable worktree/security contracts
+```
 
-V2 must demonstrate:
+Codex Desktop must never become a required daemon for unattended platform work.
 
-1. disabled mode never spawns Codex;
-2. feature-worktree fake launcher path passes;
-3. main/symlink/path-scope violations fail closed;
-4. V1 bridge identity mismatch blocks execution;
-5. durable successful execution reaches `COMPLETED_CONFIRMED`;
-6. timeout/uncertain execution creates an active mutation fence;
-7. full control-plane tests remain green;
-8. no production Supervisor restart, main merge, download resume, commit, push, merge, or deployment occurs during qualification.
+## Recovery behavior
+
+When Codex quota later becomes available, do not interrupt an active mutating Local Qwen step. At a safe boundary the router may choose:
+
+- keep routine implementation on Local Qwen;
+- return PLANNING / ESCALATION / ACCEPTANCE work to OpenAI Codex;
+- append the transition to provider history.
+
+## Acceptance target for the new milestone
+
+The next qualification must demonstrate:
+
+1. cloud task state is preserved before failover;
+2. a controlled exhaustion/rate-limit signal causes automatic local routing;
+3. Local Qwen resumes the same durable job/worktree;
+4. Codex Desktop remains the interactive GUI where client capabilities permit;
+5. Direct Local Qwen still works with Codex Desktop closed;
+6. local fallback execution is attributable to Qwen3.8 and does not issue an OpenAI model turn;
+7. provider history and handoff state survive restart;
+8. uncertain mutation still creates a reconciliation fence;
+9. Local Qwen cannot self-approve or mutate Git history;
+10. existing Generic Project and Media Product workflows remain green.
+
+Architecture approval does not imply merge, deployment, production daemon activation, or automatic service restart.
