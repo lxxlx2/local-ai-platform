@@ -23,6 +23,38 @@ ARCHITECTURE_CHANGE_PROPOSED
 
 The normal approval may be a short explicit Owner response such as `通过`, `可以`, `按这个来`, or another unambiguous approval.
 
+## Chat-originated architecture durability
+
+Any new operating mode, provider-routing rule, workflow architecture, review policy, state-machine change, capability boundary, or other material architecture idea that is approved during a ChatGPT/Codex/Local-Qwen/Gemini conversation must be synchronized to Git promptly.
+
+The synchronization does not require merging to `main`.
+
+A dedicated docs/design branch, architecture issue, or feature branch is acceptable as long as the decision is durable, discoverable, and carries enough status to prevent later agents from treating it as deployed production behavior.
+
+The minimum durable record should include, where applicable:
+
+- decision / intended behavior;
+- scope and affected workflows;
+- provider/model priority or capability changes;
+- security/review boundaries;
+- current implementation status;
+- qualification status;
+- branch/ref or issue that tracks implementation;
+- explicit statement when merge/deployment/production activation has not happened.
+
+Do not rely on chat memory as the only source of truth for an approved architecture decision.
+
+When a conversation produces a material architecture update, the preferred order is:
+
+```text
+OWNER_APPROVES_IN_CHAT
+  -> WRITE_DURABLE_GIT_RECORD
+  -> RECORD_BRANCH_OR_ISSUE_REFERENCE
+  -> CONTINUE_IMPLEMENTATION
+```
+
+If the implementation branch must remain frozen for review or qualification, create a separate docs/design branch instead of mutating the frozen review baseline.
+
 ## What requires this flow
 
 Use this protocol when a proposed change materially affects one or more of:
@@ -67,6 +99,8 @@ DOC_SYNC updates the smallest relevant set of canonical documents. Depending on 
 - product repository README/specification when an external artifact contract changes
 
 Generated files such as `CAPABILITY_MATRIX.md` must be updated through their generator/evidence source rather than hand-edited.
+
+Operational failures that materially affect architecture or provider-routing decisions should also be recorded in the relevant issue or qualification evidence. A transient command failure does not require architecture documentation by itself, but repeated or architecture-relevant failure patterns do.
 
 ## Implementation handoff
 
