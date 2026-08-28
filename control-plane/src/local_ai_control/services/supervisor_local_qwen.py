@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -51,11 +52,120 @@ from .supervisor_runners import GitGateRunner, SafeCommandPolicy, StaticPassRunn
 
 DEFAULT_BRIDGE_HEALTH_URL = "http://127.0.0.1:8010/health"
 LOCAL_QWEN_SUPERVISOR_DB = Path("/Users/jerson/AI/runtime/supervisor-local-qwen/supervisor.db")
+LOCAL_QWEN_EXECUTION_TRACE_ROOT = Path("/Users/jerson/AI/runtime/supervisor-local-qwen/executions")
 SAFE_ENV_KEYS = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
+MAX_TRACE_STREAM_BYTES = 1_000_000
+MAX_TRACE_LINES = 10_000
 
 
 class LocalProducerExecutionUncertain(RuntimeError):
     """External Codex execution may have mutated the worktree before failing."""
+
+
+class LocalQwenExecutionTrace:
+    """Persist bounded structural Codex progress without response or tool content."""
+
+    def __init__(self, root: Path = LOCAL_QWEN_EXECUTION_TRACE_ROOT):
+        self.root = Path(root)
+
+    @staticmethod
+    def _stream_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    @staticmethod
+    def _safe_event_type(value) -> str:
+        value = str(value or "UNKNOWN")
+        return value if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", value) else "UNKNOWN"
+
+    def summarize(
+        self,
+        execution_id: str,
+        *,
+        started_at: str,
+        ended_at: str,
+        duration_seconds: float,
+        timed_out: bool,
+        return_code: int | None,
+        stdout=None,
+        stderr=None,
+    ) -> dict:
+        identifier = str(uuid.UUID(str(execution_id)))
+        raw_stdout = self._stream_text(stdout)
+        raw_stderr = self._stream_text(stderr)
+        stdout_bytes = len(raw_stdout.encode("utf-8", errors="replace"))
+        stderr_bytes = len(raw_stderr.encode("utf-8", errors="replace"))
+        lines = raw_stdout[:MAX_TRACE_STREAM_BYTES].splitlines()[:MAX_TRACE_LINES]
+        event_counts: dict[str, int] = {}
+        malformed = completed = in_progress = command_execution = agent_message = 0
+        last_type = None
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                malformed += 1
+                continue
+            if not isinstance(event, dict):
+                malformed += 1
+                continue
+            nested = event.get("item") if isinstance(event.get("item"), dict) else {}
+            event_type = self._safe_event_type(event.get("type") or nested.get("type"))
+            item_type = self._safe_event_type(nested.get("type")) if nested else "UNKNOWN"
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            last_type = event_type
+            status = str(event.get("status") or nested.get("status") or "").lower()
+            completed += int(status in {"completed", "complete", "done"} or event_type.endswith(".completed"))
+            in_progress += int(status in {"in_progress", "running", "started"} or event_type.endswith(".started"))
+            command_execution += int("command_execution" in event_type or "command_execution" in item_type)
+            agent_message += int("agent_message" in event_type or "agent_message" in item_type)
+        return {
+            "schema_version": "0.1",
+            "execution_id": identifier,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_seconds": round(float(duration_seconds), 3),
+            "timed_out": bool(timed_out),
+            "return_code": int(return_code) if return_code is not None else None,
+            "stdout_line_count": min(len(raw_stdout.splitlines()), MAX_TRACE_LINES),
+            "stderr_line_count": min(len(raw_stderr.splitlines()), MAX_TRACE_LINES),
+            "stdout_bytes_observed": min(stdout_bytes, MAX_TRACE_STREAM_BYTES),
+            "stderr_bytes_observed": min(stderr_bytes, MAX_TRACE_STREAM_BYTES),
+            "stream_truncated": stdout_bytes > MAX_TRACE_STREAM_BYTES or stderr_bytes > MAX_TRACE_STREAM_BYTES,
+            "json_event_count": sum(event_counts.values()),
+            "event_counts": dict(sorted(event_counts.items())[:128]),
+            "command_execution_count": command_execution,
+            "completed_count": completed,
+            "in_progress_count": in_progress,
+            "agent_message_count": agent_message,
+            "last_structural_event_type": last_type,
+            "malformed_json_line_count": malformed,
+        }
+
+    def persist(self, trace: dict) -> bool:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(self.root, 0o700)
+            destination = self.root / f"{trace['execution_id']}.json"
+            descriptor, temporary = tempfile.mkstemp(prefix=".trace-", dir=self.root)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    json.dump(trace, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, destination)
+                return True
+            finally:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
 
 
 class LocalWorktreeCodexTaskSpec(CodexTaskSpec):
@@ -410,11 +520,13 @@ class LocalQwenCodexRunner:
         health_probe=None,
         command_runner=subprocess.run,
         bridge_health_url: str = DEFAULT_BRIDGE_HEALTH_URL,
+        trace_root: Path = LOCAL_QWEN_EXECUTION_TRACE_ROOT,
     ):
         self.enabled = enabled is True
         self.health_probe = health_probe or self._probe_bridge
         self.command_runner = command_runner
         self.bridge_health_url = bridge_health_url
+        self.trace_store = LocalQwenExecutionTrace(trace_root)
 
     def cancel(self, execution_id=None, reason=None) -> bool:
         return False
@@ -510,19 +622,27 @@ class LocalQwenCodexRunner:
             spec.task_prompt,
         )
         started = time.monotonic()
+        started_at = utc_now()
         try:
             completed = self.command_runner(
                 command,
                 cwd=root,
                 env=self._safe_env(),
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
                 shell=False,
                 timeout=float(spec.timeout_seconds),
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
+            duration = round(time.monotonic() - started, 3)
+            trace=self.trace_store.summarize(
+                execution_id,started_at=started_at,ended_at=utc_now(),duration_seconds=duration,
+                timed_out=True,return_code=None,stdout=error.stdout,stderr=error.stderr,
+            )
+            self.trace_store.persist(trace)
             raise LocalProducerExecutionUncertain("LOCAL_QWEN_CODEX_TIMEOUT") from error
         except OSError as error:
             return StageResult(
@@ -535,12 +655,21 @@ class LocalQwenCodexRunner:
             raise LocalProducerExecutionUncertain(type(error).__name__) from error
         duration = round(time.monotonic() - started, 3)
         return_code = int(getattr(completed, "returncode", -1))
+        trace=self.trace_store.summarize(
+            execution_id,started_at=started_at,ended_at=utc_now(),duration_seconds=duration,
+            timed_out=False,return_code=return_code,stdout=getattr(completed,"stdout",None),
+            stderr=getattr(completed,"stderr",None),
+        )
+        trace_written=self.trace_store.persist(trace)
         metrics = {
             "provider": "local-qwen-codex",
             "duration_seconds": duration,
             "return_code": return_code,
             "network_access": False,
             "git_mutation_authority": False,
+            "trace_written": trace_written,
+            "json_event_count": trace["json_event_count"],
+            "command_execution_count": trace["command_execution_count"],
         }
         if return_code == 0:
             return StageResult.passed("Local Qwen Producer completed through Codex CLI", metrics=metrics)

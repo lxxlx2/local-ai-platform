@@ -1,3 +1,4 @@
+import json
 import subprocess
 import uuid
 from pathlib import Path
@@ -79,7 +80,7 @@ def test_local_qwen_runner_is_disabled_by_default(tmp_path):
         calls.append((args, kwargs))
         raise AssertionError("disabled runner must not spawn Codex")
 
-    runner = LocalQwenCodexRunner(command_runner=should_not_run)
+    runner = LocalQwenCodexRunner(command_runner=should_not_run,trace_root=tmp_path/"traces")
     result = runner.run_task(task_spec(root), str(uuid.uuid4()))
     assert result.status is StageResultStatus.BLOCKED
     assert result.error == "LOCAL_QWEN_PRODUCER_DISABLED"
@@ -98,6 +99,7 @@ def test_local_qwen_runner_feature_worktree_success_uses_safe_command(tmp_path):
         enabled=True,
         health_probe=healthy_bridge,
         command_runner=fake_run,
+        trace_root=tmp_path/"traces",
     )
     result = runner.run_task(task_spec(root), str(uuid.uuid4()))
     assert result.status is StageResultStatus.PASS
@@ -113,8 +115,9 @@ def test_local_qwen_runner_feature_worktree_success_uses_safe_command(tmp_path):
     assert command[3:6] == ("exec", "--json", "--ephemeral")
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
-    assert kwargs["stdout"] is subprocess.DEVNULL
-    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.PIPE
+    assert kwargs["stderr"] is subprocess.PIPE
+    assert kwargs["text"] is True
     assert not any(key.upper().endswith(("TOKEN", "SECRET", "PASSWORD")) for key in kwargs["env"])
 
 
@@ -127,6 +130,7 @@ def test_local_qwen_runner_rejects_main_before_health_or_process(tmp_path):
         enabled=True,
         health_probe=lambda: health_calls.append(True) or healthy_bridge(),
         command_runner=lambda *a, **k: process_calls.append(True) or Completed(),
+        trace_root=tmp_path/"traces",
     )
     base = task_spec(root)
     result = runner.run_task(base, str(uuid.uuid4()))
@@ -142,6 +146,7 @@ def test_local_qwen_bridge_identity_mismatch_blocks_process(tmp_path):
         enabled=True,
         health_probe=lambda: {"status": "healthy", "backend": "wrong", "tool": "exec_command"},
         command_runner=lambda *a, **k: process_calls.append(True) or Completed(),
+        trace_root=tmp_path/"traces",
     )
     result = runner.run_task(task_spec(root), str(uuid.uuid4()))
     assert result.status is StageResultStatus.BLOCKED
@@ -159,9 +164,54 @@ def test_local_qwen_timeout_is_execution_uncertainty(tmp_path):
         enabled=True,
         health_probe=healthy_bridge,
         command_runner=timeout,
+        trace_root=tmp_path/"traces",
     )
     with pytest.raises(LocalProducerExecutionUncertain, match="LOCAL_QWEN_CODEX_TIMEOUT"):
         runner.run_task(task_spec(root), str(uuid.uuid4()))
+
+
+def test_execution_trace_keeps_only_bounded_structural_events(tmp_path):
+    root=make_feature_repo(tmp_path)
+    execution_id=str(uuid.uuid4())
+    class Output:
+        returncode=0
+        stdout=(
+            json.dumps({"type":"item.started","item":{"type":"command_execution","command":"SECRET COMMAND"}})+"\n"
+            +json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"PRIVATE MODEL REPLY"}})+"\n"
+            +"malformed raw tool output SECRET_VALUE\n"
+        )
+        stderr="private stderr body SECRET_STDERR\n"
+    result=LocalQwenCodexRunner(
+        enabled=True,health_probe=healthy_bridge,command_runner=lambda *a,**k:Output(),
+        trace_root=tmp_path/"runtime"/"executions",
+    ).run_task(task_spec(root),execution_id)
+    trace_path=tmp_path/"runtime"/"executions"/f"{execution_id}.json"
+    trace=json.loads(trace_path.read_text())
+    encoded=trace_path.read_text()
+    assert result.status is StageResultStatus.PASS and result.metrics["trace_written"] is True
+    assert trace["json_event_count"]==2 and trace["malformed_json_line_count"]==1
+    assert trace["command_execution_count"]==1 and trace["agent_message_count"]==1
+    assert not any(value in encoded for value in ("SECRET COMMAND","PRIVATE MODEL REPLY","SECRET_VALUE","SECRET_STDERR"))
+    assert (trace_path.parent.stat().st_mode & 0o777)==0o700
+    assert (trace_path.stat().st_mode & 0o777)==0o600
+
+
+def test_timeout_trace_summarizes_partial_stream_without_raw_content(tmp_path):
+    root=make_feature_repo(tmp_path)
+    execution_id=str(uuid.uuid4())
+    partial=(json.dumps({"type":"item.started","item":{"type":"command_execution","command":"do not persist"}})+"\n").encode()
+    def timeout(command,**kwargs):
+        raise subprocess.TimeoutExpired(command,kwargs["timeout"],output=partial,stderr=b"private error")
+    runner=LocalQwenCodexRunner(
+        enabled=True,health_probe=healthy_bridge,command_runner=timeout,
+        trace_root=tmp_path/"runtime"/"executions",
+    )
+    with pytest.raises(LocalProducerExecutionUncertain):
+        runner.run_task(task_spec(root),execution_id)
+    path=tmp_path/"runtime"/"executions"/f"{execution_id}.json"
+    trace=json.loads(path.read_text())
+    assert trace["timed_out"] is True and trace["command_execution_count"]==1
+    assert "do not persist" not in path.read_text() and "private error" not in path.read_text()
 
 
 def prepare_durable_producer(tmp_path, command_runner):
@@ -185,6 +235,7 @@ def prepare_durable_producer(tmp_path, command_runner):
         enabled=True,
         health_probe=healthy_bridge,
         command_runner=command_runner,
+        trace_root=tmp_path/"traces",
     )
     return root, repo, unit, context, PersistedCodexStageRunner(inner), run_id
 
