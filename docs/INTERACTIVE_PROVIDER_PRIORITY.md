@@ -142,6 +142,24 @@ Candidate tools include future bounded operations such as:
 
 The tools must return structured artifacts and never grant Gemini authority beyond the host-side contract.
 
+### 5.3 Sanitization-aware cloud review contract
+
+Real qualification on 2026-08-28 proved that Gemini can process a bounded review package of roughly 52 KB and return structured findings, but it also exposed a review-integrity hazard: privacy sanitization and bounded bundle omission can change what the reviewer believes is literal repository state.
+
+Therefore cloud code review must preserve semantic provenance in addition to privacy.
+
+Required rules:
+
+- synthetic sanitization placeholders such as `<redacted>` must be explicitly marked as review artifacts and must not be treated as literal source defects;
+- the reviewer must be told that sanitized user/home paths preserve path role while hiding identity;
+- absence of a referenced file from a bounded review bundle does not prove that the file is absent from the repository;
+- where practical, the host should include a bounded repository path-existence manifest for referenced files;
+- if a claim depends on omitted context, the reviewer must classify it as unverified/needs-verification instead of a blocking defect;
+- findings supported only by sanitization placeholders or missing bundle context are not eligible for automatic acceptance/rejection decisions;
+- raw PRIVATE material remains denied from Gemini; this review-integrity rule does not weaken the privacy gate.
+
+The host is responsible for distinguishing repository facts from sanitized review representations. P3 review qualification is incomplete until this contract is implemented and tested.
+
 ## 6. Independent review rule
 
 A provider may perform a preliminary self-check, but it must not be the sole final reviewer/acceptor of its own produced candidate.
@@ -234,6 +252,7 @@ Not yet implemented/qualified as of this document sync:
 - Gemini structured patch/continuation provider;
 - host-controlled Gemini patch application path;
 - Codex Desktop MCP tools for Gemini task continuation/proposed patches;
+- sanitization-aware Gemini code-review material and repository existence manifest;
 - cross-provider independent-review assignment enforcing `producer != final independent reviewer` across all three providers;
 - full three-provider qualification.
 
@@ -247,16 +266,18 @@ Before P3 is marked READY, prove:
 2. PRIVATE material never reaches Gemini;
 3. RESTRICTED material passes the existing egress gate;
 4. Gemini receives only bounded/minimized task material;
-5. Gemini cannot directly execute shell/Git/deploy/service actions;
-6. Gemini structured patch/proposal is bound to the same durable task/worktree/objective;
-7. host patch application cannot escape the approved worktree;
-8. Gemini-produced changes are reviewed by Codex or Qwen before final acceptance;
-9. Gemini cannot self-approve its own candidate;
-10. no provider transition creates a new logical task;
-11. provider history remains append-only/idempotent;
-12. Codex Desktop remains the preferred Owner-facing GUI where current client capabilities permit;
-13. no silent paid Gemini usage is enabled;
-14. existing Codex -> Qwen failover qualification does not regress.
+5. sanitization placeholders are explicitly identified as synthetic review artifacts;
+6. omitted bundle files cannot be reported as repository-missing without host evidence;
+7. Gemini cannot directly execute shell/Git/deploy/service actions;
+8. Gemini structured patch/proposal is bound to the same durable task/worktree/objective;
+9. host patch application cannot escape the approved worktree;
+10. Gemini-produced changes are reviewed by Codex or Qwen before final acceptance;
+11. Gemini cannot self-approve its own candidate;
+12. no provider transition creates a new logical task;
+13. provider history remains append-only/idempotent;
+14. Codex Desktop remains the preferred Owner-facing GUI where current client capabilities permit;
+15. no silent paid Gemini usage is enabled;
+16. existing Codex -> Qwen failover qualification does not regress.
 
 ## 11. Relationship to local-first policy
 
