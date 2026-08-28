@@ -8,7 +8,7 @@ def callbacks(keyboard): return [button.callback_data for row in keyboard.inline
 
 def test_owner_navigation_exposes_registered_capabilities_without_repo_ids():
     media=media_menu(owner=True); system=system_menu()
-    assert {"视觉理解","语音","图片生成","视频理解","视频生成","任务与进度"} <= set(labels(media))
+    assert {"视觉理解","语音","图片生成","视频","任务与进度"} <= set(labels(media))
     assert "联网搜索" in labels(system)
     assert all("/" not in value for value in callbacks(media)+callbacks(system))
 

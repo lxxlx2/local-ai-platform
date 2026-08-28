@@ -9,8 +9,11 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from local_ai_control.bot.ui import (
     BACK, back_for, inline, media_menu, owner_dashboard, owner_task_menu,
-    public_dashboard, system_menu, workflow_controls, workflow_menu,
+    public_dashboard, system_menu, workflow_controls, workflow_menu, video_production_menu,
+    source_mode_menu, execution_mode_menu, language_menu, voice_menu, completion_mode_menu,
+    confirmation_menu,
 )
+from local_ai_control.bot.media_wizard import MediaWizardController,MediaWizardStore,WizardStep,wizard_summary
 from local_ai_control.services.capabilities import capability_intro, model_identity, routed_capability_text
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
@@ -106,6 +109,8 @@ async def run():
     provider_factory = RuntimeProviderFactory(registry)
     runtime_executor = AsyncRuntimeExecutor(provider_factory)
     image_service = TelegramImageService(provider_factory.main)
+    media_wizard_store=MediaWizardStore()
+    media_wizard=MediaWizardController(media_wizard_store)
     bot = Bot(settings.token)
     dp = Dispatcher()
 
@@ -242,6 +247,55 @@ async def run():
     @dp.callback_query(F.data == "menu:public_media")
     async def public_media_menu(query: CallbackQuery):
         await edit_page(query, "文件与媒体\n\n请选择一个入口：", media_menu(owner=False))
+
+    @dp.callback_query(F.data == "media:video")
+    async def video_production(query:CallbackQuery):
+        ctx=identity(query)
+        try: authorize(ctx,"owner:system")
+        except AuthorizationDenied: await query.answer("当前账号没有此操作权限。",show_alert=True); return
+        await edit_page(query,"视频\n\n创建演示视频，或查看当前视频能力。",video_production_menu())
+
+    @dp.callback_query(F.data == "media:new")
+    async def media_new(query:CallbackQuery):
+        ctx=identity(query)
+        try: media_wizard.start(ctx.role,ctx.internal_user_id)
+        except PermissionError: await query.answer("当前账号没有此操作权限。",show_alert=True); return
+        await edit_page(query,"新建视频\n\n请发送一个简短的任务名称。",inline([[('取消','mw:cancel')]]))
+
+    async def active_media_wizard(message:Message):
+        ctx=identity(message); session=media_wizard_store.get(ctx.internal_user_id)
+        return bool(session and session.step in {WizardStep.TASK_NAME,WizardStep.MATERIALS})
+
+    @dp.message(active_media_wizard,F.text)
+    async def media_wizard_text(message:Message):
+        ctx=identity(message)
+        try: session=media_wizard.text(ctx.role,ctx.internal_user_id,message.text)
+        except (PermissionError,KeyError,ValueError): await message.answer("输入无效，请返回视频菜单重新开始。"); return
+        if session.step is WizardStep.SOURCE_MODE:
+            await message.answer("请选择材料来源。",reply_markup=source_mode_menu())
+        else:
+            await message.answer("请选择执行方式。",reply_markup=execution_mode_menu())
+
+    @dp.callback_query(F.data.startswith("mw:"))
+    async def media_wizard_callback(query:CallbackQuery):
+        ctx=identity(query); data=query.data
+        try:
+            if data=="mw:cancel": media_wizard_store.cancel(ctx.internal_user_id); await edit_page(query,"视频任务已取消。",video_production_menu()); return
+            if data.startswith("mw:source:"):
+                value=data.split(":",2)[2]; media_wizard.choice(ctx.role,ctx.internal_user_id,"source_mode",value)
+                await edit_page(query,"请发送材料说明、公开链接或简要需求。\n\n一次只发送一项；稍后可以在任务中补充。",inline([[('取消','mw:cancel')]])); return
+            if data.startswith("mw:exec:"):
+                media_wizard.choice(ctx.role,ctx.internal_user_id,"execution_mode",data.split(":",2)[2]); await edit_page(query,"请选择主要语言。",language_menu()); return
+            if data.startswith("mw:lang:"):
+                media_wizard.choice(ctx.role,ctx.internal_user_id,"language",data.split(":",2)[2]); await edit_page(query,"请选择声音。",voice_menu()); return
+            if data.startswith("mw:voice:"):
+                media_wizard.choice(ctx.role,ctx.internal_user_id,"voice",data.split(":",2)[2]); await edit_page(query,"请选择完成方式。",completion_mode_menu()); return
+            if data.startswith("mw:complete:"):
+                session=media_wizard.choice(ctx.role,ctx.internal_user_id,"completion_mode",data.split(":",2)[2]); await edit_page(query,wizard_summary(session),confirmation_menu()); return
+            if data=="mw:confirm":
+                media_wizard.confirm(ctx.role,ctx.internal_user_id); await edit_page(query,"视频任务已创建。\n\n材料会在私有工作区处理；生成完成后会在这里等待你的最终确认。",video_production_menu()); return
+            await query.answer("该操作尚未就绪。",show_alert=True)
+        except (PermissionError,KeyError,ValueError): await query.answer("步骤无效或已过期，请重新开始。",show_alert=True)
 
     @dp.callback_query(F.data == "menu:system")
     async def owner_system_menu(query: CallbackQuery):
@@ -404,7 +458,7 @@ async def run():
     try:
         await dp.start_polling(bot)
     finally:
-        runtime_executor.shutdown(); private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); await bot.session.close()
+        runtime_executor.shutdown(); private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); media_wizard_store.close(); await bot.session.close()
 
 
 if __name__ == "__main__":

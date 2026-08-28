@@ -28,6 +28,7 @@ NAVIGATION_ROUTES = {
     "owner:audio": NavigationRoute("owner:audio", "menu:media", "home", "owner_capability"),
     "owner:image_generate": NavigationRoute("owner:image_generate", "menu:media", "home", "owner_capability"),
     "owner:video_generate": NavigationRoute("owner:video_generate", "menu:media", "home", "owner_capability"),
+    "media:video": NavigationRoute("media:video", "menu:media", "home", "video_production_menu"),
     "owner:media_jobs": NavigationRoute("owner:media_jobs", "menu:media", "home", "owner_capability"),
     "public:file": NavigationRoute("public:file", "menu:public_media", "home", "public_route"),
     "public:image": NavigationRoute("public:image", "menu:public_media", "home", "public_route"),
@@ -74,10 +75,26 @@ def media_menu(owner=False):
         return inline([
             [("文件分析", "owner:file"), ("视觉理解", "owner:image")],
             [("语音", "owner:audio"), ("图片生成", "owner:image_generate")],
-            [("视频理解", "owner:video"), ("视频生成", "owner:video_generate")],
+            [("视频", "media:video"), ("图片生成", "owner:image_generate")],
             [("任务与进度", "owner:media_jobs")], [("返回", "home")],
         ])
     return inline([[("文件分析", f"{prefix}:file"), ("图片处理", f"{prefix}:image")], [("视频处理", f"{prefix}:video")], [("返回", "home")]])
+
+
+def video_production_menu():
+    return inline([[('新建视频','media:new')],[('视频理解','owner:video'),('生成能力状态','owner:video_generate')],[('返回','menu:media')]])
+
+
+def source_mode_menu():
+    return inline([[('上传材料','mw:source:UPLOADS'),('链接','mw:source:LINKS')],[('上传与链接','mw:source:UPLOADS_AND_LINKS'),('直接说明','mw:source:DIRECT_BRIEF')],[('取消','mw:cancel')]])
+
+
+def execution_mode_menu(): return inline([[('自动完成','mw:exec:AUTO'),('先审文稿','mw:exec:REVIEW_SCRIPT')],[('取消','mw:cancel')]])
+def language_menu(): return inline([[('自动识别','mw:lang:auto'),('中文','mw:lang:zh'),('English','mw:lang:en')],[('取消','mw:cancel')]])
+def voice_menu(): return inline([[('自动选择','mw:voice:auto')],[('中文声音','mw:voice:zh-male-25-default'),('English Voice','mw:voice:en-male-25-default')],[('取消','mw:cancel')]])
+def completion_mode_menu(): return inline([[('完成后审视频','mw:complete:AUTO_COMPLETE')],[('先审文稿再生成','mw:complete:SCRIPT_REVIEW_FIRST')],[('取消','mw:cancel')]])
+def confirmation_menu(): return inline([[('确认生成','mw:confirm'),('取消','mw:cancel')]])
+def review_video_menu(): return inline([[('通过并发布','mw:approve'),('重新生成','mw:regenerate')],[('修改文稿','mw:edit-script'),('取消','mw:cancel')]])
 
 
 def system_menu():
