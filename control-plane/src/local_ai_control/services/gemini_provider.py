@@ -14,6 +14,7 @@ DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 DEFAULT_GEMINI_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash")
 MIN_GEMINI_SDK_MAJOR = 2
 DEFAULT_GEMINI_TIMEOUT_MS = 35_000
+DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 4096
 
 
 class GeminiProviderError(RuntimeError):
@@ -165,14 +166,36 @@ class GeminiReviewerProvider:
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_json_schema=dict(schema),
-                    max_output_tokens=1536,
+                    max_output_tokens=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
                     temperature=0,
                     thinking_config=types.ThinkingConfig(thinking_level="low"),
                 ),
             )
+            parsed = getattr(response, "parsed", None)
+            if isinstance(parsed, dict):
+                return parsed
+
+            model_dump = getattr(parsed, "model_dump", None)
+            if callable(model_dump):
+                dumped = model_dump()
+                if isinstance(dumped, dict):
+                    return dumped
+
+            candidates = getattr(response, "candidates", None) or ()
+            if candidates:
+                finish_reason = str(
+                    getattr(candidates[0], "finish_reason", "")
+                ).upper()
+                if "MAX_TOKENS" in finish_reason:
+                    raise GeminiInvalidOutputError(
+                        "Gemini structured output exceeded output token budget"
+                    )
+
             text = response.text
         except TimeoutError as error:
             raise GeminiTimeoutError("Gemini request timed out") from error
+        except GeminiProviderError:
+            raise
         except Exception as error:
             message = _safe_remote_error(error, key)
             lowered = message.lower()
@@ -248,9 +271,29 @@ class GeminiReviewerProvider:
         if len(material.encode("utf-8")) > 256_000:
             raise ValueError("review material exceeds bounded Gemini egress size")
 
+        sanitization_notice = ""
+        if sanitized_for_egress:
+            sanitization_notice = (
+                "PRIVACY SANITIZATION NOTICE: the supplied material may contain "
+                "synthetic placeholders such as <redacted>, including redacted "
+                "user/home path components. These placeholders are review artifacts, "
+                "not literal repository source text, and must not be reported as defects. "
+            )
+
         prompt = (
-            "You are an independent read-only software reviewer. Review only the supplied material. "
-            "Do not assume shell, filesystem, Git, deployment or secret access. Return findings grounded in the material.\n\n"
+            "You are an independent read-only software reviewer. "
+            "Review only the supplied material. "
+            "Do not assume shell, filesystem, Git, deployment or secret access. "
+            "Return findings grounded in the material. "
+            "This is a bounded review package. A referenced file that is not included "
+            "in the supplied package is UNVERIFIED, not MISSING. Do not claim that a "
+            "repository file is absent unless the supplied evidence explicitly proves "
+            "its absence. If a potential issue depends on omitted context, do not "
+            "report it as a confirmed defect. "
+            + sanitization_notice
+            + "Keep the response bounded: no more than 8 findings; "
+            "keep the summary concise; keep each evidence and recommended_fix "
+            "focused on the minimum information required to support the finding.\n\n"
             + material
         )
 
@@ -268,7 +311,12 @@ class GeminiReviewerProvider:
                     model=model,
                     latency_seconds=round(time.monotonic() - started, 3),
                 )
-            except (GeminiTimeoutError, GeminiRateLimitError, GeminiModelUnavailableError) as error:
+            except (
+                GeminiTimeoutError,
+                GeminiRateLimitError,
+                GeminiModelUnavailableError,
+                GeminiInvalidOutputError,
+            ) as error:
                 last_transient = error
                 continue
 
