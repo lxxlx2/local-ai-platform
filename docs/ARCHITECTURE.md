@@ -92,12 +92,48 @@ This separation prevents hidden chat state from becoming the only source of trut
 
 Workflow Supervisor V0.1 is an experimental Owner-private service on a feature branch. Its deterministic state machine and SQLite journal continue multi-stage workflows independently of a ChatGPT/Codex turn. Stage runners are adapters; they do not control transitions. A leased singleton lock limits execution to one active job, and interrupted potentially mutating stages require reconciliation rather than blind replay. See `WORKFLOW_SUPERVISOR.md`.
 
-## Local implementation executor
+## Interactive coding UI and automatic provider failover
 
-Routine implementation no longer depends on Codex CLI. The canonical local path is:
+For Owner-present coding, Codex Desktop is the primary interactive GUI. OpenAI Codex and Local Qwen3.8 are providers behind one durable coding-task contract; a provider change must not create a new logical task.
+
+The target interactive path is:
 
 ```text
-Owner objective
+Owner in Codex Desktop
+        |
+        v
+Durable coding task / feature worktree
+        |
+        v
+Provider failover controller
+        |
+   +----+-----------------------+
+   |                            |
+Codex available             Codex exhausted/unavailable
+   |                            |
+   v                            v
+OpenAI Codex              Local Qwen3.8 MAIN
+                              |
+                              v
+                     Codex-Qwen UI adapter
+                              |
+                              v
+                     same project/worktree
+```
+
+Automatic local takeover is triggered only by deterministic evidence such as explicit quota exhaustion, a recognized quota/rate-limit failure on the active Codex request, or cloud-provider unavailability combined with a healthy attested Local Qwen route. Account-wide `usedPercent` changes alone are diagnostic and must not be treated as per-task execution attribution.
+
+The durable handoff preserves at least objective, worktree, branch, workflow stage, provider history, diff identity, completed tests, unresolved findings, review state, handoff state, and approval state. A same-chat-thread hot swap is not a hard requirement because the Codex client may not support it reliably; the hard requirement is the same GUI, project/worktree, durable task, and automatic progress continuation.
+
+The local interactive adapter may reuse the existing Responses-compatible `codex_qwen_bridge` and isolated Codex provider/profile work. It must not silently overwrite the Owner's normal cloud Codex configuration. See `CODEX_AUTO_FAILOVER_ARCHITECTURE.md`.
+
+## Unattended local implementation executor
+
+Direct Local Qwen remains canonical for unattended/background coding and must not depend on Codex Desktop being open:
+
+```text
+Telegram / scheduler / 7x24 task
+  → Supervisor
   → Generic Project isolated feature worktree
   → Direct Local Qwen Agent
   → deterministic allowlisted tools only
@@ -115,26 +151,25 @@ Owner objective
 
 The Direct Local Qwen Agent has no arbitrary shell tool. Repository documents, comments, issues, tests, generated text, and tool output are untrusted data and cannot widen capabilities. The executor has no package-install/download tool, no credential tool, no network tool, no service/process-control tool, and no commit/push/merge tool. Writes are limited to approved text/code file types inside the exact task worktree.
 
-The production Direct Qwen provider is authorized by deterministic route attestation. Its endpoint must be exactly `http://127.0.0.1:8001`; a different or missing provider route is blocked before generation. Generic Project execution does not start Codex CLI or Codex app-server. This makes executor attribution independent of unrelated account activity and removes OpenAI telemetry processes from the mutating task lifecycle.
+The production Direct Qwen provider is authorized by deterministic route attestation. Its endpoint must be exactly `http://127.0.0.1:8001`; a different or missing provider route is blocked before generation.
 
-The previous `qwen_local_bridge → codex exec` path remains historical compatibility evidence only and is not the normal Generic Project implementation path. It must not be used as an automatic fallback because a guarded real run showed OpenAI Codex quota movement despite the isolated custom-provider configuration.
-
-## Codex quota isolation and desktop policy
-
-OpenAI Codex quota is reserved for explicit planning and acceptance/review work. Codex Desktop is an interactive client, not a 7×24 platform service, and must never be treated as a required daemon for Local Qwen execution. The local platform must continue to function when Codex Desktop is fully quit.
-
-Account Codex rate-limit snapshots remain available as an out-of-band diagnostic through the read-only app-server endpoint. They are not an execution authorization signal: account-wide `usedPercent` changes cannot prove which client or process consumed quota. A quota increase is therefore recorded and investigated separately rather than converted into a Generic Project mutation fence. This avoids treating unrelated Desktop, CLI, scheduled, or other account activity as evidence that a localhost-only Direct Qwen task used OpenAI.
-
-The accepted provider roles are:
+Local Qwen therefore has two front ends with different interaction roles:
 
 ```text
-Local Qwen       = default implementation / routine autonomous work
-Gemini           = external reviewer / multimodal second opinion after privacy-egress gate
-OpenAI Codex     = planning and explicit acceptance/review only
-Codex Desktop    = optional interactive UI; never a persistent runtime dependency
+Local Qwen3.8
+  ├─ Codex Desktop adapter: Owner-present interactive coding
+  └─ Direct Local Qwen Agent: unattended/background coding
 ```
 
-Local tasks must remain usable with Codex Desktop closed, and no background Desktop mode, scheduled UI activity, global ChatGPT authentication, or Codex CLI custom-provider behavior may be considered part of the Local Qwen implementation path.
+Both paths must preserve the same durable task/worktree identity and security policy where applicable. Neither path grants Qwen commit, push, merge, deploy, credential, arbitrary-network, service-control, or unrestricted filesystem authority.
+
+## Codex quota and recovery policy
+
+OpenAI Codex quota is reserved for high-value planning, escalation, and acceptance/review, while routine implementation should preferentially remain local. The interactive failover controller exists so quota exhaustion never forces a durable coding job to wait for the next quota window when Local Qwen is healthy and qualified for the work.
+
+Quota recovery does not interrupt a mutating Local Qwen step. At the next safe workflow boundary, routine implementation may stay on Local Qwen; planning, escalation, or acceptance may route back to OpenAI Codex according to policy. Every transition is appended to provider-history evidence.
+
+Codex Desktop remains a human-facing GUI, not a required 7x24 daemon. Background platform work must continue when the Desktop app is fully quit.
 
 ## Architecture governance
 
