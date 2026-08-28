@@ -1,8 +1,8 @@
 # Gemini P3 Review Qualification
 
-Status: PARTIAL QUALIFICATION / ROUTING BUNDLE PASS / FULL P3 QUALIFICATION PENDING
+Status: PARTIAL QUALIFICATION / ROUTING + CANCELLATION + DURABLE-STATE REVIEW PASS / FULL P3 QUALIFICATION PENDING
 
-Date: 2026-08-28
+Date: 2026-08-29
 Architecture branch: `docs/interactive-provider-priority-v01`
 Related issue: #18
 
@@ -112,25 +112,85 @@ Result:
 
 Gemini summary stated that the supplied routing/failover mechanisms were fail-closed, tested, maintained state continuity, and showed no confirmed privilege-escalation issue in the bounded supplied evidence.
 
+## Exact cancellation bundle
+
+Package size: 73,277 bytes.
+
+Files reviewed:
+
+- `control-plane/src/local_ai_control/services/supervisor_local_qwen.py`
+- `control-plane/src/local_ai_control/services/supervisor_codex.py`
+- `control-plane/tests/test_codex_qwen_supervisor.py`
+
+Result:
+
+- status: `PASS_RESPONSE`
+- model: `gemini-3.5-flash`
+- verdict: PASS
+- findings: 0
+- latency: 30.957 seconds
+- wall time: 30.974 seconds
+- privacy: RESTRICTED
+- egress redactions: `email`, `mac_user_path`
+
+Review focus included exact `execution_id` ownership, process-group isolation, SIGTERM/SIGKILL behavior, bounded wait/reap, wrong execution ID behavior, concurrency, unrelated-process survival, timeout handling, mutation-fence semantics, and the rule that cancellation proves only that the external process stopped and does not prove no filesystem mutation occurred.
+
+Gemini reported no confirmed defect in the bounded supplied evidence.
+
+## Durable-state and security bundle
+
+Package size: 51,953 bytes.
+
+Files reviewed:
+
+- `control-plane/src/local_ai_control/services/provider_failover.py`
+- `control-plane/src/local_ai_control/services/supervisor_codex.py`
+- `control-plane/src/local_ai_control/services/codex_failover_adapter.py`
+- `control-plane/tests/test_provider_failover.py`
+- `control-plane/tests/test_codex_failover_adapter.py`
+
+Result:
+
+- status: `PASS_RESPONSE`
+- model: `gemini-3.5-flash`
+- verdict: PASS
+- findings: 0
+- latency: 31.307 seconds
+- wall time: 31.329 seconds
+- privacy: RESTRICTED
+- egress redactions: `email`, `mac_user_path`
+
+Review focus included same-job continuity, objective/worktree/branch binding, candidate and validation evidence preservation, append-only/idempotent provider history, repeated-signal behavior, handoff/preflight durability, blocked-state preservation, safe-boundary recovery, fail-closed ambiguous evidence, local-route attribution, no accidental OpenAI runner, no Local-Qwen self-approval/commit/push/merge/deploy authority, and repository/workspace mismatch handling.
+
+Gemini reported no confirmed defect in the bounded supplied evidence.
+
 ## Current capability conclusion
 
 Evidence currently supports:
 
-- Gemini API can process a bounded code-review package around 53 KB within tens of seconds;
+- Gemini API can process bounded code-review packages from roughly 52 KB to 73 KB within tens of seconds;
 - structured JSON output can succeed after provider robustness changes;
 - sanitization-aware review packaging removes confirmed false positives observed in V1;
-- Gemini is a promising independent long-context reviewer for P3.
+- routing/failover review: PASS;
+- exact cancellation review: PASS;
+- durable-state/security review: PASS;
+- Gemini is technically suitable as a fast independent long-context reviewer for the P3 role, subject to the remaining provider-fix and three-provider qualification gates.
+
+These model-review results are independent review evidence, not a substitute for executable tests or Owner/host acceptance.
 
 Evidence does not yet support full P3 qualification.
 
-Remaining required review evidence:
+Remaining required evidence:
 
-1. exact process/execution cancellation bundle;
-2. durable same-job handoff, provider history and mutation-fence/security bundle;
-3. broader Gemini provider regression tests;
-4. commit and push of the provider robustness fix;
-5. independent review of the provider robustness fix by a provider other than Gemini if Gemini materially produced/approved the implementation;
-6. full three-provider routing/independent-review qualification remains pending.
+1. broader Gemini provider regression tests;
+2. full control-plane test suite on the provider robustness branch;
+3. final real Gemini smoke after the complete fix;
+4. commit and push of `fix/gemini-large-review-v01`;
+5. independent review of the Gemini provider robustness fix by a provider other than Gemini;
+6. P2 -> P3 supplementary routing implementation remains pending;
+7. Gemini structured patch/continuation provider remains pending;
+8. cross-provider `producer != final independent reviewer` enforcement remains pending;
+9. full three-provider routing/independent-review qualification remains pending.
 
 ## Safety status
 
