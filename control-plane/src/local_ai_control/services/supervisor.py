@@ -34,6 +34,9 @@ from .provider_failover import (
     LocalPreflightAttestation, LocalPreflightFailed, ProviderFailoverController,
     ProviderIdentity, ProviderState, http_json_health,
 )
+from .codex_failover_adapter import (
+    CodexDesktopLocalAdapter, CodexLocalLaunchPlan, ProviderAwareCodexStageRunner,
+)
 
 SupervisorRepository = Round2SupervisorRepository
 WorkflowSupervisor = Round2WorkflowSupervisor
