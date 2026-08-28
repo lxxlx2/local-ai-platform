@@ -150,3 +150,11 @@ def test_provider_aware_stage_fails_closed_for_handoff_state_and_foreign_reposit
     assert result.status is StageResultStatus.BLOCKED
     assert not cloud.calls and not local.calls
     repository.close()
+
+
+def test_launcher_and_qualification_pin_the_same_codex_version():
+    root = Path(__file__).parents[1]
+    launcher = (root / "scripts/run-codex-qwen-local.sh").read_text()
+    qualification = (root / "scripts/qualify-codex-qwen-local.sh").read_text()
+    assert '0.148.0' in launcher and '0.148.0' in qualification
+    assert '0.146.0' not in qualification

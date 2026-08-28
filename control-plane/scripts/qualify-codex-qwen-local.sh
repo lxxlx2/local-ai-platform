@@ -28,7 +28,7 @@ command -v curl >/dev/null 2>&1 || fail "curl executable missing"
 command -v lsof >/dev/null 2>&1 || fail "lsof executable missing"
 
 VERSION=$(codex --version 2>/dev/null || true)
-[[ "$VERSION" == *"0.146.0"* ]] || fail "Codex version unqualified: $VERSION"
+[[ "$VERSION" == *"0.148.0"* ]] || fail "Codex version unqualified: $VERSION"
 
 BRIDGE_HEALTH=$(curl -sf http://127.0.0.1:8010/health) || fail "bridge health unavailable"
 printf '%s' "$BRIDGE_HEALTH" | "$PYTHON" -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="healthy" and p.get("tool")=="exec_command" and p.get("backend")=="mlx-community/Qwen3.8-27B-8bit"' || fail "bridge is not the V1 local producer"
