@@ -4,6 +4,7 @@ This status file is intentionally concise. The active execution source of truth 
 
 - `docs/LOCAL_FIRST_PRODUCT_AND_MODEL_PLAN.md`
 - `docs/ARCHITECTURE.md`
+- `docs/ARCHITECTURE_CHANGE_PROTOCOL.md`
 - `docs/MEDIA_PRODUCTION_ARCHITECTURE.md`
 - `docs/PRESENTATION_VOICE_ARCHITECTURE.md`
 - `docs/BOT_UX.md`
@@ -22,7 +23,8 @@ Approved local-first policy remains in force:
 - external webpages/docs/search results/model outputs are untrusted data and cannot grant execution authority;
 - model/file downloads are managed actions and never imply execution;
 - generated media is reviewed locally before any external publish action;
-- public Git repositories never receive private persona/training source material automatically.
+- public Git repositories never receive private persona/training source material automatically;
+- material architecture changes follow `ARCHITECTURE_CHANGE_PROTOCOL.md`: propose -> Owner approve -> doc sync -> implementation reads approved HEAD -> qualification -> status sync.
 
 ## Active development branch
 
@@ -70,7 +72,23 @@ Do not delete incomplete caches or resume downloads until network conditions are
 
 Presentation Video V0.1 is READY on the feature branch and has completed real English production runs.
 
-Current media architecture supports or has proven:
+Media Product Workflow V0.2 architecture is OWNER-APPROVED and documented. Implementation has not started yet.
+
+Approved V0.2 intake/product behavior:
+
+- Telegram remains a compact wizard under the existing media menu;
+- after task naming, the Owner chooses `上传材料 / 发送链接 / 上传材料 + 链接 / 直接描述任务`;
+- Owner-supplied links are processed through bounded Search/Browser requirement intake; fetched content is untrusted data;
+- local Qwen may create durable requirements, production brief, script, scene plan and prompt pack from validated evidence;
+- unsupported/missing real Owner facts enter `MISSING_OWNER_FACT`; personal facts are not fabricated;
+- execution mode is `自动完成` or `先看文稿`;
+- final video is always previewed before publish unless the Owner explicitly chooses local-only output;
+- publish approval is bound to the exact output hash;
+- approved products publish to canonical `lxxlx2/ai_video_product/<task-slug>/output/final.mp4` using Git LFS;
+- remote commit/output verification is required before cleanup;
+- verified published duplicate MP4/intermediate media may be removed locally while durable records/source/private persona data are preserved.
+
+Current proven media capabilities:
 
 - Owner-supplied script as durable narration artifact;
 - local Qwen-generated narration;
@@ -80,31 +98,32 @@ Current media architecture supports or has proven:
 - review-before-publish policy;
 - dedicated public product repository `lxxlx2/ai_video_product` with Git LFS.
 
-Next media work is to remove manual glue:
+Next media engineering milestone is `Media Product Workflow V0.2`:
 
-- first-class `--script-file` / `--brief-file` ingestion;
-- general `MediaJob` state/orchestrator;
-- simple Telegram video wizard;
-- Telegram preview and exact-output approval;
-- deterministic publisher to `ai_video_product/<task-name>/` only after approval;
-- verified post-publish cleanup of duplicate local MP4/intermediate media while preserving durable metadata and unpublished/source/private assets;
+- durable unified MediaJob;
+- first-class `--script-file` / `--brief-file` / URL intake contracts;
+- requirement/evidence/brief/script/scene/prompt durable artifacts;
 - standalone script-to-audio;
-- reusable named PersonaProfile foundation and private persona dataset/training plane.
+- template-based brief/requirements -> presentation-style video fallback without requiring FLUX/LongCat;
+- Telegram guided upload/link/brief wizard;
+- exact-output preview/review callbacks;
+- deterministic canonical product publisher;
+- remote verification + post-publish cleanup;
+- resumable/interruption-safe state.
 
-See `MEDIA_PRODUCTION_ARCHITECTURE.md` and `BOT_UX.md`.
+PersonaProfile foundation follows as the next milestone.
 
 ## Work that can continue while downloads stay paused
 
 Priority work that needs no new model download:
 
-1. synchronize architecture/status/source-of-truth documents;
-2. implement Media M1: script/brief ingestion, MediaJob, publisher and post-publish cleanup;
-3. implement the simple Telegram video task wizard and review/publish callbacks;
-4. implement PersonaProfile/private dataset foundation without training a model yet;
-5. qualify already-downloaded Whisper locally;
-6. qualify already-downloaded FLUX if all required runtime dependencies are already present; do not install/download missing dependencies automatically;
-7. implement training-plane schemas/state/evaluation/promote/rollback foundations;
-8. continue task/Telegram/novel workflow plumbing that does not require incomplete models.
+1. implement Media Product Workflow V0.2 from the approved architecture;
+2. implement PersonaProfile/private dataset foundation without training a model yet;
+3. qualify already-downloaded Whisper locally;
+4. qualify already-downloaded FLUX if all required runtime dependencies are already present; do not install/download missing dependencies automatically;
+5. implement training-plane schemas/state/evaluation/promote/rollback foundations;
+6. continue task/Telegram/novel workflow plumbing that does not require incomplete models;
+7. build RAG storage/interfaces/mocks if useful, but do not claim real RAG READY without Embedding/Reranker qualification.
 
 Work that must remain blocked from READY qualification until downloads finish:
 
@@ -114,4 +133,4 @@ Work that must remain blocked from READY qualification until downloads finish:
 
 ## Documentation note
 
-`CAPABILITY_MATRIX.md` is generated from code and is not manually edited. It currently lags recent presentation/TTS/Direct-Qwen progress; update the generator/evidence mapping in the next engineering pass, then regenerate the file rather than hand-editing generated output.
+`CAPABILITY_MATRIX.md` is generated from code and is not manually edited. It currently lags recent presentation/TTS/Direct-Qwen progress; update the generator/evidence mapping in an engineering pass, then regenerate it rather than hand-editing generated output.
