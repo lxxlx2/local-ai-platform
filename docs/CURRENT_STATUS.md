@@ -5,6 +5,7 @@ This status file is intentionally concise. The active execution source of truth 
 - `docs/LOCAL_FIRST_PRODUCT_AND_MODEL_PLAN.md`
 - `docs/ARCHITECTURE.md`
 - `docs/ARCHITECTURE_CHANGE_PROTOCOL.md`
+- `docs/CODEX_AUTO_FAILOVER_ARCHITECTURE.md`
 - `docs/MEDIA_PRODUCTION_ARCHITECTURE.md`
 - `docs/PRESENTATION_VOICE_ARCHITECTURE.md`
 - `docs/BOT_UX.md`
@@ -13,12 +14,18 @@ This status file is intentionally concise. The active execution source of truth 
 - novel workflow migration: Issue #16
 - revenue workflows: Issue #17
 
+For interactive coding provider failover, `CODEX_AUTO_FAILOVER_ARCHITECTURE.md` is the newest Owner-approved contract and supersedes conflicting older wording that treated the Codex-Qwen bridge as historical-only or required explicit manual local selection. The broader local-first plan remains authoritative for product priorities and quota economics.
+
 ## Active policy baseline
 
 Approved local-first policy remains in force:
 
 - routine production uses qualified local models and deterministic local tools;
 - OpenAI Codex quota is reserved for high-value planning, difficult escalation, engineering implementation when explicitly chosen, and important acceptance/review;
+- Codex Desktop is the primary Owner-present interactive coding GUI;
+- when a durable Codex coding task encounters verified quota exhaustion/rate-limit/provider unavailability, the target architecture automatically hands the same task/worktree to Local Qwen3.8 instead of waiting for quota recovery;
+- Direct Local Qwen remains the canonical unattended/background executor and must still work with Codex Desktop closed;
+- provider changes must preserve task identity, worktree, diff/test/review state, and append durable provider-history evidence;
 - Gemini is an advisory cloud reviewer behind the privacy/egress gate, never a mutation authority;
 - external webpages/docs/search results/model outputs are untrusted data and cannot grant execution authority;
 - model/file downloads are managed actions and never imply execution;
@@ -45,6 +52,29 @@ The branch remains unmerged. Branch commits do not imply canonical `/Users/jerso
 - Owner-provided script presentation videos: real product runs completed
 - task-named `ai_video_product` Git LFS archival: manually proven for two real Solana University video tasks
 - OWNER_RAW sandbox implementation/security tests: code complete; runtime qualification still blocked by incomplete GGUF model artifact
+
+## Interactive Codex / Local-Qwen failover status
+
+Owner-approved target workflow:
+
+```text
+Codex Desktop GUI
+  -> durable coding job/worktree
+  -> OpenAI Codex while available/authorized
+  -> automatic handoff on verified quota exhaustion/rate-limit/provider unavailability
+  -> Local Qwen3.8 through the Codex local-provider/UI adapter
+  -> continue the same task
+```
+
+Required continuity includes objective, worktree/branch, diff identity, completed tests, unresolved findings, review state, handoff state, approvals, and provider history.
+
+Current implementation status: ARCHITECTURE APPROVED / IMPLEMENTATION PENDING.
+
+Existing pieces that will be reused include read-only Codex quota telemetry, the Codex-Qwen Responses bridge/profile work, Supervisor durable state, Direct Local Qwen, and Gemini advisory review. The automatic controller, same-job provider handoff, Codex Desktop local launcher/status experience, and qualification evidence still need implementation.
+
+The old statement that the Codex-Qwen bridge is only historical compatibility evidence is no longer the target architecture for Owner-present interactive coding. It is being re-scoped as the Codex Desktop local-provider/UI adapter. Direct Local Qwen remains preferred for 7x24 unattended work.
+
+A raw account-wide Codex `usedPercent` delta is not sufficient execution attribution because unrelated Desktop/CLI/background activity may affect account state. Final qualification must prove route/provider identity and controlled local execution, not merely compare quota percentages.
 
 ## Download / model state
 
@@ -111,19 +141,20 @@ expensive generation path because the final gate targeted orchestration,
 review, publication and cleanup integration. No real public test push, merge,
 deployment, Bot restart or download resume occurred.
 
-PersonaProfile Foundation is the next milestone after independent review.
+PersonaProfile Foundation is the next media milestone after independent review, but the newly approved Codex Desktop failover architecture may be implemented first because it directly prevents Codex quota exhaustion from blocking engineering progress.
 
 ## Work that can continue while downloads stay paused
 
 Priority work that needs no new model download:
 
-1. independently review, then explicitly merge/deploy Media Product Workflow V0.2;
-2. implement PersonaProfile/private dataset foundation without training a model yet;
-3. qualify already-downloaded Whisper locally;
-4. qualify already-downloaded FLUX if all required runtime dependencies are already present; do not install/download missing dependencies automatically;
-5. implement training-plane schemas/state/evaluation/promote/rollback foundations;
-6. continue task/Telegram/novel workflow plumbing that does not require incomplete models;
-7. build RAG storage/interfaces/mocks if useful, but do not claim real RAG READY without Embedding/Reranker qualification.
+1. implement and qualify the approved Codex Desktop -> Local Qwen automatic failover workflow;
+2. independently review, then explicitly merge/deploy Media Product Workflow V0.2;
+3. implement PersonaProfile/private dataset foundation without training a model yet;
+4. qualify already-downloaded Whisper locally;
+5. qualify already-downloaded FLUX if all required runtime dependencies are already present; do not install/download missing dependencies automatically;
+6. implement training-plane schemas/state/evaluation/promote/rollback foundations;
+7. continue task/Telegram/novel workflow plumbing that does not require incomplete models;
+8. build RAG storage/interfaces/mocks if useful, but do not claim real RAG READY without Embedding/Reranker qualification.
 
 Work that must remain blocked from READY qualification until downloads finish:
 
