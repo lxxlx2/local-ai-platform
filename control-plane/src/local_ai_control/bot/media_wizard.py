@@ -392,6 +392,36 @@ class MediaWizardController:
                 raise ValueError("wizard staged upload missing")
             staged_uploads.append(workspace.stage_upload(source))
 
+        upload_records = []
+
+        for original, staged in zip(
+            values.get("uploads", []),
+            staged_uploads,
+            strict=True,
+        ):
+            upload_records.append(
+                {
+                    "name": original["name"],
+                    "path": staged["path"],
+                    "size_bytes": staged["size_bytes"],
+                }
+            )
+
+        workspace.write_artifact(
+            "metadata/request.json",
+            {
+                "schema_version": "0.2",
+                "task_name": values["task_name"],
+                "source_mode": values["source_mode"],
+                "execution_mode": values["execution_mode"],
+                "language": values["language"],
+                "voice": values["voice"],
+                "completion_mode": values["completion_mode"],
+                "uploads": upload_records,
+                "source_urls": values.get("source_urls", []),
+            },
+        )
+
         if values.get("source_urls"):
             workspace.write_artifact(
                 "source/links.json",
