@@ -29,6 +29,11 @@ from .supervisor_local_qwen import (
     create_local_qwen_job,
     local_qwen_runners,
 )
+from .provider_failover import (
+    AvailabilityEvidenceSource, FailoverDenied, LocalFailoverPreflight,
+    LocalPreflightAttestation, LocalPreflightFailed, ProviderFailoverController,
+    ProviderIdentity, ProviderState, http_json_health,
+)
 
 SupervisorRepository = Round2SupervisorRepository
 WorkflowSupervisor = Round2WorkflowSupervisor

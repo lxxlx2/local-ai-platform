@@ -129,6 +129,37 @@ class SupervisorRepository(DurablePayloadMixin):
             );
             CREATE INDEX IF NOT EXISTS supervisor_execution_fences_status_idx
               ON supervisor_execution_fences(status,created_at);
+            CREATE TABLE IF NOT EXISTS supervisor_provider_state(
+              job_id TEXT PRIMARY KEY, current_provider TEXT NOT NULL,
+              state TEXT NOT NULL, workspace_path TEXT NOT NULL, branch TEXT NOT NULL,
+              objective_sha256 TEXT NOT NULL, job_request_hash TEXT NOT NULL,
+              handoff_state TEXT NOT NULL, safe_boundary INTEGER NOT NULL DEFAULT 0,
+              mutating_step INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id)
+            );
+            CREATE TABLE IF NOT EXISTS supervisor_provider_history(
+              transition_id TEXT PRIMARY KEY, job_id TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL UNIQUE,
+              from_provider TEXT NOT NULL, to_provider TEXT NOT NULL,
+              from_state TEXT NOT NULL, to_state TEXT NOT NULL,
+              reason TEXT NOT NULL, evidence_source TEXT NOT NULL,
+              workflow_stage TEXT NOT NULL, execution_id TEXT,
+              handoff_state TEXT NOT NULL, candidate_state_sha256 TEXT NOT NULL,
+              candidate_tree_sha TEXT, candidate_diff_sha256 TEXT NOT NULL,
+              validation_refs_json TEXT NOT NULL, unresolved_findings_json TEXT NOT NULL,
+              safe_boundary INTEGER NOT NULL, created_at TEXT NOT NULL,
+              payload_sha256 TEXT NOT NULL,
+              FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id)
+            );
+            CREATE INDEX IF NOT EXISTS supervisor_provider_history_job_idx
+              ON supervisor_provider_history(job_id,created_at,transition_id);
+            CREATE TRIGGER IF NOT EXISTS supervisor_provider_history_no_update
+              BEFORE UPDATE ON supervisor_provider_history
+              BEGIN SELECT RAISE(ABORT,'provider history is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS supervisor_provider_history_no_delete
+              BEFORE DELETE ON supervisor_provider_history
+              BEGIN SELECT RAISE(ABORT,'provider history is append-only'); END;
             """
         )
         migrations = (
@@ -169,6 +200,197 @@ class SupervisorRepository(DurablePayloadMixin):
         for candidate in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             if candidate.exists():
                 ensure_private_file(candidate)
+
+    @staticmethod
+    def _provider_value(value: object, *, field: str) -> str:
+        normalized = str(getattr(value, "value", value))
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", normalized):
+            raise ValueError(f"invalid provider {field}")
+        return normalized
+
+    def initialize_provider_state(self, job_id: str, *, workspace_path: str, branch: str,
+                                  objective_sha256: str, current_provider: object,
+                                  state: object) -> dict:
+        workspace = str(Path(workspace_path).resolve())
+        if not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch) or branch in {"main", "master"}:
+            raise ValueError("unsafe provider-state branch")
+        if not re.fullmatch(r"[a-f0-9]{64}", objective_sha256):
+            raise ValueError("invalid objective digest")
+        provider_value = self._provider_value(current_provider, field="identity")
+        state_value = self._provider_value(state, field="state")
+        now = utc_now()
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            job = self.db.execute(
+                "SELECT project_scope,job_request_hash FROM supervisor_jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            if not job:
+                raise KeyError("job not found")
+            if str(Path(job["project_scope"]).resolve()) != workspace:
+                raise ValueError("provider state workspace differs from durable job")
+            if not job["job_request_hash"]:
+                raise ValueError("durable job request hash unavailable")
+            existing = self.db.execute(
+                "SELECT * FROM supervisor_provider_state WHERE job_id=?", (job_id,),
+            ).fetchone()
+            if existing:
+                immutable = (
+                    existing["workspace_path"], existing["branch"], existing["objective_sha256"],
+                    existing["job_request_hash"],
+                )
+                expected = (workspace, branch, objective_sha256, job["job_request_hash"])
+                if immutable != expected:
+                    raise ValueError("provider state immutable binding mismatch")
+                self.db.commit()
+                return dict(existing)
+            self.db.execute(
+                "INSERT INTO supervisor_provider_state VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, provider_value, state_value, workspace, branch, objective_sha256,
+                 job["job_request_hash"], state_value, 0, 0, 0, now),
+            )
+            self.db.commit()
+        except Exception:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+        return self.provider_state(job_id)
+
+    def provider_state(self, job_id: str) -> dict:
+        row = self.db.execute(
+            "SELECT * FROM supervisor_provider_state WHERE job_id=?", (job_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError("provider state not initialized")
+        return dict(row)
+
+    def provider_history(self, job_id: str) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT * FROM supervisor_provider_history WHERE job_id=? "
+            "ORDER BY created_at,transition_id", (job_id,),
+        ).fetchall()
+        return [
+            dict(row) | {
+                "validation_refs": json.loads(row["validation_refs_json"]),
+                "unresolved_findings": json.loads(row["unresolved_findings_json"]),
+            }
+            for row in rows
+        ]
+
+    def append_provider_transition(
+        self, job_id: str, *, idempotency_key: str, from_provider: object,
+        to_provider: object, from_state: object, to_state: object, reason: object,
+        evidence_source: object, execution_id: str | None = None,
+        safe_boundary: bool = False, mutating_step: bool = False,
+    ) -> dict:
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", idempotency_key):
+            raise ValueError("invalid provider transition idempotency key")
+        values = {
+            name: self._provider_value(value, field=name)
+            for name, value in {
+                "from_provider": from_provider, "to_provider": to_provider,
+                "from_state": from_state, "to_state": to_state,
+                "reason": reason, "evidence_source": evidence_source,
+            }.items()
+        }
+        if execution_id is not None:
+            execution_id = self._validate_execution_id(execution_id)
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            prior = self.db.execute(
+                "SELECT * FROM supervisor_provider_history WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            state = self.db.execute(
+                "SELECT * FROM supervisor_provider_state WHERE job_id=?", (job_id,),
+            ).fetchone()
+            job = self.db.execute(
+                "SELECT * FROM supervisor_jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            if not state or not job:
+                raise KeyError("durable provider/job state unavailable")
+            if prior:
+                if prior["job_id"] != job_id:
+                    raise ValueError("provider transition idempotency conflict")
+                requested = (
+                    values["from_provider"], values["to_provider"], values["from_state"],
+                    values["to_state"], values["reason"], values["evidence_source"],
+                    execution_id, int(bool(safe_boundary)),
+                )
+                persisted = (
+                    prior["from_provider"], prior["to_provider"], prior["from_state"],
+                    prior["to_state"], prior["reason"], prior["evidence_source"],
+                    prior["execution_id"], int(prior["safe_boundary"]),
+                )
+                if requested != persisted:
+                    raise ValueError("provider transition idempotency payload conflict")
+                self.db.commit()
+                return dict(prior)
+            if state["current_provider"] != values["from_provider"] or state["state"] != values["from_state"]:
+                raise ValueError("provider transition source state mismatch")
+            if execution_id is not None:
+                execution = self.db.execute(
+                    "SELECT job_id FROM supervisor_executions WHERE execution_id=?", (execution_id,),
+                ).fetchone()
+                if not execution or execution["job_id"] != job_id:
+                    raise ValueError("provider transition execution identity mismatch")
+
+            candidate = self.candidate_identity_provider.snapshot(job["baseline_commit_sha"])
+            candidate_payload = candidate.stable_payload()
+            candidate_state_sha = hashlib.sha256(
+                _json_exact(candidate_payload, 1_000_000).encode()
+            ).hexdigest()
+            validation_refs = [
+                {"run_id": row["run_id"], "stage": row["stage"], "status": row["status"]}
+                for row in self.db.execute(
+                    "SELECT run_id,stage,status FROM supervisor_stage_runs "
+                    "WHERE job_id=? AND status=? ORDER BY started_at LIMIT 200",
+                    (job_id, StageResultStatus.PASS.value),
+                ).fetchall()
+            ]
+            unresolved = [
+                {"finding_id": row["finding_id"], "severity": row["severity"], "status": row["status"]}
+                for row in self.db.execute(
+                    "SELECT finding_id,severity,status FROM supervisor_review_findings "
+                    "WHERE job_id=? AND status<>'CONSUMED' ORDER BY created_at LIMIT 500", (job_id,),
+                ).fetchall()
+            ]
+            created_at = utc_now()
+            manifest = {
+                "job_id": job_id, "from_provider": values["from_provider"],
+                "to_provider": values["to_provider"], "from_state": values["from_state"],
+                "to_state": values["to_state"], "reason": values["reason"],
+                "evidence_source": values["evidence_source"], "workflow_stage": job["current_stage"],
+                "execution_id": execution_id, "candidate_state_sha256": candidate_state_sha,
+                "candidate_tree_sha": candidate.candidate_tree_sha,
+                "candidate_diff_sha256": candidate.candidate_diff_sha256,
+                "validation_refs": validation_refs, "unresolved_findings": unresolved,
+                "safe_boundary": bool(safe_boundary),
+            }
+            payload_sha = hashlib.sha256(_json_exact(manifest, 256_000).encode()).hexdigest()
+            transition_id = str(uuid.uuid4())
+            self.db.execute(
+                "INSERT INTO supervisor_provider_history VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (transition_id, job_id, idempotency_key, values["from_provider"], values["to_provider"],
+                 values["from_state"], values["to_state"], values["reason"], values["evidence_source"],
+                 job["current_stage"], execution_id, values["to_state"], candidate_state_sha,
+                 candidate.candidate_tree_sha, candidate.candidate_diff_sha256,
+                 _safe_json(validation_refs, 64_000), _safe_json(unresolved, 64_000),
+                 int(bool(safe_boundary)), created_at, payload_sha),
+            )
+            self.db.execute(
+                "UPDATE supervisor_provider_state SET current_provider=?,state=?,handoff_state=?,"
+                "safe_boundary=?,mutating_step=?,revision=revision+1,updated_at=? WHERE job_id=?",
+                (values["to_provider"], values["to_state"], values["to_state"],
+                 int(bool(safe_boundary)), int(bool(mutating_step)), created_at, job_id),
+            )
+            self.db.commit()
+        except Exception:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+        return dict(self.db.execute(
+            "SELECT * FROM supervisor_provider_history WHERE idempotency_key=?", (idempotency_key,),
+        ).fetchone())
 
     def close(self) -> None:
         self.db.close()
