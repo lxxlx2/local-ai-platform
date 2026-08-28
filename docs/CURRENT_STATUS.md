@@ -98,14 +98,18 @@ Current proven media capabilities:
 - review-before-publish policy;
 - dedicated public product repository `lxxlx2/ai_video_product` with Git LFS.
 
-V0.2 qualification evidence: 56 focused media/presentation/Telegram tests pass.
+V0.2 qualification evidence includes the earlier real local qualification
+and the final post-integration consolidated media gate: 41 tests passed in
+12.22 seconds on 2026-08-28 after Telegram multi-input, execution coordination,
+script-review, missing-owner-fact, publisher recovery and cleanup integration.
 A real local three-scene run used Qwen3.8, the qualified English persistent
 voice, LibreOffice rendering and FFmpeg; it produced a 50.728-second MP4,
 bound synthetic harness approval to its exact SHA, published and verified it
 in a temporary local Git/LFS remote, performed bounded cleanup and ended in
-`ARCHIVED`. The deck was visually inspected and `slides_test.py` reported no
-overflow. No real public push, merge, deployment, Bot restart or download
-resume occurred.
+`ARCHIVED`. That real media E2E evidence was reused rather than rerunning the
+expensive generation path because the final gate targeted orchestration,
+review, publication and cleanup integration. No real public test push, merge,
+deployment, Bot restart or download resume occurred.
 
 PersonaProfile Foundation is the next milestone after independent review.
 

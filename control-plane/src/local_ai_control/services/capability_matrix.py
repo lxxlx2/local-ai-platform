@@ -21,7 +21,7 @@ CAPABILITIES = (
     Capability("音频转写", CapabilityStatus.FOUNDATION, "STT provider boundary"),
     Capability("音频理解", CapabilityStatus.FOUNDATION, "audio routing and quotas"),
     Capability("视频分析", CapabilityStatus.FOUNDATION, "video routing and media jobs"),
-    Capability("演示视频生产", CapabilityStatus.FUNCTIONAL, "56-test media stage gate + real local Media Workflow V0.2 E2E"),
+    Capability("演示视频生产", CapabilityStatus.FUNCTIONAL, "41-test post-integration media gate + prior real local Media Workflow V0.2 E2E"),
     Capability("Web Search", CapabilityStatus.FOUNDATION, "safe fetch/search adapters"),
     Capability("Deep Research", CapabilityStatus.FOUNDATION, "web evidence contracts"),
     Capability("Retrieval/RAG", CapabilityStatus.FOUNDATION, "embedding/rerank contracts"),

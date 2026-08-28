@@ -15,6 +15,7 @@ Generated solely from `capability_matrix.py`. FUNCTIONAL coverage includes PRODU
 | 音频转写 | FOUNDATION | STT provider boundary |
 | 音频理解 | FOUNDATION | audio routing and quotas |
 | 视频分析 | FOUNDATION | video routing and media jobs |
+| 演示视频生产 | FUNCTIONAL | 41-test post-integration media gate + prior real local Media Workflow V0.2 E2E |
 | Web Search | FOUNDATION | safe fetch/search adapters |
 | Deep Research | FOUNDATION | web evidence contracts |
 | Retrieval/RAG | FOUNDATION | embedding/rerank contracts |
@@ -36,9 +37,9 @@ Generated solely from `capability_matrix.py`. FUNCTIONAL coverage includes PRODU
 | Safety/secret firewall | FUNCTIONAL | security regressions |
 
 <!-- CAPABILITY_MATRIX_METRICS: generated; do not edit manually -->
-TOTAL_CAPABILITIES: 30
-FUNCTIONAL_COUNT: 11
+TOTAL_CAPABILITIES: 31
+FUNCTIONAL_COUNT: 12
 PRODUCTION_READY_COUNT: 0
-FUNCTIONAL_COVERAGE: 37%
+FUNCTIONAL_COVERAGE: 39%
 PRODUCTION_READY_COVERAGE: 0%
 <!-- /CAPABILITY_MATRIX_METRICS -->
