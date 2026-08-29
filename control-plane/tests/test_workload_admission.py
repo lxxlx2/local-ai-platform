@@ -83,6 +83,29 @@ def test_manifest_captures_material_apps_and_fixed_ports_read_only():
     ]
 
 
+def test_material_app_detection_scans_all_processes_not_only_top_n():
+    process_rows = [
+        f"{pid} {1000000 - pid} /Applications/Other{pid}.app/x"
+        for pid in range(101, 111)
+    ]
+    process_rows.append(
+        "999 1 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    )
+    probe = WorkloadManifestProbe(
+        process_reader=lambda: "\n".join(process_rows),
+        memory_probe=_snapshot,
+        listeners=lambda _port: (),
+        top_n=3,
+    )
+
+    manifest = probe.capture(WorkloadClass.REPRESENTATIVE_WORKLOAD)
+
+    assert len(manifest.top_processes) == 3
+    assert all("Google Chrome" not in item.command for item in manifest.top_processes)
+    apps = {item.category: item for item in manifest.material_applications}
+    assert apps["BROWSER"].process_count == 1
+
+
 def test_deliberate_reduction_cannot_be_labeled_representative():
     probe = WorkloadManifestProbe(
         process_reader=lambda: "",
@@ -101,7 +124,7 @@ def test_deliberate_reduction_cannot_be_labeled_representative():
         raise AssertionError("reduced workload was mislabeled representative")
 
 
-def test_lab_manifest_is_never_promotion_eligible_even_when_resources_pass():
+def test_lab_manifest_is_never_qualification_evidence_eligible_even_when_resources_pass():
     probe = WorkloadManifestProbe(
         process_reader=lambda: "",
         memory_probe=_snapshot,
@@ -116,7 +139,7 @@ def test_lab_manifest_is_never_promotion_eligible_even_when_resources_pass():
     result = WorkloadAdmissionPolicy(preflight).admit(QWEN38, manifest)
 
     assert result.allowed is True
-    assert result.promotion_eligible is False
+    assert result.qualification_evidence_eligible is False
     assert result.reason == "LAB_ONLY"
     assert preflight.required == [34]
 
@@ -137,7 +160,7 @@ def test_representative_resource_failure_routes_as_admission_block_not_runtime_e
     result = WorkloadAdmissionPolicy(preflight).admit(QWEN38, manifest)
 
     assert result.allowed is False
-    assert result.promotion_eligible is False
+    assert result.qualification_evidence_eligible is False
     assert result.reason == "RESOURCE_PREFLIGHT_DENIED"
     assert result.preflight_reason == "INSUFFICIENT_RECLAIMABLE_MEMORY"
 
@@ -154,7 +177,7 @@ def test_representative_qwen36_resource_pass_can_be_qualification_evidence():
     result = WorkloadAdmissionPolicy(preflight).admit(QWEN36, manifest)
 
     assert result.allowed is True
-    assert result.promotion_eligible is True
+    assert result.qualification_evidence_eligible is True
     assert result.reason == "RESOURCE_ADMISSION_PASS"
     assert preflight.required == [28]
 
