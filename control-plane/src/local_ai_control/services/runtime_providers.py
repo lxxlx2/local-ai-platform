@@ -526,6 +526,110 @@ class RuntimeProviderFactory:
                      current_provider=self.main if state.main_healthy else None)
         return self.fast
 
+    @staticmethod
+    def _execution_roles(task_type):
+        normalized=str(task_type).strip().upper()
+        if normalized in {"CHAT","MAIN"}:
+            return (
+                ModelRole.MAIN,
+                ModelRole.FALLBACK,
+                ModelRole.FAST,
+            )
+        mapping={
+            "FAST":(ModelRole.FAST,),
+            "CHAT_FAST":(ModelRole.FAST,),
+            "CODE":(ModelRole.CODE,),
+            "REVIEW":(ModelRole.REVIEW,),
+            "VISION":(ModelRole.VISION,),
+            "VIDEO_UNDERSTANDING":(
+                ModelRole.VIDEO_UNDERSTANDING,
+            ),
+            "DEEP_REASONING":(ModelRole.DEEP,),
+        }
+        roles=mapping.get(normalized)
+        if roles is None:
+            raise RuntimeUnavailable(
+                "unsupported task type for exact heavy runtime"
+            )
+        return roles
+
+    def _prove_healthy_target_owned(self,profile_id):
+        """A healthy endpoint is not ownership proof."""
+        if not hasattr(
+            self.lifecycle,
+            "transition_source_state",
+        ):
+            raise HeavyModelConflict(
+                "exact ownership proof unavailable"
+            )
+        source=self.lifecycle.transition_source_state(
+            profile_id,
+            self._endpoint_probes(),
+        )
+        if source!="OWNED":
+            raise HeavyModelConflict(
+                "healthy target runtime is not exactly owned"
+            )
+
+    @contextmanager
+    def exact_profile_session(self,profile_id,task_type="CHAT"):
+        """Use one exact planner-selected heavy profile.
+
+        This is a policy-neutral physical lifecycle primitive.
+        It does not accept a WorkloadRoutingPlan and does not
+        decide which model should run.
+
+        Healthy resident targets are reused only after exact
+        ownership proof. Starts and switches continue through
+        the existing resource/ownership gated _switch path.
+        """
+        with self.lock:
+            roles=self._execution_roles(task_type)
+            if not any(
+                self._eligible(role,profile_id)
+                for role in roles
+            ):
+                raise RuntimeUnavailable(
+                    "profile is not eligible for execution task"
+                )
+
+            state=self.state()
+
+            if profile_id==QWEN38.profile_id:
+                target=QWEN38
+                provider=self.main
+                target_healthy=state.main_healthy
+                current=QWEN36 if state.fast_healthy else None
+                current_provider=(
+                    self.fast if state.fast_healthy else None
+                )
+            elif profile_id==QWEN36.profile_id:
+                target=QWEN36
+                provider=self.fast
+                target_healthy=state.fast_healthy
+                current=QWEN38 if state.main_healthy else None
+                current_provider=(
+                    self.main if state.main_healthy else None
+                )
+            else:
+                raise RuntimeUnavailable(
+                    "unsupported heavy execution profile"
+                )
+
+            if target_healthy:
+                self._prove_healthy_target_owned(
+                    profile_id
+                )
+            else:
+                self._switch(
+                    target,
+                    provider,
+                    current=current,
+                    current_provider=current_provider,
+                )
+
+            yield provider
+
     @contextmanager
     def session(self,task_type="CHAT"):
         with self.lock:
