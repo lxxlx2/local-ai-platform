@@ -75,7 +75,7 @@ _TASK_ROLE = {
 _STRESS_APPLICATIONS = frozenset({"UNITY", "IDE"})
 
 
-def _stress_categories(manifest: WorkloadManifest) -> tuple[str, ...]:
+def stress_categories(manifest: WorkloadManifest) -> tuple[str, ...]:
     return tuple(sorted({
         app.category
         for app in manifest.material_applications
@@ -108,6 +108,22 @@ class WorkloadAwareRoutingPolicy:
                 seen.add(profile.profile_id)
                 result.append(profile)
         return normalized, tuple(result)
+
+    def candidate_profiles(self, task_type: str):
+        """Return the exact eligible local candidates considered by ``decide``."""
+        return self._candidates(task_type)[1]
+
+    @staticmethod
+    def evidence_status(
+        evidence: QualificationEvidence | None,
+        manifest: WorkloadManifest,
+    ) -> EvidenceStatus:
+        """Evaluate exact current-workload evidence without making a decision."""
+        return WorkloadAwareRoutingPolicy._evidence_status(
+            evidence,
+            manifest,
+            stress_categories(manifest),
+        )
 
     @staticmethod
     def _evidence_status(
@@ -186,12 +202,12 @@ class WorkloadAwareRoutingPolicy:
         cloud_provider_ready: bool = False,
     ) -> WorkloadRoutingDecision:
         normalized, candidates = self._candidates(task_type)
-        stress_categories = _stress_categories(manifest)
+        current_stress_categories = stress_categories(manifest)
 
         fallback = {
             "task_type": normalized,
             "manifest": manifest,
-            "stress_categories": stress_categories,
+            "stress_categories": current_stress_categories,
             "small_local_qualified_for_workload": small_local_qualified_for_workload,
             "small_local_capability_ready": small_local_capability_ready,
             "cloud_egress_allowed": cloud_egress_allowed,
@@ -240,7 +256,7 @@ class WorkloadAwareRoutingPolicy:
                 status = self._evidence_status(
                     profile_evidence,
                     manifest,
-                    stress_categories,
+                    current_stress_categories,
                 )
             except (TypeError, ValueError):
                 saw_invalid_evidence = True
@@ -269,7 +285,7 @@ class WorkloadAwareRoutingPolicy:
                 workload_class=manifest.workload_class,
                 profile_id=profile.profile_id,
                 reason="QUALIFICATION_AND_RESOURCE_GATES_PASS",
-                stress_categories=stress_categories,
+                stress_categories=current_stress_categories,
                 considered=tuple(considered),
             )
 
