@@ -1,14 +1,13 @@
 """Fresh workload-aware execution bridge.
 
-This module deliberately does not accept WorkloadRoutingPlan
-objects from callers as runtime authorization. Every execution
-attempt obtains a new plan while holding the runtime selection
-lock, then delegates physical lifecycle safety to
-RuntimeProviderFactory.
+A planner result is always recommendation-only.
 
-Phase F1 supports only the already-qualified heavy-local
-recommendations. Cloud and small-local execution remain
-separate future integrations.
+Every heavy execution attempt obtains an initial fresh plan and
+then repeats workload/admission/evidence routing validation at
+the physical runtime reuse/start boundary.
+
+Phase F1 executes only qualified heavy-local decisions.
+Other routing actions remain deferred.
 """
 
 from __future__ import annotations
@@ -31,14 +30,10 @@ from local_ai_control.services.workload_router import (
 
 
 class WorkloadExecutionError(RuntimeError):
-    """Fail-closed execution integration error."""
-
     execution_authorized = False
 
 
 class WorkloadExecutionDeferred(WorkloadExecutionError):
-    """The fresh planner did not select an executable Phase F1 route."""
-
     def __init__(
         self,
         action: DecisionAction,
@@ -46,6 +41,7 @@ class WorkloadExecutionDeferred(WorkloadExecutionError):
     ):
         self.action = DecisionAction(action)
         self.reason = str(reason)
+
         super().__init__(
             f"{self.action.value}:{self.reason}"
         )
@@ -53,6 +49,13 @@ class WorkloadExecutionDeferred(WorkloadExecutionError):
 
 class WorkloadAwareExecutionCoordinator:
     """Fresh-plan bridge to exact heavy-runtime lifecycle control."""
+
+    _HEAVY_TARGETS = {
+        DecisionAction.ALLOW_QWEN38:
+            "local-qwen38",
+        DecisionAction.ALLOW_QWEN36:
+            "local-qwen36",
+    }
 
     def __init__(
         self,
@@ -101,8 +104,12 @@ class WorkloadAwareExecutionCoordinator:
                 small_local_capability_ready=(
                     small_local_capability_ready
                 ),
-                cloud_egress_allowed=cloud_egress_allowed,
-                cloud_provider_ready=cloud_provider_ready,
+                cloud_egress_allowed=(
+                    cloud_egress_allowed
+                ),
+                cloud_provider_ready=(
+                    cloud_provider_ready
+                ),
             )
         except Exception as error:
             raise WorkloadExecutionError(
@@ -137,6 +144,71 @@ class WorkloadAwareExecutionCoordinator:
 
         return plan
 
+    @classmethod
+    def _exact_heavy_target(
+        cls,
+        plan: WorkloadRoutingPlan,
+    ) -> str:
+        decision = plan.routing_decision
+
+        expected = cls._HEAVY_TARGETS.get(
+            decision.action
+        )
+
+        if expected is None:
+            raise WorkloadExecutionDeferred(
+                decision.action,
+                decision.reason,
+            )
+
+        if decision.profile_id != expected:
+            raise WorkloadExecutionError(
+                "PLANNER_PROFILE_ACTION_MISMATCH"
+            )
+
+        return expected
+
+    def _revalidate_exact_target(
+        self,
+        *,
+        required_profile_id: str,
+        task_type: str,
+        deployment_mode: DeploymentMode | str,
+        small_local_qualified_for_workload: bool,
+        small_local_capability_ready: bool,
+        cloud_egress_allowed: bool,
+        cloud_provider_ready: bool,
+    ) -> WorkloadRoutingPlan:
+        plan = self._fresh_plan(
+            task_type=task_type,
+            deployment_mode=deployment_mode,
+            small_local_qualified_for_workload=(
+                small_local_qualified_for_workload
+            ),
+            small_local_capability_ready=(
+                small_local_capability_ready
+            ),
+            cloud_egress_allowed=(
+                cloud_egress_allowed
+            ),
+            cloud_provider_ready=(
+                cloud_provider_ready
+            ),
+        )
+
+        current_target = self._exact_heavy_target(
+            plan
+        )
+
+        if current_target != required_profile_id:
+            raise WorkloadExecutionDeferred(
+                plan.routing_decision.action,
+                "EXECUTION_REVALIDATION_CHANGED_TARGET:"
+                f"{plan.routing_decision.reason}",
+            )
+
+        return plan
+
     @contextmanager
     def session(
         self,
@@ -150,10 +222,6 @@ class WorkloadAwareExecutionCoordinator:
         cloud_egress_allowed: bool = False,
         cloud_provider_ready: bool = False,
     ):
-        # RuntimeProviderFactory uses an RLock. Holding the same
-        # lock while obtaining the execution-time plan prevents
-        # another platform runtime transition from interleaving
-        # between fresh planning and exact target selection.
         with self.runtime.lock:
             plan = self._fresh_plan(
                 task_type=task_type,
@@ -164,33 +232,41 @@ class WorkloadAwareExecutionCoordinator:
                 small_local_capability_ready=(
                     small_local_capability_ready
                 ),
-                cloud_egress_allowed=cloud_egress_allowed,
-                cloud_provider_ready=cloud_provider_ready,
+                cloud_egress_allowed=(
+                    cloud_egress_allowed
+                ),
+                cloud_provider_ready=(
+                    cloud_provider_ready
+                ),
             )
 
-            decision = plan.routing_decision
+            expected = self._exact_heavy_target(
+                plan
+            )
 
-            expected = {
-                DecisionAction.ALLOW_QWEN38:
-                    "local-qwen38",
-                DecisionAction.ALLOW_QWEN36:
-                    "local-qwen36",
-            }.get(decision.action)
-
-            if expected is None:
-                raise WorkloadExecutionDeferred(
-                    decision.action,
-                    decision.reason,
-                )
-
-            if decision.profile_id != expected:
-                raise WorkloadExecutionError(
-                    "PLANNER_PROFILE_ACTION_MISMATCH"
+            def execution_validate():
+                self._revalidate_exact_target(
+                    required_profile_id=expected,
+                    task_type=plan.task_type,
+                    deployment_mode=deployment_mode,
+                    small_local_qualified_for_workload=(
+                        small_local_qualified_for_workload
+                    ),
+                    small_local_capability_ready=(
+                        small_local_capability_ready
+                    ),
+                    cloud_egress_allowed=(
+                        cloud_egress_allowed
+                    ),
+                    cloud_provider_ready=(
+                        cloud_provider_ready
+                    ),
                 )
 
             with self.runtime.exact_profile_session(
                 expected,
                 plan.task_type,
+                execution_validate=execution_validate,
             ) as provider:
                 yield provider
 
@@ -208,9 +284,6 @@ class WorkloadAwareExecutionCoordinator:
         cloud_egress_allowed: bool = False,
         cloud_provider_ready: bool = False,
     ):
-        # No implicit infrastructure failover here. A failed
-        # generation must be retried through a new coordinator
-        # call so workload/evidence/admission are freshly planned.
         with self.session(
             task_type=task_type,
             deployment_mode=deployment_mode,
@@ -220,8 +293,12 @@ class WorkloadAwareExecutionCoordinator:
             small_local_capability_ready=(
                 small_local_capability_ready
             ),
-            cloud_egress_allowed=cloud_egress_allowed,
-            cloud_provider_ready=cloud_provider_ready,
+            cloud_egress_allowed=(
+                cloud_egress_allowed
+            ),
+            cloud_provider_ready=(
+                cloud_provider_ready
+            ),
         ) as provider:
             return provider.generate(
                 prompt,

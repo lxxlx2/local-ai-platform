@@ -177,18 +177,34 @@ class FakeRuntime:
         self,
         profile_id,
         task_type,
+        *,
+        execution_validate=None,
     ):
         self.targets.append(
             (profile_id, task_type)
         )
+
+        if execution_validate is not None:
+            execution_validate()
+
         yield self.provider
 
 
-def _coordinator(plan):
+def _coordinator(
+    plan,
+    revalidation_plan=None,
+):
     registry = ModelRegistry()
     planner = FakePlanner(
         registry,
-        [plan],
+        [
+            plan,
+            (
+                plan
+                if revalidation_plan is None
+                else revalidation_plan
+            ),
+        ],
     )
     runtime = FakeRuntime(registry)
 
@@ -220,7 +236,7 @@ def test_fresh_qwen36_plan_executes_only_exact_qwen36():
     ) as provider:
         assert provider is runtime.provider
 
-    assert len(planner.calls) == 1
+    assert len(planner.calls) == 2
     assert runtime.targets == [
         ("local-qwen36", "CHAT")
     ]
@@ -239,7 +255,7 @@ def test_fresh_qwen38_plan_executes_only_exact_qwen38():
     ):
         pass
 
-    assert len(planner.calls) == 1
+    assert len(planner.calls) == 2
     assert runtime.targets == [
         ("local-qwen38", "CHAT")
     ]
@@ -349,7 +365,7 @@ def test_generate_uses_fresh_execution_path_without_implicit_failover():
     )
 
     assert result == "ok"
-    assert len(planner.calls) == 1
+    assert len(planner.calls) == 2
     assert runtime.targets == [
         ("local-qwen36", "CHAT")
     ]
@@ -445,3 +461,221 @@ def test_exact_profile_session_rejects_healthy_but_unowned_target():
             "CHAT",
         ):
             pass
+
+
+def test_execution_revalidation_blocks_changed_route_before_provider_use():
+    coordinator, planner, runtime = _coordinator(
+        _plan(),
+        _plan(
+            DecisionAction.QUEUE_TASK,
+            None,
+        ),
+    )
+
+    with pytest.raises(
+        WorkloadExecutionDeferred
+    ):
+        with coordinator.session(
+            task_type="CHAT"
+        ):
+            pass
+
+    assert len(planner.calls) == 2
+    assert runtime.targets == [
+        ("local-qwen36", "CHAT")
+    ]
+
+
+class OrderedOwnershipLifecycle:
+    def __init__(self, events):
+        self.events = events
+
+    def transition_source_state(
+        self,
+        profile_id,
+        endpoint_probes,
+    ):
+        self.events.append(
+            "ownership"
+        )
+
+        assert set(endpoint_probes) == {
+            "local-qwen38",
+            "local-qwen36",
+        }
+
+        return "OWNED"
+
+
+def test_healthy_reuse_revalidates_between_two_ownership_proofs():
+    events = []
+
+    runtime = RuntimeProviderFactory(
+        ModelRegistry(),
+        main=HealthyProvider(False),
+        fast=HealthyProvider(True),
+        lifecycle=OrderedOwnershipLifecycle(
+            events
+        ),
+        preflight=UnusedPreflight(),
+        sleep=lambda _: None,
+    )
+
+    with runtime.exact_profile_session(
+        QWEN36.profile_id,
+        "CHAT",
+        execution_validate=lambda:
+            events.append("validate"),
+    ):
+        pass
+
+    assert events == [
+        "ownership",
+        "validate",
+        "ownership",
+    ]
+
+
+class AllowingPreflight:
+    class Result:
+        allowed = True
+        reason = "OK"
+
+    def check(
+        self,
+        *_args,
+        **_kwargs,
+    ):
+        return self.Result()
+
+
+class StartOrderLifecycle:
+    def __init__(
+        self,
+        main,
+        fast,
+        events,
+    ):
+        self.main = main
+        self.fast = fast
+        self.events = events
+
+    def reconcile_before_start(
+        self,
+        profile_id,
+        endpoint_probes,
+    ):
+        self.events.append(
+            "reconcile"
+        )
+
+        assert set(endpoint_probes) == {
+            "local-qwen38",
+            "local-qwen36",
+        }
+
+    def start(self, profile_id):
+        self.events.append(
+            "start"
+        )
+
+        self.main.healthy = (
+            profile_id
+            == "local-qwen38"
+        )
+
+        self.fast.healthy = (
+            profile_id
+            == "local-qwen36"
+        )
+
+    def capture_started(
+        self,
+        profile_id,
+    ):
+        self.events.append(
+            "capture"
+        )
+
+
+def test_cold_start_revalidates_after_reconcile_immediately_before_start():
+    events = []
+
+    main = HealthyProvider(False)
+    fast = HealthyProvider(False)
+
+    runtime = RuntimeProviderFactory(
+        ModelRegistry(),
+        main=main,
+        fast=fast,
+        lifecycle=StartOrderLifecycle(
+            main,
+            fast,
+            events,
+        ),
+        preflight=AllowingPreflight(),
+        sleep=lambda _: None,
+    )
+
+    with runtime.exact_profile_session(
+        QWEN36.profile_id,
+        "CHAT",
+        execution_validate=lambda:
+            events.append("validate"),
+    ):
+        pass
+
+    assert events == [
+        "reconcile",
+        "validate",
+        "start",
+        "capture",
+    ]
+
+
+def test_failed_execution_revalidation_never_attempts_start():
+    events = []
+
+    main = HealthyProvider(False)
+    fast = HealthyProvider(False)
+
+    runtime = RuntimeProviderFactory(
+        ModelRegistry(),
+        main=main,
+        fast=fast,
+        lifecycle=StartOrderLifecycle(
+            main,
+            fast,
+            events,
+        ),
+        preflight=AllowingPreflight(),
+        sleep=lambda _: None,
+    )
+
+    def reject():
+        events.append(
+            "validate"
+        )
+
+        raise RuntimeError(
+            "workload changed"
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="workload changed",
+    ):
+        with runtime.exact_profile_session(
+            QWEN36.profile_id,
+            "CHAT",
+            execution_validate=reject,
+        ):
+            pass
+
+    assert events == [
+        "reconcile",
+        "validate",
+    ]
+
+    assert not main.healthy
+    assert not fast.healthy
