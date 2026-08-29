@@ -142,6 +142,22 @@ def wait_health(process: subprocess.Popen, port: int, timeout: float) -> None:
     raise RuntimeError(f"oMLX health timeout: {last_error}")
 
 
+def wait_health_with_monitor(
+    process: subprocess.Popen,
+    port: int,
+    timeout: float,
+    monitor: "ResourceMonitor",
+) -> str | None:
+    """Preserve resource-gate classification while health/model load is pending."""
+    try:
+        wait_health(process, port, timeout)
+    except RuntimeError:
+        if monitor.violation:
+            return monitor.violation
+        raise
+    return monitor.violation
+
+
 def request_fast_task(port: int, timeout: float) -> tuple[bool, bool, str]:
     marker = "QWEN36_REPRESENTATIVE_OK"
     body = json.dumps(
@@ -372,47 +388,55 @@ def main(argv: list[str] | None = None) -> int:
             if process_group_id != process_pid:
                 raise RuntimeError("qualification process group ownership proof failed")
 
-            wait_health(process, args.qualification_port, args.health_timeout)
-            loaded_service_baseline = MemoryPreflight().probe()
-            if not browser_present():
-                raise RuntimeError("browser disappeared before model-load qualification")
-
             monitor = ResourceMonitor(
                 process,
-                loaded_service_baseline,
+                preflight_result.snapshot,
                 interval=args.sample_interval,
             )
             monitor.start()
-            try:
-                functional_pass, response_complete, response_text = request_fast_task(
-                    args.qualification_port,
-                    args.request_timeout,
-                )
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
-                if monitor.violation:
-                    reason = monitor.violation
-                else:
-                    reason = f"MODEL_REQUEST_FAILED:{type(error).__name__}"
+
+            load_violation = wait_health_with_monitor(
+                process,
+                args.qualification_port,
+                args.health_timeout,
+                monitor,
+            )
+            if load_violation:
+                reason = load_violation
+            elif not browser_present():
+                reason = "REPRESENTATIVE_BROWSER_LOST"
             else:
-                if monitor.violation:
-                    reason = monitor.violation
-                elif not response_complete:
-                    reason = "INCOMPLETE_RESPONSE"
-                elif not functional_pass:
-                    reason = "FUNCTIONAL_MISMATCH"
-                else:
-                    monitor.set_phase("SUSTAINED_COEXISTENCE")
-                    deadline = time.monotonic() + max(0.0, args.sustain_seconds)
-                    while time.monotonic() < deadline and monitor.violation is None:
-                        if process.poll() is not None:
-                            reason = "RUNTIME_EXITED_DURING_COEXISTENCE"
-                            break
-                        time.sleep(min(0.5, max(0.01, deadline - time.monotonic())))
+                monitor.set_phase("FUNCTIONAL_TASK")
+                try:
+                    functional_pass, response_complete, response_text = request_fast_task(
+                        args.qualification_port,
+                        args.request_timeout,
+                    )
+                except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+                    if monitor.violation:
+                        reason = monitor.violation
                     else:
-                        if monitor.violation:
-                            reason = monitor.violation
-                        elif reason == "UNCLASSIFIED":
-                            reason = "QUALIFICATION_COMPLETE"
+                        reason = f"MODEL_REQUEST_FAILED:{type(error).__name__}"
+                else:
+                    if monitor.violation:
+                        reason = monitor.violation
+                    elif not response_complete:
+                        reason = "INCOMPLETE_RESPONSE"
+                    elif not functional_pass:
+                        reason = "FUNCTIONAL_MISMATCH"
+                    else:
+                        monitor.set_phase("SUSTAINED_COEXISTENCE")
+                        deadline = time.monotonic() + max(0.0, args.sustain_seconds)
+                        while time.monotonic() < deadline and monitor.violation is None:
+                            if process.poll() is not None:
+                                reason = "RUNTIME_EXITED_DURING_COEXISTENCE"
+                                break
+                            time.sleep(min(0.5, max(0.01, deadline - time.monotonic())))
+                        else:
+                            if monitor.violation:
+                                reason = monitor.violation
+                            elif reason == "UNCLASSIFIED":
+                                reason = "QUALIFICATION_COMPLETE"
 
             if monitor:
                 monitor.stop()
@@ -427,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
                 "RELATIVE_SWAP_GROWTH_LIMIT",
                 "ABSOLUTE_SWAP_LIMIT",
                 "REPRESENTATIVE_BROWSER_LOST",
+                "RESOURCE_OBSERVATION_FAILED",
             }:
                 verdict = "REPRESENTATIVE_BLOCKED"
             else:
