@@ -23,9 +23,11 @@ Local-model qualification and runtime admission are workload-aware.
 3. The harness may manage only exact-owned model/qualification processes.
 4. Reduced-load runs are explicitly `LAB` evidence and cannot by themselves justify a production-default promotion.
 5. A model/context tier that fails representative cold-load or coexistence admission is not made production-capable by weakening resource gates or asking the user to close normal work applications.
-6. Representative resource failures become routing/admission constraints: route to a smaller qualified local model, queue until resources recover, use an approved provider fallback when policy allows, or decline the heavy route with an explicit reason.
+6. Representative resource failures become routing/admission constraints: unload or downgrade the AI runtime's own heavy model, route to a smaller qualified local model, queue until resources recover, use an approved provider fallback when policy allows, or decline the heavy route with an explicit reason.
 7. Plausible heavier use such as Unity coexistence is tested separately as `STRESS_COEXISTENCE`; failure defines a concurrency boundary rather than automatically invalidating lighter qualified workloads.
 8. Qualification evidence must preserve workload class and workload manifest so that LAB, representative, and stress results cannot be confused.
+9. Resource contention is resolved in favor of the Owner's desktop workload. The AI service yields first.
+10. `ON_DEMAND_COLD_START` and `PRELOADED_DAEMON` are separate qualification modes. A preloaded-daemon pass does not retroactively convert an on-demand cold-start failure into a pass.
 
 Detailed methodology and evidence language live in `docs/qualification/WORKLOAD_QUALIFICATION_POLICY.md`.
 
@@ -38,12 +40,14 @@ Detailed methodology and evidence language live in `docs/qualification/WORKLOAD_
 - Large-model resource failures become actionable router/admission requirements.
 - A smaller local model can be qualified as the everyday coexistence fallback while a larger model remains available when resources permit.
 - Unity and other heavy applications can be modeled as explicit concurrency states rather than accidental test noise.
+- A 7x24 preloaded service can be evaluated honestly as its own deployment mode, including whether it yields safely when desktop load grows.
 
 ### Cost
 
 - Some models that pass on an idle Mac will remain blocked from normal-production default use.
-- Qualification requires capturing a workload manifest and may require multiple workload classes.
+- Qualification requires capturing a workload manifest and may require multiple workload classes and deployment modes.
 - Runtime routing must eventually incorporate host resource/workload admission instead of assuming one local model is always startable.
+- A heavy model may need to self-unload or downgrade when the Owner starts Unity or other memory-intensive work.
 
 ## Current application to Qwen3.8
 
@@ -55,10 +59,11 @@ For the current 48 GiB target Mac:
 - the existing 16,384 TOTAL production context envelope is not changed by this ADR;
 - 24,576 TOTAL default remains NOT QUALIFIED;
 - 32K remains NOT TESTED / NOT JUSTIFIED;
-- future platform work should qualify a smaller local fallback for normal multitasking and make heavy-model admission workload-aware.
+- future platform work should qualify a smaller local fallback for normal multitasking and make heavy-model admission workload-aware;
+- the current evidence does not yet qualify a `PRELOADED_DAEMON` coexistence mode. If 7x24 preloading remains an intended deployment mode, it needs a separate representative test where browser/Unity workload is allowed to arrive while the service is running, and the heavy model must yield safely if limits are crossed.
 
 ## Non-decisions
 
-This ADR does not select the smaller fallback model, modify current production model-registry values, restart production services, change the 2 GiB swap-growth safety gate, or authorize deployment.
+This ADR does not select the smaller fallback model, modify current production model-registry values, restart production services, change the 2 GiB swap-growth safety gate, authorize deployment, or authorize any automation to close user applications.
 
 Those actions require their own implementation, qualification, review, and Owner gates.
