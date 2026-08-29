@@ -2,7 +2,7 @@
 """Qwen3.6 stress-coexistence qualification under real user workloads.
 
 This harness never starts, stops, suspends, or modifies user applications.
-It only observes them.  It owns one isolated oMLX process group on port 8013
+It only observes them. It owns one isolated oMLX process group on port 8013
 and may terminate only that exact process group when a hard resource gate trips.
 
 Two scenarios are supported:
@@ -13,8 +13,8 @@ STRESS_COLD_START
     bounded functional requests plus a sustained coexistence window.
 
 PRELOADED_COEXISTENCE
-    Browser is present while Qwen3.6 is loaded first.  The harness then waits
-    for the user to open the target workload themselves.  Once observed, the
+    Browser is present while Qwen3.6 is loaded first. The harness then waits
+    for the user to open the target workload themselves. Once observed, the
     model must remain healthy and functional through sustained coexistence.
 """
 from __future__ import annotations
@@ -65,6 +65,15 @@ TARGET_PATTERNS = {
         "/IntelliJ IDEA.app/",
         "/PyCharm.app/",
     ),
+}
+
+HARD_RESOURCE_REASONS = {
+    "MEMORY_PRESSURE_CRITICAL",
+    "RELATIVE_SWAP_GROWTH_LIMIT",
+    "ABSOLUTE_SWAP_LIMIT",
+    "BROWSER_WORKLOAD_LOST",
+    "STRESS_TARGET_LOST",
+    "RESOURCE_OBSERVATION_FAILED",
 }
 
 
@@ -352,16 +361,16 @@ def wait_health_with_monitor(
     port: int,
     timeout: float,
 ) -> str | None:
+    """Return None on health, otherwise a structured fail-closed reason."""
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/health"
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if monitor.violation:
             return monitor.violation
-        if process.poll() is not None:
-            if monitor.violation:
-                return monitor.violation
-            raise RuntimeError(f"oMLX exited before health gate with code {process.returncode}")
+        returncode = process.poll()
+        if returncode is not None:
+            return monitor.violation or f"RUNTIME_EXITED_BEFORE_HEALTH:{returncode}"
         try:
             _json_get(url, 2.0)
             return None
@@ -370,7 +379,8 @@ def wait_health_with_monitor(
             time.sleep(0.5)
     if monitor.violation:
         return monitor.violation
-    raise RuntimeError(f"oMLX health timeout: {last_error}")
+    detail = type(last_error).__name__ if last_error is not None else "UNKNOWN"
+    return f"HEALTH_TIMEOUT:{detail}"
 
 
 def wait_for_target_entry(
@@ -378,7 +388,8 @@ def wait_for_target_entry(
     monitor: StressResourceMonitor,
     target: str,
     timeout: float,
-) -> bool:
+) -> str | None:
+    """Return None when target enters, otherwise an explicit failure reason."""
     print(f"WAITING_FOR_USER_WORKLOAD={target}", flush=True)
     print(
         f"Open/use {target} normally now. The harness will observe it but will not start or control it.",
@@ -387,16 +398,21 @@ def wait_for_target_entry(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if monitor.violation:
-            return False
-        if process.poll() is not None:
-            return False
-        if target_present(target):
+            return monitor.violation
+        returncode = process.poll()
+        if returncode is not None:
+            return monitor.violation or f"RUNTIME_EXITED_WAITING_FOR_TARGET:{returncode}"
+        try:
+            present = target_present(target)
+        except Exception as error:
+            return f"TARGET_OBSERVATION_FAILED:{type(error).__name__}"
+        if present:
             print(f"USER_WORKLOAD_DETECTED={target}", flush=True)
             monitor.set_require_target(True)
             monitor.set_phase("STRESS_COEXISTENCE")
-            return True
+            return None
         time.sleep(0.5)
-    return False
+    return monitor.violation or "TARGET_WORKLOAD_NOT_OBSERVED"
 
 
 def ports_clear(ports: tuple[int, ...]) -> bool:
@@ -456,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
     reason = "UNCLASSIFIED"
     cleanup_ok = False
     preflight_reason = "NOT_RUN"
+    baseline_snapshot: MemorySnapshot | None = None
 
     raw = process_text()
     probe = WorkloadManifestProbe(
@@ -468,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
 
     preflight_result = MemoryPreflight().check(QWEN36.expected_memory_gib or 0)
     preflight_reason = preflight_result.reason
+    baseline_snapshot = preflight_result.snapshot
     if not preflight_result.allowed:
         verdict = "STRESS_BLOCKED"
         reason = f"RESOURCE_PREFLIGHT_DENIED:{preflight_result.reason}"
@@ -478,147 +496,211 @@ def main(argv: list[str] | None = None) -> int:
         environment = os.environ.copy()
         environment["HF_HUB_OFFLINE"] = "1"
         environment["TRANSFORMERS_OFFLINE"] = "1"
-        try:
-            with log_path.open("wb") as log:
-                process = subprocess.Popen(
-                    runtime_command(args.qualification_port),
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    cwd="/Users/jerson/AI",
-                    env=environment,
-                    start_new_session=True,
-                )
-                process_pid = process.pid
-                process_group_id = os.getpgid(process.pid)
-                if process_group_id != process_pid:
-                    raise RuntimeError("stress qualification process group ownership proof failed")
 
-                monitor = StressResourceMonitor(
-                    process,
-                    preflight_result.snapshot,
-                    target,
-                    require_target=(scenario is Scenario.STRESS_COLD_START),
-                    interval=args.sample_interval,
-                )
-                monitor.start()
-
-                load_violation = wait_health_with_monitor(
-                    process,
-                    monitor,
-                    args.qualification_port,
-                    args.health_timeout,
-                )
-                if load_violation:
-                    reason = load_violation
-                else:
-                    monitor.set_phase("FIRST_FUNCTIONAL_TASK")
-                    try:
-                        first_functional, first_complete, _ = request_marker(
-                            args.qualification_port,
-                            "QWEN36_STRESS_FIRST_OK",
-                            args.request_timeout,
+        # Revalidate the user workload immediately before the load admission.
+        # PRELOADED evidence is invalid if the target appeared before model load.
+        fresh_raw = process_text()
+        if not browser_present(fresh_raw):
+            verdict = "NO_STRESS_EVIDENCE"
+            reason = "BROWSER_MISSING_BEFORE_MODEL_LOAD"
+        elif scenario is Scenario.STRESS_COLD_START and not target_present(target, fresh_raw):
+            verdict = "NO_STRESS_EVIDENCE"
+            reason = "STRESS_TARGET_MISSING_BEFORE_MODEL_LOAD"
+        elif scenario is Scenario.PRELOADED_COEXISTENCE and target_present(target, fresh_raw):
+            verdict = "NO_STRESS_EVIDENCE"
+            reason = "TARGET_PRESENT_BEFORE_MODEL_LOAD"
+        else:
+            # Take a fresh safety admission immediately before Popen. This
+            # snapshot is the exact baseline for load-time swap growth.
+            load_preflight_result = MemoryPreflight().check(QWEN36.expected_memory_gib or 0)
+            preflight_reason = load_preflight_result.reason
+            baseline_snapshot = load_preflight_result.snapshot
+            if not load_preflight_result.allowed:
+                verdict = "STRESS_BLOCKED"
+                reason = f"RESOURCE_PREFLIGHT_DENIED_AT_LOAD:{load_preflight_result.reason}"
+            else:
+                try:
+                    with log_path.open("wb") as log:
+                        process = subprocess.Popen(
+                            runtime_command(args.qualification_port),
+                            stdout=log,
+                            stderr=subprocess.STDOUT,
+                            cwd="/Users/jerson/AI",
+                            env=environment,
+                            start_new_session=True,
                         )
-                    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
-                        reason = monitor.violation or f"FIRST_REQUEST_FAILED:{type(error).__name__}"
-                    else:
-                        if monitor.violation:
-                            reason = monitor.violation
-                        elif not first_complete:
-                            reason = "FIRST_RESPONSE_INCOMPLETE"
-                        elif not first_functional:
-                            reason = "FIRST_FUNCTIONAL_MISMATCH"
+                        process_pid = process.pid
+                        process_group_id = os.getpgid(process.pid)
+                        if process_group_id != process_pid:
+                            raise RuntimeError(
+                                "stress qualification process group ownership proof failed"
+                            )
+
+                        monitor = StressResourceMonitor(
+                            process,
+                            load_preflight_result.snapshot,
+                            target,
+                            require_target=(scenario is Scenario.STRESS_COLD_START),
+                            interval=args.sample_interval,
+                        )
+                        monitor.start()
+
+                        load_failure = wait_health_with_monitor(
+                            process,
+                            monitor,
+                            args.qualification_port,
+                            args.health_timeout,
+                        )
+                        if load_failure:
+                            reason = load_failure
                         else:
-                            if scenario is Scenario.PRELOADED_COEXISTENCE:
-                                monitor.set_phase("WAITING_FOR_USER_WORKLOAD")
-                                entered = wait_for_target_entry(
-                                    process,
-                                    monitor,
-                                    target,
-                                    args.target_wait_seconds,
+                            monitor.set_phase("FIRST_FUNCTIONAL_TASK")
+                            try:
+                                first_functional, first_complete, _ = request_marker(
+                                    args.qualification_port,
+                                    "QWEN36_STRESS_FIRST_OK",
+                                    args.request_timeout,
                                 )
-                                if not entered:
-                                    reason = monitor.violation or "TARGET_WORKLOAD_NOT_OBSERVED"
+                            except (
+                                urllib.error.URLError,
+                                TimeoutError,
+                                ConnectionError,
+                                OSError,
+                            ) as error:
+                                reason = monitor.violation or (
+                                    f"FIRST_REQUEST_FAILED:{type(error).__name__}"
+                                )
                             else:
-                                monitor.set_phase("STRESS_COEXISTENCE")
-                                entered = True
-
-                            if entered and reason == "UNCLASSIFIED":
-                                deadline = time.monotonic() + max(0.0, args.sustain_seconds)
-                                while time.monotonic() < deadline and monitor.violation is None:
-                                    if process.poll() is not None:
-                                        reason = "RUNTIME_EXITED_DURING_STRESS"
-                                        break
-                                    time.sleep(min(0.5, max(0.01, deadline - time.monotonic())))
-
                                 if monitor.violation:
                                     reason = monitor.violation
-                                elif reason == "UNCLASSIFIED":
-                                    monitor.set_phase("SECOND_FUNCTIONAL_TASK")
-                                    try:
-                                        second_functional, second_complete, _ = request_marker(
-                                            args.qualification_port,
-                                            "QWEN36_STRESS_SECOND_OK",
-                                            args.request_timeout,
+                                elif not first_complete:
+                                    reason = "FIRST_RESPONSE_INCOMPLETE"
+                                elif not first_functional:
+                                    reason = "FIRST_FUNCTIONAL_MISMATCH"
+                                else:
+                                    if scenario is Scenario.PRELOADED_COEXISTENCE:
+                                        monitor.set_phase("WAITING_FOR_USER_WORKLOAD")
+                                        entry_failure = wait_for_target_entry(
+                                            process,
+                                            monitor,
+                                            target,
+                                            args.target_wait_seconds,
                                         )
-                                    except (
-                                        urllib.error.URLError,
-                                        TimeoutError,
-                                        ConnectionError,
-                                        OSError,
-                                    ) as error:
-                                        reason = monitor.violation or (
-                                            f"SECOND_REQUEST_FAILED:{type(error).__name__}"
-                                        )
+                                        if entry_failure:
+                                            reason = entry_failure
+                                            entered = False
+                                        else:
+                                            entered = True
                                     else:
+                                        monitor.set_phase("STRESS_COEXISTENCE")
+                                        entered = True
+
+                                    if entered and reason == "UNCLASSIFIED":
+                                        deadline = time.monotonic() + max(
+                                            0.0,
+                                            args.sustain_seconds,
+                                        )
+                                        while (
+                                            time.monotonic() < deadline
+                                            and monitor.violation is None
+                                        ):
+                                            returncode = process.poll()
+                                            if returncode is not None:
+                                                reason = (
+                                                    "RUNTIME_EXITED_DURING_STRESS:"
+                                                    f"{returncode}"
+                                                )
+                                                break
+                                            time.sleep(
+                                                min(
+                                                    0.5,
+                                                    max(
+                                                        0.01,
+                                                        deadline - time.monotonic(),
+                                                    ),
+                                                )
+                                            )
+
                                         if monitor.violation:
                                             reason = monitor.violation
-                                        elif not second_complete:
-                                            reason = "SECOND_RESPONSE_INCOMPLETE"
-                                        elif not second_functional:
-                                            reason = "SECOND_FUNCTIONAL_MISMATCH"
-                                        else:
-                                            reason = "STRESS_QUALIFICATION_COMPLETE"
+                                        elif reason == "UNCLASSIFIED":
+                                            monitor.set_phase("SECOND_FUNCTIONAL_TASK")
+                                            try:
+                                                second_functional, second_complete, _ = (
+                                                    request_marker(
+                                                        args.qualification_port,
+                                                        "QWEN36_STRESS_SECOND_OK",
+                                                        args.request_timeout,
+                                                    )
+                                                )
+                                            except (
+                                                urllib.error.URLError,
+                                                TimeoutError,
+                                                ConnectionError,
+                                                OSError,
+                                            ) as error:
+                                                reason = monitor.violation or (
+                                                    "SECOND_REQUEST_FAILED:"
+                                                    f"{type(error).__name__}"
+                                                )
+                                            else:
+                                                if monitor.violation:
+                                                    reason = monitor.violation
+                                                elif not second_complete:
+                                                    reason = "SECOND_RESPONSE_INCOMPLETE"
+                                                elif not second_functional:
+                                                    reason = "SECOND_FUNCTIONAL_MISMATCH"
+                                                else:
+                                                    reason = "STRESS_QUALIFICATION_COMPLETE"
 
-                if monitor:
-                    monitor.stop()
-                    with samples_path.open("w", encoding="utf-8") as handle:
-                        for sample in monitor.samples:
-                            handle.write(json.dumps(asdict(sample), sort_keys=True) + "\n")
+                        if monitor:
+                            monitor.stop()
+                            with samples_path.open("w", encoding="utf-8") as handle:
+                                for sample in monitor.samples:
+                                    handle.write(
+                                        json.dumps(asdict(sample), sort_keys=True) + "\n"
+                                    )
 
-                if (
-                    reason == "STRESS_QUALIFICATION_COMPLETE"
-                    and first_functional
-                    and first_complete
-                    and second_functional
-                    and second_complete
-                ):
-                    verdict = "PASS_WITH_WARNING" if monitor and monitor.warning_observed else "PASS"
-                elif reason in {
-                    "MEMORY_PRESSURE_CRITICAL",
-                    "RELATIVE_SWAP_GROWTH_LIMIT",
-                    "ABSOLUTE_SWAP_LIMIT",
-                    "BROWSER_WORKLOAD_LOST",
-                    "STRESS_TARGET_LOST",
-                    "RESOURCE_OBSERVATION_FAILED",
-                }:
-                    verdict = "STRESS_BLOCKED"
-                elif reason == "TARGET_WORKLOAD_NOT_OBSERVED":
-                    verdict = "NO_STRESS_EVIDENCE"
-                else:
+                        if (
+                            reason == "STRESS_QUALIFICATION_COMPLETE"
+                            and first_functional
+                            and first_complete
+                            and second_functional
+                            and second_complete
+                        ):
+                            verdict = (
+                                "PASS_WITH_WARNING"
+                                if monitor and monitor.warning_observed
+                                else "PASS"
+                            )
+                        elif reason in HARD_RESOURCE_REASONS:
+                            verdict = "STRESS_BLOCKED"
+                        elif reason in {
+                            "TARGET_WORKLOAD_NOT_OBSERVED",
+                            "TARGET_PRESENT_BEFORE_MODEL_LOAD",
+                            "STRESS_TARGET_MISSING_BEFORE_MODEL_LOAD",
+                            "BROWSER_MISSING_BEFORE_MODEL_LOAD",
+                        }:
+                            verdict = "NO_STRESS_EVIDENCE"
+                        else:
+                            verdict = "FAIL_RUNTIME"
+                except Exception as error:
+                    if reason == "UNCLASSIFIED":
+                        reason = f"RUNTIME_SETUP_FAILED:{type(error).__name__}"
                     verdict = "FAIL_RUNTIME"
-        finally:
-            if monitor:
-                monitor.stop()
-            if process:
-                try:
-                    terminate_process_group(process)
-                except Exception:
-                    cleanup_ok = False
-                else:
-                    time.sleep(1.0)
-                    cleanup_ok = ports_clear((args.qualification_port,))
-            else:
-                cleanup_ok = True
+                finally:
+                    if monitor:
+                        monitor.stop()
+                    if process:
+                        try:
+                            terminate_process_group(process)
+                        except Exception:
+                            cleanup_ok = False
+                        else:
+                            time.sleep(1.0)
+                            cleanup_ok = ports_clear((args.qualification_port,))
+                    else:
+                        cleanup_ok = True
 
     if not ports_clear(PRODUCTION_PORTS):
         cleanup_ok = False
@@ -628,9 +710,8 @@ def main(argv: list[str] | None = None) -> int:
 
     samples = monitor.samples if monitor else []
     peak_delta = max((item.swap_delta_gib for item in samples), default=0.0)
-    peak_swap = max(
-        [preflight_result.snapshot.swap_used_gib, *[item.swap_used_gib for item in samples]]
-    ) if 'preflight_result' in locals() else 0.0
+    baseline_swap = baseline_snapshot.swap_used_gib if baseline_snapshot else 0.0
+    peak_swap = max([baseline_swap, *[item.swap_used_gib for item in samples]])
     reclaimable = [
         item.reclaimable_gib
         for item in samples
@@ -639,10 +720,13 @@ def main(argv: list[str] | None = None) -> int:
     min_reclaimable = min(reclaimable) if reclaimable else None
     browser_throughout = all(item.browser_present for item in samples) if samples else browser_present()
     stress_samples = [
-        item for item in samples
+        item
+        for item in samples
         if item.phase in {"STRESS_COEXISTENCE", "SECOND_FUNCTIONAL_TASK"}
     ]
-    target_during_stress = bool(stress_samples) and all(item.target_present for item in stress_samples)
+    target_during_stress = bool(stress_samples) and all(
+        item.target_present for item in stress_samples
+    )
 
     if not cleanup_ok and verdict in {"PASS", "PASS_WITH_WARNING"}:
         verdict = "FAIL_RUNTIME"
@@ -665,7 +749,9 @@ def main(argv: list[str] | None = None) -> int:
         warning_observed=bool(monitor and monitor.warning_observed),
         peak_swap_delta_gib=round(peak_delta, 4),
         peak_swap_used_gib=round(peak_swap, 4),
-        min_reclaimable_gib=(round(min_reclaimable, 4) if min_reclaimable is not None else None),
+        min_reclaimable_gib=(
+            round(min_reclaimable, 4) if min_reclaimable is not None else None
+        ),
         browser_present_throughout=browser_throughout,
         target_present_during_stress=target_during_stress,
         target_entry_elapsed_seconds=(
@@ -683,13 +769,17 @@ def main(argv: list[str] | None = None) -> int:
         finished_at=datetime.now(UTC).isoformat(),
     )
     write_json(result_path, asdict(result))
-    print(json.dumps({
-        "result_dir": str(output_dir),
-        "verdict": verdict,
-        "reason": reason,
-        "scenario": scenario.value,
-        "target": target,
-    }))
+    print(
+        json.dumps(
+            {
+                "result_dir": str(output_dir),
+                "verdict": verdict,
+                "reason": reason,
+                "scenario": scenario.value,
+                "target": target,
+            }
+        )
+    )
     return 0 if verdict in {"PASS", "PASS_WITH_WARNING"} else 1
 
 
