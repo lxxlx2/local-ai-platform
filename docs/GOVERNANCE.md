@@ -94,6 +94,21 @@ Evidence must identify:
 
 Repeated failures that materially affect model/provider routing should be recorded as qualification evidence. One transient shell mistake does not need architecture documentation.
 
+Local-model qualification must also preserve the intended desktop workload. Production promotion may not rely on an artificially emptied machine when the platform is intended to coexist with normal work applications.
+
+Hard rules for local-model qualification:
+
+1. Every live run declares a workload class: `LAB`, `REPRESENTATIVE_WORKLOAD`, or `STRESS_COEXISTENCE`.
+2. `REPRESENTATIVE_WORKLOAD` is the mandatory promotion gate for a normal desktop production default.
+3. Qualification automation MUST NOT close, pause, suspend, or kill user applications to create headroom. This includes browsers, Unity, IDEs, ChatGPT/Codex, terminals, communication tools, media apps, and other normal desktop processes.
+4. A harness may terminate only exact-owned model/qualification processes whose identity is verified.
+5. A reduced-workload result is `LAB` evidence. LAB success cannot erase or supersede a representative-workload resource failure.
+6. Representative failures should become routing/admission constraints, such as using a smaller qualified local model, queueing until resources recover, using an approved provider fallback, or declining the heavy route with an explicit reason.
+7. Evidence must record a workload manifest sufficient to explain material host load and whether any application was deliberately closed.
+8. Functional success, resource qualification, workload class, and production promotion status must remain separate claims.
+
+The canonical detailed method is `docs/qualification/WORKLOAD_QUALIFICATION_POLICY.md`, with architecture rationale in `docs/architecture/ADR-0005-workload-aware-local-model-admission.md`.
+
 ## 7. Download-state governance
 
 Model download state is particularly easy to misread. Use these rules:
