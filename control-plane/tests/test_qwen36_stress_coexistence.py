@@ -32,7 +32,8 @@ def _raw(*, browser=True, unity=False, ide=False):
         )
     if unity:
         rows.append(
-            "3 3145728 /Applications/Unity/Hub/Editor/6000.3.23f1/Unity.app/Contents/MacOS/Unity"
+            "3 3145728 /Applications/Unity/Hub/Editor/6000.3.23f1/"
+            "Unity.app/Contents/MacOS/Unity"
         )
     if ide:
         rows.append(
@@ -50,6 +51,23 @@ def _manifest(raw, *, occupied=False):
     ).capture(WorkloadClass.STRESS_COEXISTENCE)
 
 
+class FakeProcess:
+    pid = 4242
+
+    def __init__(self, *, running=True, returncode=None):
+        self.running = running
+        self.returncode = returncode
+
+    def poll(self):
+        return None if self.running else self.returncode
+
+    def wait(self, timeout):
+        self.running = False
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
 def test_runtime_command_uses_isolated_stress_port_and_registered_qwen36_runtime():
     command = NS["runtime_command"](8013)
 
@@ -64,10 +82,7 @@ def test_runtime_command_uses_isolated_stress_port_and_registered_qwen36_runtime
 
 def test_unity_editor_detection_does_not_accept_unity_hub_only():
     target_present = NS["target_present"]
-
-    hub = (
-        "10 1000 /Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
-    )
+    hub = "10 1000 /Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
     editor = (
         "11 1000 /Applications/Unity/Hub/Editor/6000.3.23f1/"
         "Unity.app/Contents/MacOS/Unity"
@@ -85,14 +100,8 @@ def test_ide_detection_accepts_vscode():
 def test_cold_start_requires_browser_and_target_already_present():
     validate = NS["validate_initial_workload"]
     Scenario = NS["Scenario"]
-
     good = _raw(browser=True, unity=True)
-    validate(
-        Scenario.STRESS_COLD_START,
-        "UNITY_EDITOR",
-        _manifest(good),
-        good,
-    )
+    validate(Scenario.STRESS_COLD_START, "UNITY_EDITOR", _manifest(good), good)
 
     missing_target = _raw(browser=True, unity=False)
     try:
@@ -124,14 +133,8 @@ def test_cold_start_requires_browser_and_target_already_present():
 def test_preloaded_scenario_requires_target_to_enter_after_model_load():
     validate = NS["validate_initial_workload"]
     Scenario = NS["Scenario"]
-
     clean = _raw(browser=True, unity=False)
-    validate(
-        Scenario.PRELOADED_COEXISTENCE,
-        "UNITY_EDITOR",
-        _manifest(clean),
-        clean,
-    )
+    validate(Scenario.PRELOADED_COEXISTENCE, "UNITY_EDITOR", _manifest(clean), clean)
 
     already_open = _raw(browser=True, unity=True)
     try:
@@ -153,39 +156,17 @@ def test_stress_manifest_rejects_occupied_fixed_port():
     raw = _raw(browser=True, ide=True)
 
     try:
-        validate(
-            Scenario.STRESS_COLD_START,
-            "IDE",
-            _manifest(raw, occupied=True),
-            raw,
-        )
+        validate(Scenario.STRESS_COLD_START, "IDE", _manifest(raw, occupied=True), raw)
     except RuntimeError as error:
         assert "fixed port already occupied" in str(error)
     else:
         raise AssertionError("occupied stress port was accepted")
 
 
-class FakeProcess:
-    pid = 4242
-
-    def __init__(self):
-        self.running = True
-        self.returncode = None
-
-    def poll(self):
-        return None if self.running else self.returncode
-
-    def wait(self, timeout):
-        self.running = False
-        self.returncode = 0
-        return 0
-
-
 def test_monitor_aborts_owned_runtime_on_relative_swap_growth():
     Monitor = NS["StressResourceMonitor"]
     process = FakeProcess()
     terminations = []
-
     monitor = Monitor(
         process,
         _snapshot(swap=1.0),
@@ -209,11 +190,9 @@ def test_monitor_aborts_owned_runtime_on_relative_swap_growth():
 
 def test_monitor_marks_warning_without_stopping_user_or_model():
     Monitor = NS["StressResourceMonitor"]
-    process = FakeProcess()
     terminations = []
-
     monitor = Monitor(
-        process,
+        FakeProcess(),
         _snapshot(swap=1.0),
         "IDE",
         require_target=True,
@@ -233,7 +212,6 @@ def test_monitor_marks_warning_without_stopping_user_or_model():
 
 def test_monitor_blocks_when_browser_or_required_target_disappears():
     Monitor = NS["StressResourceMonitor"]
-
     browser_lost = Monitor(
         FakeProcess(),
         _snapshot(),
@@ -266,7 +244,6 @@ def test_monitor_blocks_when_browser_or_required_target_disappears():
 def test_preloaded_monitor_can_wait_without_target_then_require_it():
     Monitor = NS["StressResourceMonitor"]
     state = {"target": False}
-
     monitor = Monitor(
         FakeProcess(),
         _snapshot(),
@@ -292,14 +269,65 @@ def test_preloaded_monitor_can_wait_without_target_then_require_it():
     assert monitor.target_entry_elapsed_seconds == 2.0
 
 
-def test_monitored_health_gate_returns_resource_violation_instead_of_runtime_crash():
+def test_health_gate_preserves_resource_violation():
     wait_health = NS["wait_health_with_monitor"]
-    process = FakeProcess()
 
     class Monitor:
         violation = "RELATIVE_SWAP_GROWTH_LIMIT"
 
-    assert wait_health(process, Monitor(), 8013, 1.0) == "RELATIVE_SWAP_GROWTH_LIMIT"
+    assert (
+        wait_health(FakeProcess(), Monitor(), 8013, 1.0)
+        == "RELATIVE_SWAP_GROWTH_LIMIT"
+    )
+
+
+def test_health_gate_returns_runtime_exit_reason_instead_of_raising():
+    wait_health = NS["wait_health_with_monitor"]
+
+    class Monitor:
+        violation = None
+
+    reason = wait_health(
+        FakeProcess(running=False, returncode=7),
+        Monitor(),
+        8013,
+        1.0,
+    )
+    assert reason == "RUNTIME_EXITED_BEFORE_HEALTH:7"
+
+
+def test_target_wait_preserves_monitor_violation_and_runtime_exit():
+    wait_target = NS["wait_for_target_entry"]
+
+    class Monitor:
+        def __init__(self, violation=None):
+            self.violation = violation
+
+        def set_require_target(self, required):
+            pass
+
+        def set_phase(self, phase):
+            pass
+
+    assert (
+        wait_target(
+            FakeProcess(),
+            Monitor("RESOURCE_OBSERVATION_FAILED"),
+            "IDE",
+            1.0,
+        )
+        == "RESOURCE_OBSERVATION_FAILED"
+    )
+    assert (
+        wait_target(
+            FakeProcess(running=False, returncode=9),
+            Monitor(),
+            "IDE",
+            1.0,
+        )
+        == "RUNTIME_EXITED_WAITING_FOR_TARGET:9"
+    )
+    assert wait_target(FakeProcess(), Monitor(), "IDE", 0.0) == "TARGET_WORKLOAD_NOT_OBSERVED"
 
 
 def test_cleanup_signals_only_exact_owned_process_group():
@@ -329,17 +357,22 @@ def test_cleanup_refuses_non_owned_process_group():
             raise AssertionError("non-owned process group was signalled")
 
 
-def test_source_starts_monitor_before_health_and_contains_no_user_app_control():
+def test_source_uses_fresh_load_baseline_before_health_and_no_user_app_control():
     source = SCRIPT.read_text(encoding="utf-8")
     lower = source.lower()
 
-    create = source.index("monitor = StressResourceMonitor(")
-    start = source.index("monitor.start()", create)
-    health = source.index("load_violation = wait_health_with_monitor", start)
+    refresh = source.index("load_preflight_result = MemoryPreflight().check")
+    spawn = source.index("process = subprocess.Popen", refresh)
+    create = source.index("monitor = StressResourceMonitor(", spawn)
+    baseline = source.index("load_preflight_result.snapshot", create)
+    start = source.index("monitor.start()", baseline)
+    health = source.index("load_failure = wait_health_with_monitor", start)
     first_task = source.index('monitor.set_phase("FIRST_FUNCTIONAL_TASK")', health)
 
-    assert create < start < health < first_task
-    assert "preflight_result.snapshot" in source[create:health]
+    assert refresh < spawn < create < baseline < start < health < first_task
+    assert "preflight_result.snapshot" not in source[create:start]
+    assert "fresh_raw = process_text()" in source[:refresh]
+    assert "TARGET_PRESENT_BEFORE_MODEL_LOAD" in source[:refresh]
 
     assert "osascript" not in lower
     assert "killall" not in lower
