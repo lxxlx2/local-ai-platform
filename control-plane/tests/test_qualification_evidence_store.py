@@ -73,6 +73,16 @@ def test_router_adapter_preserves_unknown_stress_and_mode_separation():
     assert "local-qwen38" not in preloaded
 
 
+def test_expected_host_scope_cannot_be_disabled(tmp_path):
+    path = write_payload(tmp_path, load_payload())
+    for value in (None, "", "   "):
+        with pytest.raises(ValueError, match="expected host scope is required"):
+            QualificationEvidenceStore(
+                config_path=path,
+                expected_host_scope=value,  # type: ignore[arg-type]
+            )
+
+
 def test_host_scope_mismatch_fails_closed(tmp_path):
     path = write_payload(tmp_path, load_payload())
     with pytest.raises(ValueError, match="host scope mismatch"):
