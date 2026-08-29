@@ -33,7 +33,7 @@
       "reason": "RELATIVE_SWAP_GROWTH_LIMIT",
       "candidate_ref_type": "STAGED_CONTENT_SHA256",
       "candidate_ref": "0c72030c669ba2c693c90ce5762125802394518a4b4e056ba15ac4608c19eaaf",
-      "source_ref": "github:issue/19#issuecomment-5460597710",
+      "source_ref": "github:issue/19#issuecomment-5460621167",
       "result_artifact": "/tmp/qwen38-phase2-safe-live-20260829-123124",
       "recorded_date": "2026-08-29",
       "deliberate_reductions": []
