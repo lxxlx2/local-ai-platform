@@ -30,6 +30,9 @@ def test_checked_in_ledger_has_current_representative_evidence():
     store = QualificationEvidenceStore(config_path=REAL_CONFIG)
 
     assert store.host_scope.scope_id == DEFAULT_HOST_SCOPE
+    assert store.host_scope.platform == "darwin"
+    assert store.host_scope.arch == "arm64"
+    assert store.host_scope.memory_gib == 48
 
     qwen36 = store.record_for(
         "local-qwen36",
@@ -77,6 +80,19 @@ def test_host_scope_mismatch_fails_closed(tmp_path):
             config_path=path,
             expected_host_scope="another-host-scope",
         )
+
+
+def test_default_host_attributes_cannot_be_spoofed_under_same_id(tmp_path):
+    for field, value in (
+        ("platform", "linux"),
+        ("arch", "x86_64"),
+        ("memory_gib", 64),
+    ):
+        payload = load_payload()
+        payload["host_scope"][field] = value
+        path = write_payload(tmp_path, payload)
+        with pytest.raises(ValueError, match="default host attributes mismatch"):
+            QualificationEvidenceStore(config_path=path)
 
 
 def test_wrong_model_binding_fails_closed(tmp_path):
