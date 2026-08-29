@@ -388,6 +388,9 @@ def main(argv: list[str] | None = None) -> int:
             if process_group_id != process_pid:
                 raise RuntimeError("qualification process group ownership proof failed")
 
+            # MODEL_LOAD monitoring begins immediately after exact-owned process
+            # identity is proven. The baseline is the representative preflight
+            # snapshot, so load-time swap growth cannot disappear behind /health.
             monitor = ResourceMonitor(
                 process,
                 preflight_result.snapshot,
