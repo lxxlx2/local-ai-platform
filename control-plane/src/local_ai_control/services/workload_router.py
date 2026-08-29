@@ -1,7 +1,7 @@
 """Read-only workload-aware routing decisions.
 
 This module intentionally does not start, stop, signal, or reconfigure model
-runtimes.  It combines existing registry eligibility, resource admission, and
+runtimes. It combines existing registry eligibility, resource admission, and
 qualification evidence into a recommendation that a later, separately
 approved execution layer may consume.
 """
@@ -55,6 +55,8 @@ class WorkloadRoutingDecision:
     reason: str
     stress_categories: tuple[str, ...]
     considered: tuple[str, ...]
+    # Phase D is recommendation-only. A later reviewed execution layer must
+    # separately authorize any runtime mutation.
     execution_authorized: bool = False
 
 
@@ -135,11 +137,11 @@ class WorkloadAwareRoutingPolicy:
         manifest: WorkloadManifest,
         stress_categories: tuple[str, ...],
         considered: tuple[str, ...],
-        small_local_ready: bool,
+        small_local_qualified_for_workload: bool,
         cloud_egress_allowed: bool,
         reason: str,
     ) -> WorkloadRoutingDecision:
-        if small_local_ready:
+        if small_local_qualified_for_workload:
             return WorkloadRoutingDecision(
                 DecisionAction.ALLOW_SMALL_LOCAL,
                 task_type,
@@ -176,7 +178,7 @@ class WorkloadAwareRoutingPolicy:
         manifest: WorkloadManifest,
         admissions: Mapping[str, WorkloadAdmissionResult],
         evidence: Mapping[str, QualificationEvidence],
-        small_local_ready: bool = False,
+        small_local_qualified_for_workload: bool = False,
         cloud_egress_allowed: bool = False,
     ) -> WorkloadRoutingDecision:
         normalized, candidates = self._candidates(task_type)
@@ -188,7 +190,7 @@ class WorkloadAwareRoutingPolicy:
                 manifest=manifest,
                 stress_categories=stress_categories,
                 considered=(),
-                small_local_ready=small_local_ready,
+                small_local_qualified_for_workload=small_local_qualified_for_workload,
                 cloud_egress_allowed=cloud_egress_allowed,
                 reason="LAB_OR_REDUCED_WORKLOAD_NOT_PRODUCTION_EVIDENCE",
             )
@@ -199,7 +201,7 @@ class WorkloadAwareRoutingPolicy:
                 manifest=manifest,
                 stress_categories=stress_categories,
                 considered=(),
-                small_local_ready=small_local_ready,
+                small_local_qualified_for_workload=small_local_qualified_for_workload,
                 cloud_egress_allowed=cloud_egress_allowed,
                 reason="NO_ELIGIBLE_LOCAL_PROFILE_FOR_TASK",
             )
@@ -208,22 +210,36 @@ class WorkloadAwareRoutingPolicy:
         saw_resource_block = False
         saw_evidence_block = False
         saw_unknown_evidence = False
+        saw_invalid_evidence = False
 
         for profile in candidates:
             considered.append(profile.profile_id)
             admission = admissions.get(profile.profile_id)
-            if admission is None or admission.workload_class is not manifest.workload_class:
+            if (
+                admission is None
+                or admission.profile_id != profile.profile_id
+                or admission.workload_class is not manifest.workload_class
+            ):
                 saw_resource_block = True
                 continue
             if not admission.allowed:
                 saw_resource_block = True
                 continue
 
-            status = self._evidence_status(
-                evidence.get(profile.profile_id),
-                manifest,
-                stress_categories,
-            )
+            profile_evidence = evidence.get(profile.profile_id)
+            if profile_evidence is not None and profile_evidence.profile_id != profile.profile_id:
+                saw_invalid_evidence = True
+                continue
+            try:
+                status = self._evidence_status(
+                    profile_evidence,
+                    manifest,
+                    stress_categories,
+                )
+            except (TypeError, ValueError):
+                saw_invalid_evidence = True
+                continue
+
             if status is EvidenceStatus.BLOCKED:
                 saw_evidence_block = True
                 continue
@@ -251,7 +267,9 @@ class WorkloadAwareRoutingPolicy:
                 considered=tuple(considered),
             )
 
-        if saw_evidence_block:
+        if saw_invalid_evidence:
+            reason = "QUALIFICATION_EVIDENCE_INVALID"
+        elif saw_evidence_block:
             reason = "QUALIFICATION_EVIDENCE_BLOCKED_CURRENT_WORKLOAD"
         elif saw_unknown_evidence:
             reason = "QUALIFICATION_EVIDENCE_UNKNOWN_CURRENT_WORKLOAD"
@@ -265,7 +283,7 @@ class WorkloadAwareRoutingPolicy:
             manifest=manifest,
             stress_categories=stress_categories,
             considered=tuple(considered),
-            small_local_ready=small_local_ready,
+            small_local_qualified_for_workload=small_local_qualified_for_workload,
             cloud_egress_allowed=cloud_egress_allowed,
             reason=reason,
         )
