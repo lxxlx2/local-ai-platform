@@ -8,6 +8,7 @@ This index is the canonical entrypoint for architecture decisions. The detailed 
 | [ADR-0002](ADR-0002-interactive-provider-priority.md) | Owner-present interactive engineering priority: Codex > Qwen > Gemini supplementary | ACCEPTED / PARTIALLY IMPLEMENTED | Issue #18; `feat/codex-desktop-auto-failover-v01`; Gemini reviewer fix branch; detailed record in `../INTERACTIVE_PROVIDER_PRIORITY.md` |
 | [ADR-0003](ADR-0003-context-architecture-v2.md) | Dynamic Context Budget Manager and task-specific context tiers | ACCEPTED / IMPLEMENTING | Issue #19; `feat/context-budget-manager-v01`; detailed record in `../CONTEXT_ARCHITECTURE_V2.md` |
 | [ADR-0004](ADR-0004-repository-governance-v2.md) | ADR ledger + canonical current status + reduced docs-branch sprawl | ACCEPTED / IMPLEMENTED | PR #20 merged at `fcbb71d...`; historical Issue/branch cleanup completed; ongoing maintenance on `docs/architecture-ledger` |
+| [ADR-0005](ADR-0005-workload-aware-local-model-admission.md) | Representative-workload qualification and workload-aware local-model admission | ACCEPTED / IMPLEMENTATION QUEUED | Issue #19; `../qualification/WORKLOAD_QUALIFICATION_POLICY.md`; Qwen3.8 Phase 2 representative/LAB evidence |
 
 ## Status meanings
 
