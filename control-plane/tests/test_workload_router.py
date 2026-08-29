@@ -218,7 +218,7 @@ def test_multiple_stress_categories_all_require_pass():
     assert decision.stress_categories == ("IDE", "UNITY")
 
 
-def test_unknown_stress_evidence_uses_small_local_only_when_explicitly_ready():
+def test_unknown_stress_evidence_uses_small_local_only_when_explicitly_qualified():
     current = manifest(workload_class=WorkloadClass.STRESS_COEXISTENCE, apps=("IDE",))
     admissions = {
         "local-qwen36": admission("local-qwen36", workload_class=WorkloadClass.STRESS_COEXISTENCE),
@@ -229,7 +229,7 @@ def test_unknown_stress_evidence_uses_small_local_only_when_explicitly_ready():
         manifest=current,
         admissions=admissions,
         evidence={},
-        small_local_ready=True,
+        small_local_qualified_for_workload=True,
         cloud_egress_allowed=True,
     )
 
@@ -310,6 +310,41 @@ def test_admission_from_different_workload_class_is_not_reused():
     assert decision.reason == "RESOURCE_ADMISSION_NOT_AVAILABLE"
 
 
+def test_admission_dictionary_key_cannot_spoof_another_profile():
+    admissions = {
+        "local-qwen38": admission("local-qwen36"),
+        "local-qwen36": admission("local-qwen36"),
+    }
+
+    decision = policy().decide(
+        task_type="CHAT",
+        manifest=manifest(apps=("BROWSER",)),
+        admissions=admissions,
+        evidence=normal_evidence(qwen38=EvidenceStatus.PASS, qwen36=EvidenceStatus.PASS),
+    )
+
+    assert decision.action is DecisionAction.ALLOW_QWEN36
+    assert decision.profile_id == "local-qwen36"
+
+
+def test_evidence_dictionary_key_cannot_spoof_another_profile():
+    decision = policy().decide(
+        task_type="FAST",
+        manifest=manifest(apps=("BROWSER",)),
+        admissions=normal_admissions(),
+        evidence={
+            "local-qwen36": QualificationEvidence(
+                "local-qwen38",
+                representative=EvidenceStatus.PASS,
+            ),
+        },
+        cloud_egress_allowed=True,
+    )
+
+    assert decision.action is DecisionAction.USE_CLOUD
+    assert decision.reason == "QUALIFICATION_EVIDENCE_INVALID"
+
+
 def test_vision_does_not_silently_fallback_to_qwen36():
     decision = policy().decide(
         task_type="VISION",
@@ -348,7 +383,7 @@ def test_cloud_is_never_inferred_without_explicit_egress_permission():
     assert decision.action is DecisionAction.QUEUE_TASK
 
 
-def test_duplicate_stress_evidence_fails_closed():
+def test_duplicate_stress_evidence_fails_closed_to_nonlocal_decision():
     current = manifest(workload_class=WorkloadClass.STRESS_COEXISTENCE, apps=("IDE",))
     admissions = {
         "local-qwen36": admission("local-qwen36", workload_class=WorkloadClass.STRESS_COEXISTENCE),
@@ -363,14 +398,13 @@ def test_duplicate_stress_evidence_fails_closed():
         ),
     }
 
-    try:
-        policy().decide(
-            task_type="FAST",
-            manifest=current,
-            admissions=admissions,
-            evidence=evidence,
-        )
-    except ValueError as error:
-        assert "duplicate stress evidence" in str(error)
-    else:
-        raise AssertionError("duplicate stress evidence must fail closed")
+    decision = policy().decide(
+        task_type="FAST",
+        manifest=current,
+        admissions=admissions,
+        evidence=evidence,
+        cloud_egress_allowed=True,
+    )
+
+    assert decision.action is DecisionAction.USE_CLOUD
+    assert decision.reason == "QUALIFICATION_EVIDENCE_INVALID"
