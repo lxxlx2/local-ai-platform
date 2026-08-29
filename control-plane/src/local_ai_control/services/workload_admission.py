@@ -26,6 +26,8 @@ class WorkloadClass(StrEnum):
 class ProcessSample:
     pid: int
     rss_mib: float
+    # Historical field name retained for compatibility. The production reader
+    # now supplies executable identity from ps(1) `comm`, never the full argv.
     command: str
 
 
@@ -73,7 +75,9 @@ _MATERIAL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "/Google Chrome.app/", "/Safari.app/", "/Firefox.app/",
         "/Arc.app/", "/Microsoft Edge.app/",
     )),
-    ("UNITY", ("/Unity.app/", "/Unity Hub.app/")),
+    # UNITY means the actual Editor workload. Unity Hub alone is a launcher and
+    # must not trigger the stress-coexistence category used by downstream policy.
+    ("UNITY", ("/Unity.app/",)),
     ("IDE", (
         "/Visual Studio Code.app/", "/Cursor.app/", "/Xcode.app/",
         "/IntelliJ IDEA.app/", "/PyCharm.app/",
@@ -84,8 +88,11 @@ _MATERIAL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def _default_process_reader() -> str:
+    # `command` includes argv and can be spoofed by an unrelated process whose
+    # arguments merely mention an application path. `comm` reports executable
+    # identity and matches the hardened Phase C workload-observation contract.
     return subprocess.check_output(
-        ["ps", "ax", "-o", "pid=,rss=,command="],
+        ["ps", "ax", "-o", "pid=,rss=,comm="],
         text=True,
     )
 
