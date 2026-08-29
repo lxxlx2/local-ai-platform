@@ -231,11 +231,7 @@ def test_health_gate_preserves_load_time_resource_violation():
     class FakeMonitor:
         violation = "RELATIVE_SWAP_GROWTH_LIMIT"
 
-    with patch.object(
-        NS["time"],
-        "monotonic",
-        side_effect=[1.0, 1.1],
-    ):
+    with patch.object(NS["time"], "monotonic", side_effect=[1.0, 1.1]):
         result = wait_health_with_monitor(
             FakeProcess(),
             8012,
@@ -246,10 +242,38 @@ def test_health_gate_preserves_load_time_resource_violation():
     assert result == "RELATIVE_SWAP_GROWTH_LIMIT"
 
 
+def test_health_gate_does_not_mask_unrelated_runtime_failure():
+    wait_health_with_monitor = NS["wait_health_with_monitor"]
+
+    class FakeProcess:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    class FakeMonitor:
+        violation = None
+
+    with patch.object(NS["time"], "monotonic", side_effect=[1.0, 1.1]):
+        try:
+            wait_health_with_monitor(
+                FakeProcess(),
+                8012,
+                10.0,
+                FakeMonitor(),
+            )
+        except RuntimeError as error:
+            assert "exited before health gate" in str(error)
+        else:
+            raise AssertionError("unrelated runtime failure was misclassified as resource block")
+
+
 def test_monitor_starts_before_health_and_uses_preflight_baseline():
     source = SCRIPT.read_text(encoding="utf-8")
 
-    monitor_create = source.index("monitor = ResourceMonitor(\n                process,\n                preflight_result.snapshot")
+    monitor_create = source.index(
+        "monitor = ResourceMonitor(\n                process,\n                preflight_result.snapshot"
+    )
     monitor_start = source.index("monitor.start()", monitor_create)
     health_gate = source.index("load_violation = wait_health_with_monitor", monitor_start)
     functional_phase = source.index('monitor.set_phase("FUNCTIONAL_TASK")', health_gate)
