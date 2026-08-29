@@ -26,6 +26,9 @@ EVIDENCE_PATH = Path("/Users/jerson/AI/config/qualification-evidence-v0.1.json")
 SCHEMA_VERSION = "0.1"
 POLICY_REVISION = "workload-qualification-v1"
 DEFAULT_HOST_SCOPE = "mac-arm64-48g-workstation-v1"
+DEFAULT_HOST_PLATFORM = "darwin"
+DEFAULT_HOST_ARCH = "arm64"
+DEFAULT_HOST_MEMORY_GIB = 48
 _ALLOWED_STRESS = frozenset({"IDE", "UNITY"})
 _SOURCE_REF = re.compile(r"^github:issue/[1-9][0-9]*#issuecomment-[1-9][0-9]*$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -140,7 +143,7 @@ class QualificationEvidenceStore:
         except (TypeError, ValueError) as error:
             raise ValueError("invalid qualification evidence enum value") from error
 
-        # UNKNOWN is represented by absence.  Persisted records must be an
+        # UNKNOWN is represented by absence. Persisted records must be an
         # observed positive qualification or a conservative blocking result.
         if status not in {EvidenceStatus.PASS, EvidenceStatus.BLOCKED}:
             raise ValueError("persisted qualification evidence cannot be UNKNOWN")
@@ -226,6 +229,12 @@ class QualificationEvidenceStore:
         host_scope = self._host_scope(payload["host_scope"])
         if self.expected_host_scope is not None and host_scope.scope_id != self.expected_host_scope:
             raise ValueError("qualification evidence host scope mismatch")
+        if self.expected_host_scope == DEFAULT_HOST_SCOPE and (
+            host_scope.platform != DEFAULT_HOST_PLATFORM
+            or host_scope.arch != DEFAULT_HOST_ARCH
+            or host_scope.memory_gib != DEFAULT_HOST_MEMORY_GIB
+        ):
+            raise ValueError("qualification evidence default host attributes mismatch")
 
         raw_records = payload["records"]
         if not isinstance(raw_records, list):
@@ -265,7 +274,7 @@ class QualificationEvidenceStore:
     ) -> dict[str, QualificationEvidence]:
         """Compile exact-mode records into Phase D router evidence.
 
-        Missing records remain UNKNOWN.  Evidence from another deployment mode
+        Missing records remain UNKNOWN. Evidence from another deployment mode
         is never reused implicitly.
         """
         mode = DeploymentMode(deployment_mode)
