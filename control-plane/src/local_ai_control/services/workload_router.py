@@ -138,10 +138,12 @@ class WorkloadAwareRoutingPolicy:
         stress_categories: tuple[str, ...],
         considered: tuple[str, ...],
         small_local_qualified_for_workload: bool,
+        small_local_capability_ready: bool,
         cloud_egress_allowed: bool,
+        cloud_provider_ready: bool,
         reason: str,
     ) -> WorkloadRoutingDecision:
-        if small_local_qualified_for_workload:
+        if small_local_qualified_for_workload and small_local_capability_ready:
             return WorkloadRoutingDecision(
                 DecisionAction.ALLOW_SMALL_LOCAL,
                 task_type,
@@ -151,7 +153,7 @@ class WorkloadAwareRoutingPolicy:
                 stress_categories,
                 considered,
             )
-        if cloud_egress_allowed:
+        if cloud_egress_allowed and cloud_provider_ready:
             return WorkloadRoutingDecision(
                 DecisionAction.USE_CLOUD,
                 task_type,
@@ -179,30 +181,34 @@ class WorkloadAwareRoutingPolicy:
         admissions: Mapping[str, WorkloadAdmissionResult],
         evidence: Mapping[str, QualificationEvidence],
         small_local_qualified_for_workload: bool = False,
+        small_local_capability_ready: bool = False,
         cloud_egress_allowed: bool = False,
+        cloud_provider_ready: bool = False,
     ) -> WorkloadRoutingDecision:
         normalized, candidates = self._candidates(task_type)
         stress_categories = _stress_categories(manifest)
 
+        fallback = {
+            "task_type": normalized,
+            "manifest": manifest,
+            "stress_categories": stress_categories,
+            "small_local_qualified_for_workload": small_local_qualified_for_workload,
+            "small_local_capability_ready": small_local_capability_ready,
+            "cloud_egress_allowed": cloud_egress_allowed,
+            "cloud_provider_ready": cloud_provider_ready,
+        }
+
         if manifest.deliberate_reductions or manifest.workload_class is WorkloadClass.LAB:
             return self._fallback(
-                task_type=normalized,
-                manifest=manifest,
-                stress_categories=stress_categories,
+                **fallback,
                 considered=(),
-                small_local_qualified_for_workload=small_local_qualified_for_workload,
-                cloud_egress_allowed=cloud_egress_allowed,
                 reason="LAB_OR_REDUCED_WORKLOAD_NOT_PRODUCTION_EVIDENCE",
             )
 
         if not candidates:
             return self._fallback(
-                task_type=normalized,
-                manifest=manifest,
-                stress_categories=stress_categories,
+                **fallback,
                 considered=(),
-                small_local_qualified_for_workload=small_local_qualified_for_workload,
-                cloud_egress_allowed=cloud_egress_allowed,
                 reason="NO_ELIGIBLE_LOCAL_PROFILE_FOR_TASK",
             )
 
@@ -279,11 +285,7 @@ class WorkloadAwareRoutingPolicy:
             reason = "NO_LOCAL_DECISION"
 
         return self._fallback(
-            task_type=normalized,
-            manifest=manifest,
-            stress_categories=stress_categories,
+            **fallback,
             considered=tuple(considered),
-            small_local_qualified_for_workload=small_local_qualified_for_workload,
-            cloud_egress_allowed=cloud_egress_allowed,
             reason=reason,
         )
