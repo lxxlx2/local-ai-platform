@@ -100,7 +100,9 @@ def runtime_command(port: int = QUALIFICATION_PORT) -> list[str]:
 
 
 def _process_text() -> str:
-    return subprocess.check_output(["ps", "ax", "-o", "pid=,rss=,command="], text=True)
+    # Use executable identity only. Full argv can be spoofed by an unrelated
+    # process whose arguments merely mention a browser application path.
+    return subprocess.check_output(["ps", "ax", "-o", "pid=,rss=,comm="], text=True)
 
 
 def browser_present(raw: str | None = None) -> bool:

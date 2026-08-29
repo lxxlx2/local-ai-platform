@@ -279,3 +279,12 @@ def test_monitor_starts_before_health_and_uses_preflight_baseline():
     functional_phase = source.index('monitor.set_phase("FUNCTIONAL_TASK")', health_gate)
 
     assert monitor_create < monitor_start < health_gate < functional_phase
+
+
+def test_process_reader_uses_executable_identity_not_full_argv():
+    source = Path(
+        "scripts/qualify-qwen36-representative.py"
+    ).read_text()
+
+    assert '"pid=,rss=,comm="' in source
+    assert '"pid=,rss=,command="' not in source
