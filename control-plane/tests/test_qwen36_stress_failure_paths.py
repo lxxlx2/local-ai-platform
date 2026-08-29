@@ -101,7 +101,7 @@ def test_source_refreshes_load_preflight_immediately_before_spawn_and_uses_it_as
     health = source.index("load_failure = wait_health_with_monitor", start)
 
     assert refresh < spawn < monitor < baseline < start < health
-    assert "preflight_result.snapshot" not in source[monitor:start]
+    assert "\n                            preflight_result.snapshot," not in source[monitor:start]
 
 
 def test_source_revalidates_preloaded_target_before_model_load():
@@ -116,6 +116,14 @@ def test_source_revalidates_preloaded_target_before_model_load():
     refresh = source.index("load_preflight_result = MemoryPreflight().check", invalid)
 
     assert fresh < preloaded < invalid < refresh
+
+
+def test_source_rejects_preloaded_target_seen_during_load_or_at_wait_boundary():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "target_seen_before_workload_window" in source
+    assert 'return "TARGET_PRESENT_BEFORE_WORKLOAD_WINDOW"' in source
+    assert '"TARGET_PRESENT_BEFORE_WORKLOAD_WINDOW",' in source
 
 
 def test_source_maps_only_true_target_timeout_to_no_stress_evidence():

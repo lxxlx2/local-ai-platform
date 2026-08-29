@@ -45,6 +45,7 @@ MODEL_DIR = Path("/Users/jerson/AI/models")
 MODEL_NAME = "Qwen3.6-35B-A3B-4bit"
 SWAP_GROWTH_LIMIT_GIB = 2.0
 ABSOLUTE_SWAP_LIMIT_GIB = 6.0
+MIN_SUSTAIN_SECONDS = 60.0
 
 BROWSER_PATTERNS = (
     "/Google Chrome.app/",
@@ -80,6 +81,13 @@ HARD_RESOURCE_REASONS = {
 class Scenario(StrEnum):
     STRESS_COLD_START = "STRESS_COLD_START"
     PRELOADED_COEXISTENCE = "PRELOADED_COEXISTENCE"
+
+
+class InitialWorkloadRejected(RuntimeError):
+    def __init__(self, verdict: str, reason: str, message: str):
+        super().__init__(message)
+        self.verdict = verdict
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -146,8 +154,11 @@ def runtime_command(port: int = QUALIFICATION_PORT) -> list[str]:
 
 
 def process_text() -> str:
+    # Use the executable column only.  Inspecting the full argv would let an
+    # unrelated process satisfy a workload gate merely by mentioning an app
+    # path in one of its arguments (for example, a shell command or test).
     return subprocess.check_output(
-        ["ps", "ax", "-o", "pid=,rss=,command="],
+        ["ps", "ax", "-o", "pid=,rss=,comm="],
         text=True,
     )
 
@@ -171,23 +182,45 @@ def target_present(target: str, raw: str | None = None) -> bool:
 
 def validate_initial_workload(scenario: Scenario, target: str, manifest, raw: str) -> None:
     if manifest.deliberate_reductions:
-        raise RuntimeError("stress qualification cannot contain deliberate workload reductions")
+        raise InitialWorkloadRejected(
+            "FAIL_RUNTIME",
+            "DELIBERATE_WORKLOAD_REDUCTION",
+            "stress qualification cannot contain deliberate workload reductions",
+        )
     if manifest.workload_class is not WorkloadClass.STRESS_COEXISTENCE:
-        raise RuntimeError("stress qualification requires STRESS_COEXISTENCE")
+        raise InitialWorkloadRejected(
+            "FAIL_RUNTIME",
+            "INVALID_WORKLOAD_CLASS",
+            "stress qualification requires STRESS_COEXISTENCE",
+        )
     if not browser_present(raw):
-        raise RuntimeError("browser missing; stress evidence must preserve normal browser workload")
+        raise InitialWorkloadRejected(
+            "NO_STRESS_EVIDENCE",
+            "BROWSER_MISSING_AT_INITIAL_VALIDATION",
+            "browser missing; stress evidence must preserve normal browser workload",
+        )
 
     present = target_present(target, raw)
     if scenario is Scenario.STRESS_COLD_START and not present:
-        raise RuntimeError(f"{target} must already be running for STRESS_COLD_START")
+        raise InitialWorkloadRejected(
+            "NO_STRESS_EVIDENCE",
+            "STRESS_TARGET_MISSING_AT_INITIAL_VALIDATION",
+            f"{target} must already be running for STRESS_COLD_START",
+        )
     if scenario is Scenario.PRELOADED_COEXISTENCE and present:
-        raise RuntimeError(
+        raise InitialWorkloadRejected(
+            "NO_STRESS_EVIDENCE",
+            "TARGET_PRESENT_AT_INITIAL_VALIDATION",
             f"{target} is already running; use STRESS_COLD_START or wait for a natural preloaded scenario"
         )
 
     occupied = {port: pids for port, pids in manifest.fixed_port_listeners if pids}
     if occupied:
-        raise RuntimeError(f"fixed port already occupied: {occupied}")
+        raise InitialWorkloadRejected(
+            "FAIL_RUNTIME",
+            "FIXED_PORT_OCCUPIED",
+            f"fixed port already occupied: {occupied}",
+        )
 
 
 def _json_get(url: str, timeout: float) -> dict:
@@ -256,10 +289,12 @@ class StressResourceMonitor:
         self.violation: str | None = None
         self.warning_observed = False
         self.target_entry_elapsed_seconds: float | None = None
+        self.target_seen_before_workload_window = False
         self._phase = "MODEL_LOAD"
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = 0.0
+        self._sample_lock = threading.Lock()
 
     def set_phase(self, phase: str) -> None:
         self._phase = phase
@@ -276,60 +311,78 @@ class StressResourceMonitor:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=max(2.0, self.interval * 3))
+            if self._thread.is_alive():
+                should_terminate = self.violation is None
+                if should_terminate:
+                    self.violation = "RESOURCE_OBSERVATION_FAILED"
+                if should_terminate and self.process.poll() is None:
+                    try:
+                        self.terminate_owned(self.process, graceful_timeout=5.0)
+                    except Exception:
+                        pass
+                return False
+        return True
 
     def _record(self) -> None:
-        snapshot = self.probe()
-        raw = self.process_reader()
-        browser = browser_present(raw)
-        target_now = target_present(self.target, raw)
-        elapsed = time.monotonic() - self._started
-        delta = snapshot.swap_used_gib - self.baseline.swap_used_gib
+        with self._sample_lock:
+            snapshot = self.probe()
+            raw = self.process_reader()
+            browser = browser_present(raw)
+            target_now = target_present(self.target, raw)
+            elapsed = time.monotonic() - self._started
+            delta = snapshot.swap_used_gib - self.baseline.swap_used_gib
 
-        if target_now and self.target_entry_elapsed_seconds is None:
-            self.target_entry_elapsed_seconds = elapsed
+            if target_now and self.target_entry_elapsed_seconds is None:
+                self.target_entry_elapsed_seconds = elapsed
+            if target_now and self._phase in {"MODEL_LOAD", "FIRST_FUNCTIONAL_TASK"}:
+                self.target_seen_before_workload_window = True
 
-        self.samples.append(
-            ResourceSample(
-                timestamp=datetime.now(UTC).isoformat(),
-                elapsed_seconds=elapsed,
-                phase=self._phase,
-                pressure=snapshot.pressure,
-                reclaimable_gib=snapshot.reclaimable_gib,
-                swap_used_gib=snapshot.swap_used_gib,
-                swap_delta_gib=delta,
-                browser_present=browser,
-                target_present=target_now,
+            self.samples.append(
+                ResourceSample(
+                    timestamp=datetime.now(UTC).isoformat(),
+                    elapsed_seconds=elapsed,
+                    phase=self._phase,
+                    pressure=snapshot.pressure,
+                    reclaimable_gib=snapshot.reclaimable_gib,
+                    swap_used_gib=snapshot.swap_used_gib,
+                    swap_delta_gib=delta,
+                    browser_present=browser,
+                    target_present=target_now,
+                )
             )
-        )
 
-        if snapshot.pressure == "WARNING":
-            self.warning_observed = True
-        if snapshot.pressure == "CRITICAL":
-            self.violation = "MEMORY_PRESSURE_CRITICAL"
-        elif delta > SWAP_GROWTH_LIMIT_GIB:
-            self.violation = "RELATIVE_SWAP_GROWTH_LIMIT"
-        elif snapshot.swap_used_gib > ABSOLUTE_SWAP_LIMIT_GIB:
-            self.violation = "ABSOLUTE_SWAP_LIMIT"
-        elif not browser:
-            self.violation = "BROWSER_WORKLOAD_LOST"
-        elif self.require_target and not target_now:
-            self.violation = "STRESS_TARGET_LOST"
+            if snapshot.pressure == "WARNING":
+                self.warning_observed = True
+            if snapshot.pressure == "CRITICAL":
+                self.violation = "MEMORY_PRESSURE_CRITICAL"
+            elif delta > SWAP_GROWTH_LIMIT_GIB:
+                self.violation = "RELATIVE_SWAP_GROWTH_LIMIT"
+            elif snapshot.swap_used_gib > ABSOLUTE_SWAP_LIMIT_GIB:
+                self.violation = "ABSOLUTE_SWAP_LIMIT"
+            elif not browser:
+                self.violation = "BROWSER_WORKLOAD_LOST"
+            elif self.require_target and not target_now:
+                self.violation = "STRESS_TARGET_LOST"
 
-        if self.violation and self.process.poll() is None:
-            self.terminate_owned(self.process, graceful_timeout=5.0)
+            if self.violation and self.process.poll() is None:
+                self.terminate_owned(self.process, graceful_timeout=5.0)
 
     def _run(self) -> None:
         while not self._stop.is_set() and self.violation is None:
             try:
                 self._record()
             except Exception:
-                self.violation = "RESOURCE_OBSERVATION_FAILED"
+                if self.violation is None:
+                    self.violation = "RESOURCE_OBSERVATION_FAILED"
                 if self.process.poll() is None:
-                    self.terminate_owned(self.process, graceful_timeout=5.0)
+                    try:
+                        self.terminate_owned(self.process, graceful_timeout=5.0)
+                    except Exception:
+                        pass
                 return
             self._stop.wait(self.interval)
 
@@ -353,6 +406,31 @@ def terminate_process_group(
         killpg(pgid, signal.SIGKILL)
         process.wait(timeout=10)
         return True
+
+
+class RuntimeExitedBeforeHealth(RuntimeError):
+    """The owned child exited before process-group ownership could be proved."""
+
+
+def establish_owned_process_group(process: subprocess.Popen) -> int:
+    """Prove the Popen child leads its new session without obscuring early exit."""
+    try:
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError as error:
+        returncode = process.poll()
+        if returncode is None:
+            try:
+                returncode = process.wait(timeout=0)
+            except subprocess.TimeoutExpired as timeout_error:
+                raise RuntimeError(
+                    "stress qualification process-group identity unavailable while child is live"
+                ) from timeout_error
+        raise RuntimeExitedBeforeHealth(
+            f"RUNTIME_EXITED_BEFORE_HEALTH:{returncode}"
+        ) from error
+    if pgid != process.pid:
+        raise RuntimeError("stress qualification process is not leader of its owned process group")
+    return pgid
 
 
 def wait_health_with_monitor(
@@ -390,6 +468,17 @@ def wait_for_target_entry(
     timeout: float,
 ) -> str | None:
     """Return None when target enters, otherwise an explicit failure reason."""
+    if monitor.violation:
+        return monitor.violation
+    returncode = process.poll()
+    if returncode is not None:
+        return monitor.violation or f"RUNTIME_EXITED_WAITING_FOR_TARGET:{returncode}"
+    try:
+        if target_present(target):
+            return "TARGET_PRESENT_BEFORE_WORKLOAD_WINDOW"
+    except Exception as error:
+        return f"TARGET_OBSERVATION_FAILED:{type(error).__name__}"
+
     print(f"WAITING_FOR_USER_WORKLOAD={target}", flush=True)
     print(
         f"Open/use {target} normally now. The harness will observe it but will not start or control it.",
@@ -445,8 +534,12 @@ def main(argv: list[str] | None = None) -> int:
     scenario = Scenario(args.scenario)
     target = args.target
 
-    if args.qualification_port in PRODUCTION_PORTS:
-        raise SystemExit("stress qualification port must not be a production/other qualification port")
+    if args.qualification_port != QUALIFICATION_PORT:
+        raise SystemExit(f"stress qualification must use isolated port {QUALIFICATION_PORT}")
+    if args.sustain_seconds < MIN_SUSTAIN_SECONDS:
+        raise SystemExit(
+            f"stress qualification requires at least {MIN_SUSTAIN_SECONDS:g} sustain seconds"
+        )
     if not OMLX_BIN.exists():
         raise SystemExit(f"missing oMLX runtime: {OMLX_BIN}")
 
@@ -474,19 +567,39 @@ def main(argv: list[str] | None = None) -> int:
     preflight_reason = "NOT_RUN"
     baseline_snapshot: MemorySnapshot | None = None
 
-    raw = process_text()
-    probe = WorkloadManifestProbe(
-        ports=(*PRODUCTION_PORTS, args.qualification_port),
-        top_n=50,
-    )
-    manifest = probe.capture(WorkloadClass.STRESS_COEXISTENCE)
-    write_json(manifest_path, manifest.to_dict())
-    validate_initial_workload(scenario, target, manifest, raw)
+    initial_failure: tuple[str, str] | None = None
+    try:
+        raw = process_text()
+        probe = WorkloadManifestProbe(
+            ports=(*PRODUCTION_PORTS, args.qualification_port),
+            top_n=50,
+        )
+        manifest = probe.capture(WorkloadClass.STRESS_COEXISTENCE)
+        write_json(manifest_path, manifest.to_dict())
+        validate_initial_workload(scenario, target, manifest, raw)
+    except InitialWorkloadRejected as error:
+        initial_failure = (error.verdict, error.reason)
+    except Exception as error:
+        initial_failure = (
+            "FAIL_RUNTIME",
+            f"INITIAL_OBSERVATION_FAILED:{type(error).__name__}",
+        )
 
-    preflight_result = MemoryPreflight().check(QWEN36.expected_memory_gib or 0)
-    preflight_reason = preflight_result.reason
-    baseline_snapshot = preflight_result.snapshot
-    if not preflight_result.allowed:
+    preflight_result = None
+    if initial_failure is None:
+        try:
+            preflight_result = MemoryPreflight().check(QWEN36.expected_memory_gib or 0)
+            preflight_reason = preflight_result.reason
+            baseline_snapshot = preflight_result.snapshot
+        except Exception as error:
+            initial_failure = (
+                "FAIL_RUNTIME",
+                f"RESOURCE_PREFLIGHT_FAILED:{type(error).__name__}",
+            )
+
+    if initial_failure is not None:
+        verdict, reason = initial_failure
+    elif preflight_result is not None and not preflight_result.allowed:
         verdict = "STRESS_BLOCKED"
         reason = f"RESOURCE_PREFLIGHT_DENIED:{preflight_result.reason}"
     elif not ports_clear((*PRODUCTION_PORTS, args.qualification_port)):
@@ -530,11 +643,7 @@ def main(argv: list[str] | None = None) -> int:
                             start_new_session=True,
                         )
                         process_pid = process.pid
-                        process_group_id = os.getpgid(process.pid)
-                        if process_group_id != process_pid:
-                            raise RuntimeError(
-                                "stress qualification process group ownership proof failed"
-                            )
+                        process_group_id = establish_owned_process_group(process)
 
                         monitor = StressResourceMonitor(
                             process,
@@ -580,12 +689,17 @@ def main(argv: list[str] | None = None) -> int:
                                 else:
                                     if scenario is Scenario.PRELOADED_COEXISTENCE:
                                         monitor.set_phase("WAITING_FOR_USER_WORKLOAD")
-                                        entry_failure = wait_for_target_entry(
-                                            process,
-                                            monitor,
-                                            target,
-                                            args.target_wait_seconds,
-                                        )
+                                        if monitor.target_seen_before_workload_window:
+                                            entry_failure = (
+                                                "TARGET_PRESENT_BEFORE_WORKLOAD_WINDOW"
+                                            )
+                                        else:
+                                            entry_failure = wait_for_target_entry(
+                                                process,
+                                                monitor,
+                                                target,
+                                                args.target_wait_seconds,
+                                            )
                                         if entry_failure:
                                             reason = entry_failure
                                             entered = False
@@ -654,7 +768,14 @@ def main(argv: list[str] | None = None) -> int:
                                                     reason = "STRESS_QUALIFICATION_COMPLETE"
 
                         if monitor:
-                            monitor.stop()
+                            monitor.set_phase("FINAL_RESOURCE_CHECK")
+                            try:
+                                monitor._record()
+                            except Exception:
+                                monitor.violation = "RESOURCE_OBSERVATION_FAILED"
+                            monitor_stopped = monitor.stop()
+                            if not monitor_stopped or monitor.violation:
+                                reason = monitor.violation or "RESOURCE_OBSERVATION_FAILED"
                             with samples_path.open("w", encoding="utf-8") as handle:
                                 for sample in monitor.samples:
                                     handle.write(
@@ -668,22 +789,39 @@ def main(argv: list[str] | None = None) -> int:
                             and second_functional
                             and second_complete
                         ):
-                            verdict = (
-                                "PASS_WITH_WARNING"
-                                if monitor and monitor.warning_observed
-                                else "PASS"
-                            )
+                            stress_samples = [
+                                item
+                                for item in (monitor.samples if monitor else [])
+                                if item.phase
+                                in {"STRESS_COEXISTENCE", "SECOND_FUNCTIONAL_TASK"}
+                            ]
+                            if not stress_samples:
+                                reason = "RESOURCE_OBSERVATION_FAILED"
+                                verdict = "STRESS_BLOCKED"
+                            elif not all(item.target_present for item in stress_samples):
+                                reason = "STRESS_TARGET_LOST"
+                                verdict = "STRESS_BLOCKED"
+                            else:
+                                verdict = (
+                                    "PASS_WITH_WARNING"
+                                    if monitor and monitor.warning_observed
+                                    else "PASS"
+                                )
                         elif reason in HARD_RESOURCE_REASONS:
                             verdict = "STRESS_BLOCKED"
                         elif reason in {
                             "TARGET_WORKLOAD_NOT_OBSERVED",
                             "TARGET_PRESENT_BEFORE_MODEL_LOAD",
+                            "TARGET_PRESENT_BEFORE_WORKLOAD_WINDOW",
                             "STRESS_TARGET_MISSING_BEFORE_MODEL_LOAD",
                             "BROWSER_MISSING_BEFORE_MODEL_LOAD",
                         }:
                             verdict = "NO_STRESS_EVIDENCE"
                         else:
                             verdict = "FAIL_RUNTIME"
+                except RuntimeExitedBeforeHealth as error:
+                    reason = str(error)
+                    verdict = "FAIL_RUNTIME"
                 except Exception as error:
                     if reason == "UNCLASSIFIED":
                         reason = f"RUNTIME_SETUP_FAILED:{type(error).__name__}"
@@ -702,11 +840,23 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         cleanup_ok = True
 
-    if not ports_clear(PRODUCTION_PORTS):
-        cleanup_ok = False
+    try:
+        qualification_port_clear = ports_clear((args.qualification_port,))
+        production_ports_clear = ports_clear(PRODUCTION_PORTS)
+    except Exception:
+        qualification_port_clear = False
+        production_ports_clear = False
         if verdict in {"PASS", "PASS_WITH_WARNING"}:
             verdict = "FAIL_RUNTIME"
-            reason = "PRODUCTION_OR_OTHER_QUALIFICATION_PORT_MUTATION"
+            reason = "FINAL_PORT_OBSERVATION_FAILED"
+    else:
+        if process is None:
+            cleanup_ok = qualification_port_clear
+        if not production_ports_clear:
+            cleanup_ok = False
+            if verdict in {"PASS", "PASS_WITH_WARNING"}:
+                verdict = "FAIL_RUNTIME"
+                reason = "PRODUCTION_OR_OTHER_QUALIFICATION_PORT_MUTATION"
 
     samples = monitor.samples if monitor else []
     peak_delta = max((item.swap_delta_gib for item in samples), default=0.0)
@@ -718,7 +868,13 @@ def main(argv: list[str] | None = None) -> int:
         if item.reclaimable_gib is not None
     ]
     min_reclaimable = min(reclaimable) if reclaimable else None
-    browser_throughout = all(item.browser_present for item in samples) if samples else browser_present()
+    if samples:
+        browser_throughout = all(item.browser_present for item in samples)
+    else:
+        try:
+            browser_throughout = browser_present()
+        except Exception:
+            browser_throughout = False
     stress_samples = [
         item
         for item in samples

@@ -1,6 +1,9 @@
 import runpy
+import json
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from local_ai_control.services.models import MemorySnapshot
 from local_ai_control.services.workload_admission import WorkloadClass, WorkloadManifestProbe
@@ -95,6 +98,31 @@ def test_unity_editor_detection_does_not_accept_unity_hub_only():
 def test_ide_detection_accepts_vscode():
     assert NS["target_present"]("IDE", _raw(ide=True))
     assert not NS["target_present"]("IDE", _raw(ide=False))
+
+
+def test_process_probe_uses_executable_column_not_full_argv():
+    with patch.object(NS["subprocess"], "check_output", return_value="") as check:
+        NS["process_text"]()
+
+    assert check.call_args.args[0] == ["ps", "ax", "-o", "pid=,rss=,comm="]
+
+
+def test_workload_detection_rejects_app_path_mentioned_only_in_argv():
+    unrelated = (
+        "9 1000 /bin/zsh -c echo "
+        "/Applications/Unity/Hub/Editor/6000.3.23f1/Unity.app/Contents/MacOS/Unity"
+    )
+
+    # Detection receives executable-only process snapshots in production.  An
+    # argv-shaped fixture documents the adversarial false-positive that the
+    # process probe must exclude before this helper is called.
+    assert NS["TARGET_PATTERNS"]["UNITY_EDITOR"][0] in unrelated
+    with patch.object(
+        NS["subprocess"],
+        "check_output",
+        return_value="9 1000 /bin/zsh\n",
+    ):
+        assert not NS["target_present"]("UNITY_EDITOR")
 
 
 def test_cold_start_requires_browser_and_target_already_present():
@@ -241,6 +269,74 @@ def test_monitor_blocks_when_browser_or_required_target_disappears():
     assert target_lost.violation == "STRESS_TARGET_LOST"
 
 
+def test_monitor_stop_fails_closed_if_sampler_thread_does_not_exit():
+    class StuckThread:
+        def join(self, timeout):
+            self.timeout = timeout
+
+        def is_alive(self):
+            return True
+
+    terminations = []
+    monitor = NS["StressResourceMonitor"](
+        FakeProcess(),
+        _snapshot(),
+        "IDE",
+        require_target=True,
+        terminate_owned=lambda process, graceful_timeout: terminations.append(
+            (process.pid, graceful_timeout)
+        ),
+    )
+    monitor._thread = StuckThread()
+
+    assert monitor.stop() is False
+    assert monitor.violation == "RESOURCE_OBSERVATION_FAILED"
+    assert terminations == [(4242, 5.0)]
+
+
+def test_monitor_stop_preserves_existing_hard_violation():
+    class StuckThread:
+        def join(self, timeout):
+            pass
+
+        def is_alive(self):
+            return True
+
+    terminations = []
+    monitor = NS["StressResourceMonitor"](
+        FakeProcess(),
+        _snapshot(),
+        "IDE",
+        require_target=True,
+        terminate_owned=lambda *args, **kwargs: terminations.append(True),
+    )
+    monitor.violation = "RELATIVE_SWAP_GROWTH_LIMIT"
+    monitor._thread = StuckThread()
+
+    assert monitor.stop() is False
+    assert monitor.violation == "RELATIVE_SWAP_GROWTH_LIMIT"
+    assert terminations == []
+
+
+def test_monitor_run_preserves_resource_reason_if_owned_cleanup_raises():
+    monitor = NS["StressResourceMonitor"](
+        FakeProcess(),
+        _snapshot(swap=1.0),
+        "IDE",
+        require_target=True,
+        probe=lambda: _snapshot(swap=3.1),
+        process_reader=lambda: _raw(browser=True, ide=True),
+        terminate_owned=lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic cleanup failure")
+        ),
+    )
+    monitor._started = 1.0
+
+    monitor._run()
+
+    assert monitor.violation == "RELATIVE_SWAP_GROWTH_LIMIT"
+
+
 def test_preloaded_monitor_can_wait_without_target_then_require_it():
     Monitor = NS["StressResourceMonitor"]
     state = {"target": False}
@@ -267,6 +363,26 @@ def test_preloaded_monitor_can_wait_without_target_then_require_it():
     assert monitor.violation is None
     assert monitor.samples[-1].target_present is True
     assert monitor.target_entry_elapsed_seconds == 2.0
+
+
+def test_preloaded_monitor_records_target_seen_before_workload_window():
+    Monitor = NS["StressResourceMonitor"]
+    monitor = Monitor(
+        FakeProcess(),
+        _snapshot(),
+        "IDE",
+        require_target=False,
+        probe=lambda: _snapshot(),
+        process_reader=lambda: _raw(browser=True, ide=True),
+        terminate_owned=lambda *args, **kwargs: None,
+    )
+    monitor._started = 1.0
+
+    with patch.object(NS["time"], "monotonic", return_value=2.0):
+        monitor._record()
+
+    assert monitor.violation is None
+    assert monitor.target_seen_before_workload_window is True
 
 
 def test_health_gate_preserves_resource_violation():
@@ -330,6 +446,19 @@ def test_target_wait_preserves_monitor_violation_and_runtime_exit():
     assert wait_target(FakeProcess(), Monitor(), "IDE", 0.0) == "TARGET_WORKLOAD_NOT_OBSERVED"
 
 
+def test_target_wait_rejects_target_already_present_at_window_boundary():
+    wait_target = NS["wait_for_target_entry"]
+
+    class Monitor:
+        violation = None
+
+    with patch.object(NS["subprocess"], "check_output", return_value=_raw(ide=True)):
+        assert (
+            wait_target(FakeProcess(), Monitor(), "IDE", 1.0)
+            == "TARGET_PRESENT_BEFORE_WORKLOAD_WINDOW"
+        )
+
+
 def test_cleanup_signals_only_exact_owned_process_group():
     terminate = NS["terminate_process_group"]
     process = FakeProcess()
@@ -357,6 +486,75 @@ def test_cleanup_refuses_non_owned_process_group():
             raise AssertionError("non-owned process group was signalled")
 
 
+def test_process_group_proof_classifies_child_exit_before_health():
+    establish = NS["establish_owned_process_group"]
+    process = FakeProcess(running=False, returncode=23)
+
+    with patch.object(NS["os"], "getpgid", side_effect=ProcessLookupError):
+        try:
+            establish(process)
+        except NS["RuntimeExitedBeforeHealth"] as error:
+            assert str(error) == "RUNTIME_EXITED_BEFORE_HEALTH:23"
+        else:
+            raise AssertionError("early child exit was not classified explicitly")
+
+
+def test_main_rejects_weakened_port_or_sustain_duration():
+    main = NS["main"]
+
+    with pytest.raises(SystemExit, match="isolated port 8013"):
+        main(["--scenario", "STRESS_COLD_START", "--target", "IDE", "--qualification-port", "9000"])
+    with pytest.raises(SystemExit, match="at least 60 sustain seconds"):
+        main(["--scenario", "STRESS_COLD_START", "--target", "IDE", "--sustain-seconds", "0"])
+
+
+def test_initial_workload_rejection_writes_parseable_result(tmp_path):
+    manifest = _manifest(_raw(browser=False, ide=True))
+
+    class FakeProbe:
+        def __init__(self, **kwargs):
+            pass
+
+        def capture(self, workload_class):
+            return manifest
+
+    class ForbiddenPreflight:
+        def check(self, *_):
+            raise AssertionError("preflight must not run after initial rejection")
+
+    fake_omlx = tmp_path / "omlx"
+    fake_omlx.touch()
+    output = tmp_path / "result-dir"
+    with patch.dict(
+        NS["main"].__globals__,
+        {
+            "OMLX_BIN": fake_omlx,
+            "process_text": lambda: _raw(browser=False, ide=True),
+            "WorkloadManifestProbe": FakeProbe,
+            "MemoryPreflight": ForbiddenPreflight,
+            "ports_clear": lambda ports: True,
+        },
+    ):
+        returncode = NS["main"](
+            [
+                "--scenario",
+                "STRESS_COLD_START",
+                "--target",
+                "IDE",
+                "--output-dir",
+                str(output),
+                "--sustain-seconds",
+                "60",
+            ]
+        )
+
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    assert returncode == 1
+    assert result["verdict"] == "NO_STRESS_EVIDENCE"
+    assert result["reason"] == "BROWSER_MISSING_AT_INITIAL_VALIDATION"
+    assert result["cleanup_ok"] is True
+
+
 def test_source_uses_fresh_load_baseline_before_health_and_no_user_app_control():
     source = SCRIPT.read_text(encoding="utf-8")
     lower = source.lower()
@@ -370,7 +568,7 @@ def test_source_uses_fresh_load_baseline_before_health_and_no_user_app_control()
     first_task = source.index('monitor.set_phase("FIRST_FUNCTIONAL_TASK")', health)
 
     assert refresh < spawn < create < baseline < start < health < first_task
-    assert "preflight_result.snapshot" not in source[create:start]
+    assert "\n                            preflight_result.snapshot," not in source[create:start]
     assert "fresh_raw = process_text()" in source[:refresh]
     assert "TARGET_PRESENT_BEFORE_MODEL_LOAD" in source[:refresh]
 
