@@ -1,3 +1,4 @@
+import local_ai_control.services.workload_admission as workload_admission
 from local_ai_control.services.models import (
     MemoryPreflightResult,
     MemorySnapshot,
@@ -81,6 +82,45 @@ def test_manifest_captures_material_apps_and_fixed_ports_read_only():
         ("listeners", 8001),
         ("listeners", 8011),
     ]
+
+
+def test_default_process_reader_uses_executable_identity_not_full_argv(monkeypatch):
+    observed = {}
+
+    def fake_check_output(args, *, text):
+        observed["args"] = args
+        observed["text"] = text
+        return "101 1024 /bin/zsh\n"
+
+    monkeypatch.setattr(
+        workload_admission.subprocess,
+        "check_output",
+        fake_check_output,
+    )
+
+    raw = workload_admission._default_process_reader()
+
+    assert raw == "101 1024 /bin/zsh\n"
+    assert observed == {
+        "args": ["ps", "ax", "-o", "pid=,rss=,comm="],
+        "text": True,
+    }
+
+
+def test_unity_hub_alone_does_not_count_as_unity_editor_stress():
+    probe = WorkloadManifestProbe(
+        process_reader=lambda: (
+            "101 1048576 "
+            "/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
+        ),
+        memory_probe=_snapshot,
+        listeners=lambda _port: (),
+    )
+
+    manifest = probe.capture(WorkloadClass.REPRESENTATIVE_WORKLOAD)
+
+    categories = {item.category for item in manifest.material_applications}
+    assert "UNITY" not in categories
 
 
 def test_material_app_detection_scans_all_processes_not_only_top_n():
