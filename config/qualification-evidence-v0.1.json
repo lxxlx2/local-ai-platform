@@ -1,0 +1,42 @@
+{
+  "schema_version": "0.1",
+  "policy_revision": "workload-qualification-v1",
+  "host_scope": {
+    "id": "mac-arm64-48g-workstation-v1",
+    "platform": "darwin",
+    "arch": "arm64",
+    "memory_gib": 48
+  },
+  "records": [
+    {
+      "profile_id": "local-qwen36",
+      "model_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+      "deployment_mode": "ON_DEMAND_COLD_START",
+      "workload_class": "REPRESENTATIVE_WORKLOAD",
+      "stress_category": null,
+      "status": "PASS",
+      "reason": "QUALIFICATION_COMPLETE",
+      "candidate_ref_type": "GIT_COMMIT",
+      "candidate_ref": "ad444f54621a9dd45f6409306ada20f630a3d32a",
+      "source_ref": "github:issue/24#issuecomment-5461045048",
+      "result_artifact": "/tmp/qwen36-representative-live-20260829-141858",
+      "recorded_date": "2026-08-29",
+      "deliberate_reductions": []
+    },
+    {
+      "profile_id": "local-qwen38",
+      "model_id": "mlx-community/Qwen3.8-27B-8bit",
+      "deployment_mode": "ON_DEMAND_COLD_START",
+      "workload_class": "REPRESENTATIVE_WORKLOAD",
+      "stress_category": null,
+      "status": "BLOCKED",
+      "reason": "RELATIVE_SWAP_GROWTH_LIMIT",
+      "candidate_ref_type": "STAGED_CONTENT_SHA256",
+      "candidate_ref": "0c72030c669ba2c693c90ce5762125802394518a4b4e056ba15ac4608c19eaaf",
+      "source_ref": "github:issue/19#issuecomment-5460621167",
+      "result_artifact": "/tmp/qwen38-phase2-safe-live-20260829-123124",
+      "recorded_date": "2026-08-29",
+      "deliberate_reductions": []
+    }
+  ]
+}
