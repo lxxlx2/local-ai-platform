@@ -217,3 +217,41 @@ def test_harness_contains_no_user_application_control_commands():
     assert "application \"unity\" quit" not in source
     assert "start_new_session=true" in source
     assert "os.killpg" in source
+
+
+def test_health_gate_preserves_load_time_resource_violation():
+    wait_health_with_monitor = NS["wait_health_with_monitor"]
+
+    class FakeProcess:
+        returncode = -15
+
+        def poll(self):
+            return -15
+
+    class FakeMonitor:
+        violation = "RELATIVE_SWAP_GROWTH_LIMIT"
+
+    with patch.object(
+        NS["time"],
+        "monotonic",
+        side_effect=[1.0, 1.1],
+    ):
+        result = wait_health_with_monitor(
+            FakeProcess(),
+            8012,
+            10.0,
+            FakeMonitor(),
+        )
+
+    assert result == "RELATIVE_SWAP_GROWTH_LIMIT"
+
+
+def test_monitor_starts_before_health_and_uses_preflight_baseline():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    monitor_create = source.index("monitor = ResourceMonitor(\n                process,\n                preflight_result.snapshot")
+    monitor_start = source.index("monitor.start()", monitor_create)
+    health_gate = source.index("load_violation = wait_health_with_monitor", monitor_start)
+    functional_phase = source.index('monitor.set_phase("FUNCTIONAL_TASK")', health_gate)
+
+    assert monitor_create < monitor_start < health_gate < functional_phase
