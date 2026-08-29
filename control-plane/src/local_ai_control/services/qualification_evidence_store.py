@@ -1,8 +1,8 @@
 """Read-only, versioned qualification evidence store.
 
-Qualification outcomes are durable policy inputs.  This loader intentionally
+Qualification outcomes are durable policy inputs. This loader intentionally
 contains no write API: changing PASS/BLOCKED evidence requires a reviewed Git
-change to the versioned JSON ledger.  Runtime code therefore cannot promote
+change to the versioned JSON ledger. Runtime code therefore cannot promote
 itself by mutating local qualification state.
 """
 from __future__ import annotations
@@ -87,11 +87,13 @@ class QualificationEvidenceStore:
         *,
         registry: ModelRegistry | None = None,
         config_path: Path | str = EVIDENCE_PATH,
-        expected_host_scope: str | None = DEFAULT_HOST_SCOPE,
+        expected_host_scope: str = DEFAULT_HOST_SCOPE,
     ):
+        if not isinstance(expected_host_scope, str) or not expected_host_scope.strip():
+            raise ValueError("qualification evidence expected host scope is required")
         self.registry = registry or ModelRegistry()
         self.config_path = Path(config_path)
-        self.expected_host_scope = expected_host_scope
+        self.expected_host_scope = expected_host_scope.strip()
         self.host_scope, self.records = self._load()
 
     @staticmethod
@@ -143,8 +145,6 @@ class QualificationEvidenceStore:
         except (TypeError, ValueError) as error:
             raise ValueError("invalid qualification evidence enum value") from error
 
-        # UNKNOWN is represented by absence. Persisted records must be an
-        # observed positive qualification or a conservative blocking result.
         if status not in {EvidenceStatus.PASS, EvidenceStatus.BLOCKED}:
             raise ValueError("persisted qualification evidence cannot be UNKNOWN")
         if workload_class is WorkloadClass.LAB:
@@ -227,7 +227,7 @@ class QualificationEvidenceStore:
             raise ValueError("qualification evidence policy revision mismatch")
 
         host_scope = self._host_scope(payload["host_scope"])
-        if self.expected_host_scope is not None and host_scope.scope_id != self.expected_host_scope:
+        if host_scope.scope_id != self.expected_host_scope:
             raise ValueError("qualification evidence host scope mismatch")
         if self.expected_host_scope == DEFAULT_HOST_SCOPE and (
             host_scope.platform != DEFAULT_HOST_PLATFORM
