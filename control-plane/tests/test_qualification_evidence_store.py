@@ -52,7 +52,7 @@ def test_checked_in_ledger_has_current_representative_evidence():
     assert qwen38 is not None
     assert qwen38.status is EvidenceStatus.BLOCKED
     assert qwen38.reason == "RELATIVE_SWAP_GROWTH_LIMIT"
-    assert qwen38.source_ref == "github:issue/19#issuecomment-5460597710"
+    assert qwen38.source_ref == "github:issue/19#issuecomment-5460621167"
 
 
 def test_router_adapter_preserves_unknown_stress_and_mode_separation():
