@@ -57,7 +57,7 @@ class WorkloadAdmissionResult:
     profile_id: str
     workload_class: WorkloadClass
     allowed: bool
-    promotion_eligible: bool
+    qualification_evidence_eligible: bool
     reason: str
     preflight_reason: str
     snapshot: MemorySnapshot
@@ -90,7 +90,7 @@ def _default_process_reader() -> str:
     )
 
 
-def _parse_processes(raw: str, top_n: int) -> tuple[ProcessSample, ...]:
+def _parse_processes(raw: str) -> tuple[ProcessSample, ...]:
     samples: list[ProcessSample] = []
     for line in raw.splitlines():
         parts = line.strip().split(maxsplit=2)
@@ -105,7 +105,7 @@ def _parse_processes(raw: str, top_n: int) -> tuple[ProcessSample, ...]:
             continue
         samples.append(ProcessSample(pid, rss_kib / 1024.0, parts[2]))
     samples.sort(key=lambda item: item.rss_mib, reverse=True)
-    return tuple(samples[: max(1, int(top_n))])
+    return tuple(samples)
 
 
 def _material_applications(processes: Iterable[ProcessSample]) -> tuple[MaterialApplication, ...]:
@@ -156,15 +156,15 @@ class WorkloadManifestProbe:
         if reductions and declared is not WorkloadClass.LAB:
             raise ValueError("deliberately reduced workload must be classified as LAB")
 
-        processes = _parse_processes(self.process_reader(), self.top_n)
+        all_processes = _parse_processes(self.process_reader())
         memory = self.memory_probe()
         fixed_ports = tuple((port, tuple(self.listeners(port))) for port in self.ports)
         return WorkloadManifest(
             workload_class=declared,
             timestamp=datetime.now(UTC).isoformat(),
             memory=memory,
-            top_processes=processes,
-            material_applications=_material_applications(processes),
+            top_processes=all_processes[: self.top_n],
+            material_applications=_material_applications(all_processes),
             fixed_port_listeners=fixed_ports,
             deliberate_reductions=reductions,
         )
@@ -183,7 +183,7 @@ class WorkloadAdmissionPolicy:
                 profile_id=profile.profile_id,
                 workload_class=manifest.workload_class,
                 allowed=False,
-                promotion_eligible=False,
+                qualification_evidence_eligible=False,
                 reason="RESOURCE_PREFLIGHT_DENIED",
                 preflight_reason=check.reason,
                 snapshot=check.snapshot,
@@ -194,7 +194,7 @@ class WorkloadAdmissionPolicy:
             profile_id=profile.profile_id,
             workload_class=manifest.workload_class,
             allowed=True,
-            promotion_eligible=not lab_only,
+            qualification_evidence_eligible=not lab_only,
             reason="LAB_ONLY" if lab_only else "RESOURCE_ADMISSION_PASS",
             preflight_reason=check.reason,
             snapshot=check.snapshot,
