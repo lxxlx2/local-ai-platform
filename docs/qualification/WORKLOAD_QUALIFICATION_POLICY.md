@@ -14,6 +14,8 @@ The harness may terminate only processes that it spawned and whose exact identit
 
 If a model can run only after normal user applications are closed, that result is diagnostic evidence and MUST NOT be used to promote the model/context tier as the normal production default.
 
+When user workload and local AI resource demand conflict, the local AI runtime yields to the user's applications. The runtime may unload or downgrade its own heavy model, but it must not make desktop applications yield to the model.
+
 ## 2. Workload classes
 
 Every live local-model qualification must declare one workload class.
@@ -79,7 +81,7 @@ Functional success and resource qualification must be reported separately.
 A production default may be promoted only when:
 - required static tests pass;
 - required independent review passes;
-- REPRESENTATIVE_WORKLOAD cold-load admission passes;
+- REPRESENTATIVE_WORKLOAD cold-load admission passes for on-demand mode, or the separately declared preloaded-daemon mode passes its own representative coexistence qualification;
 - required representative functional stages pass within resource gates;
 - cleanup/recovery passes;
 - production registry/runtime changes, if any, pass their own Owner gate.
@@ -93,6 +95,7 @@ A REPRESENTATIVE_WORKLOAD resource failure is valid architecture evidence. Do no
 The user should not be asked to close normal work applications so that the AI runtime can start.
 
 If a large local model fails representative cold-load or coexistence admission, the runtime architecture must handle that condition by policy, for example:
+- gracefully unload its own heavy model when desktop workload rises beyond its qualified coexistence boundary;
 - keep the request queued until resources naturally recover;
 - route to a smaller qualified local model;
 - use an already-approved cloud/provider fallback when privacy/routing policy allows;
@@ -101,6 +104,18 @@ If a large local model fails representative cold-load or coexistence admission, 
 Automatic termination or suspension of user applications is forbidden.
 
 This means local-model selection is workload-aware. A model may be qualified for one workload class and blocked for another.
+
+Two deployment modes must be distinguished when relevant:
+
+### ON_DEMAND_COLD_START
+
+The model is loaded while the user's representative workload is already present. This mode must pass representative cold-load admission before it can be described as a normal on-demand default.
+
+### PRELOADED_DAEMON
+
+The model is intentionally loaded as a persistent service before later desktop applications arrive. This is a separate production mode, not a workaround that retroactively converts a cold-start failure into a pass.
+
+A PRELOADED_DAEMON qualification must test the actual user workload arriving after model load and must prove that the service can yield safely. If Chrome, Unity, or another normal workload pushes the host beyond the qualified boundary, the heavy model must be able to unload or downgrade itself without terminating user applications.
 
 ## 7. Current Qwen3.8 Phase 2 interpretation
 
@@ -127,18 +142,21 @@ This proves the context/runtime path can function in a reduced-load environment.
 
 The existing 16,384 TOTAL production context envelope remains unchanged unless a separate representative-workload promotion process says otherwise. 24,576 TOTAL default remains NOT QUALIFIED on the current target. 32K remains NOT TESTED / NOT JUSTIFIED.
 
+The current evidence also does not yet qualify PRELOADED_DAEMON coexistence. That mode, if desired for 7x24 operation, requires a separate representative test in which normal applications such as the browser and Unity are allowed to arrive naturally while the model is already loaded, with the AI service yielding first if resource limits are crossed.
+
 ## 8. Test-sequence guidance
 
 For future local-model qualification:
 
 1. Capture the current workload manifest without changing it.
 2. Run static and independent-review gates.
-3. Run REPRESENTATIVE_WORKLOAD cold-load admission first.
+3. For ON_DEMAND_COLD_START, run REPRESENTATIVE_WORKLOAD cold-load admission first.
 4. If representative cold-load fails a resource gate, stop escalation and record the boundary.
 5. LAB testing may follow only when useful for diagnosis; label it LAB explicitly.
-6. Run STRESS_COEXISTENCE only for plausible workloads that matter to actual use, such as Unity coexistence.
-7. Never close normal applications as an automated prerequisite to qualification.
-8. Convert representative failures into routing/admission requirements rather than benchmark manipulation.
+6. If PRELOADED_DAEMON is a real intended deployment mode, test it separately by keeping the model loaded while representative user applications arrive; do not close those applications for the test.
+7. Run STRESS_COEXISTENCE only for plausible workloads that matter to actual use, such as Unity coexistence.
+8. Never close normal applications as an automated prerequisite to qualification.
+9. Convert representative failures into routing/admission/self-unload requirements rather than benchmark manipulation.
 
 ## 9. Evidence language
 
@@ -149,5 +167,6 @@ Qualification reports should use these terms consistently:
 - `LAB_ONLY`: result obtained under intentionally reduced workload and not valid for normal-production promotion.
 - `REPRESENTATIVE_BLOCKED`: intended normal workload could not safely admit or sustain the model.
 - `STRESS_COEXISTENCE_BLOCKED`: plausible heavier coexistence workload exceeded the qualified boundary.
+- `PRELOADED_DAEMON_QUALIFIED`: representative coexistence passed for the explicit preloaded service mode; this does not imply on-demand cold-start qualification.
 
 A report must never collapse these categories into a single generic PASS.
