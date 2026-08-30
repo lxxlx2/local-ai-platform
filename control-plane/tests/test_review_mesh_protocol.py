@@ -481,7 +481,7 @@ def identity(
 ):
     values = dict(
         authenticated_adapter_principal=(
-            "adapter:gemini-review"
+            review_request.required_adapter_principal
         ),
         authentication_method="api-key-v1",
         credential_version="keychain-v1",
@@ -1006,4 +1006,25 @@ def test_result_for_retry_must_use_retry_identity():
         result_payload(
             retry,
             old_identity,
+        )
+
+
+def test_identity_rejects_wrong_authenticated_adapter_principal():
+    req = request(
+        campaign()
+    )
+
+    observed = identity(
+        req,
+        authenticated_adapter_principal=(
+            "adapter:wrong-reviewer"
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="adapter principal mismatch",
+    ):
+        observed.validate_for_request(
+            req
         )

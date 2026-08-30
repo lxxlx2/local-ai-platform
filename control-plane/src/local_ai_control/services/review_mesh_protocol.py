@@ -1243,6 +1243,14 @@ class IdentityEnvelopeV1:
         request: ReviewRequestV1,
     ) -> None:
         if (
+            self.authenticated_adapter_principal
+            != request.required_adapter_principal
+        ):
+            raise ValueError(
+                "identity adapter principal mismatch"
+            )
+
+        if (
             self.request_nonce
             != request.request_nonce
         ):
