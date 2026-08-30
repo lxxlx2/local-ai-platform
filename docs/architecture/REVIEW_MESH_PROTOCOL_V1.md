@@ -95,28 +95,121 @@ fails review preparation closed.
 
 ## 5. Monotonic generations and review campaigns
 
-For each stable task ID the orchestrator persists two unsigned 64-bit monotonic
-counters:
+For each stable task ID the orchestrator persists two unsigned 64-bit
+monotonic counters:
 
 - `candidate_generation`: incremented for every accepted Producer/Fixer
   publication or active candidate-binding change, including a base change or a
   branch moving back to a previously seen SHA;
-- `review_generation`: incremented whenever a new review campaign is created,
-  including a gate rerun, objective/scope/policy/privacy/quorum/registry change,
-  or retry that is intended to collect a new vote.
+- `review_generation`: incremented only when the campaign-common semantic
+  review context changes or the orchestrator explicitly replaces that
+  campaign.
+
+Campaign-common semantic changes include:
+
+- candidate/base binding;
+- objective or acceptance criteria;
+- review scope or reviewed material;
+- deterministic gate evidence;
+- contributor history;
+- protocol/policy revision;
+- risk/privacy/quorum decision;
+- lineage or qualification registry snapshot;
+- benchmark/harness requirement.
+
+A provider timeout, rate limit, transport error, unavailable reviewer or other
+failed reviewer invocation does NOT increment `review_generation` when the
+campaign-common context is unchanged. Such failures may be retried inside the
+same campaign with a new request nonce and a new lane attempt.
 
 Counters never decrement, wrap, or get reused. Counter loss or ambiguity is
 `BLOCKED_LEDGER_RECONCILIATION`.
 
-A review campaign groups requests that share one immutable review context. Its
-`campaign_context_digest` covers all fields in section 7 except the individual
-reviewer lane, request nonce and request timestamp. Its ID is:
+### 5.1 Canonical campaign context
 
-`review_campaign_id = "rc1:" + digest(campaign_context)`
+`CAMPAIGN_CONTEXT_V1` is a canonical object containing only fields shared by
+every reviewer lane participating in one quorum campaign.
 
-Each reviewer invocation receives a separate request and nonce. Quorum may
-combine results only when their campaign ID, context digest and review
-generation are identical.
+It contains exactly:
+
+- protocol version;
+- repository ID;
+- stable task ID;
+- source work-unit ID;
+- review round;
+- candidate generation;
+- review generation;
+- objective content and manifest digests;
+- candidate identity digest;
+- exact base SHA;
+- exact candidate SHA;
+- candidate diff digest;
+- review-scope manifest digest;
+- reviewed-material digest;
+- complete contributor-set digest;
+- deterministic local-gate evidence digest;
+- active protocol/policy revision;
+- trusted policy-decision record digest;
+- risk level and risk-decision digest;
+- privacy class, egress decision and privacy-decision digest;
+- required reviewer class;
+- canonical quorum-policy digest;
+- lineage-registry snapshot digest;
+- qualification-registry snapshot digest;
+- benchmark/harness policy revision;
+- campaign retry-policy digest.
+
+It MUST NOT contain:
+
+- `review_campaign_id` itself;
+- `review_work_unit_id`;
+- reviewer lane;
+- reviewer identity;
+- required adapter principal;
+- request nonce;
+- lane-attempt number;
+- request timestamp;
+- request expiry.
+
+Therefore campaign identity has no self-reference and is independent of the
+individual reviewer lane.
+
+`campaign_context_digest = digest(CAMPAIGN_CONTEXT_V1)`.
+
+`review_campaign_id = "rc1:" + campaign_context_digest`.
+
+The campaign ID is computed only after the complete context object has been
+canonicalized. The ID is never an input to its own digest.
+
+### 5.2 Reviewer lanes and retries
+
+Each reviewer invocation receives a lane-specific `REVIEW_REQUEST_V1`.
+
+One lane attempt binds:
+
+- one `review_work_unit_id`;
+- one reviewer lane;
+- one required authenticated adapter principal;
+- one monotonically increasing `lane_attempt`;
+- one unique request nonce;
+- one request creation/expiry interval.
+
+A failed invocation that produced no accepted review result may be retried
+without changing campaign ID or `review_generation`, provided every
+campaign-common field is still identical.
+
+The retry receives a new request ID, nonce and lane attempt. Failed attempts
+are durable diagnostic evidence but never count as votes.
+
+If campaign-common context changes before the retry, the old campaign becomes
+stale and a new `review_generation` and campaign ID are mandatory.
+
+A retry cannot create duplicate votes. One authenticated reviewer execution may
+contribute at most one counting result to the campaign, and quorum still
+applies the lineage/equivalence rules in sections 10, 11 and 15.
+
+Quorum may combine results only when campaign ID, campaign-context digest,
+candidate generation and review generation are identical.
 
 ## 6. Complete contributor history
 
@@ -151,8 +244,10 @@ The canonical request payload contains exactly these mandatory fields:
 - stable `repository_id`, `task_id`, `source_work_unit_id`,
   `review_work_unit_id` and `review_campaign_id`;
 - `review_round`, `candidate_generation` and `review_generation`;
+- monotonically increasing `lane_attempt` within the selected reviewer lane;
 - unique cryptographically random `request_nonce` of at least 128 bits;
-- `created_at` and bounded expiry/retry policy identifier;
+- `created_at`, bounded `request_expiry_at` and the campaign retry-policy
+  digest;
 - objective content digest and objective manifest digest from `TaskObjective`;
 - candidate identity digest, exact `base_sha`, exact `candidate_sha` and
   candidate diff digest;
@@ -222,15 +317,21 @@ not sufficient.
 ## 9. Canonical review result and trusted ingestion
 
 The model returns only an untrusted structured payload containing a claimed
-verdict and findings. The orchestrator validates and wraps it in
-`REVIEW_RESULT_ENVELOPE_V1` only through the authenticated invocation created
-for the exact request.
+verdict and findings.
 
-The result envelope contains exactly these mandatory fields:
+The orchestrator validates that payload only in the authenticated invocation
+created for the exact `REVIEW_REQUEST_V1`. It then constructs a canonical
+`REVIEW_RESULT_PAYLOAD_V1`.
 
-- protocol/schema version and result-envelope digest;
+### 9.1 Canonical result payload
+
+`REVIEW_RESULT_PAYLOAD_V1` contains exactly these mandatory fields:
+
+- protocol/schema version;
 - review request ID and request digest;
-- review campaign ID, review round, candidate generation and review generation;
+- review campaign ID and campaign-context digest;
+- review work-unit ID and lane attempt;
+- review round, candidate generation and review generation;
 - objective content/manifest digests;
 - exact base SHA, candidate SHA, candidate identity and diff digests;
 - review-scope manifest and reviewed-material digests;
@@ -239,17 +340,76 @@ The result envelope contains exactly these mandatory fields:
 - lineage-registry and qualification-registry snapshot digests;
 - complete contributor-set digest;
 - reviewer identity-envelope digest and qualification-evidence digest;
-- invocation ID, execution nonce and receipt digest;
+- invocation ID, execution nonce and provider/adapter execution-receipt digest;
 - claimed verdict, normalized structured findings and findings digest;
-- invocation completion and ingestion timestamps;
-- raw-result content digest and bounded raw-result storage reference;
-- trusted ingestion receipt and ledger record digest.
+- invocation completion timestamp;
+- raw-result content digest and bounded raw-result storage reference.
 
-The result payload MUST NOT provide authoritative `current`, `stale`,
+The canonical result payload MUST NOT contain:
+
+- its own result digest or result ID;
+- trusted-ingestion receipt generated after payload validation;
+- ledger sequence;
+- ledger record digest;
+- any mutable `current`, `stale`, `independent`, `qualified` or `counting`
+  status.
+
+`review_result_digest = digest(REVIEW_RESULT_PAYLOAD_V1)`.
+
+`review_result_id = "rrs1:" + review_result_digest`.
+
+`REVIEW_RESULT_ENVELOPE_V1` consists of:
+
+- the immutable canonical result payload;
+- `review_result_digest`;
+- `review_result_id`.
+
+The digest and ID are derived from the payload and are not included in the
+bytes from which their own value is calculated. This removes result
+self-reference.
+
+### 9.2 Trusted ingestion and ledger anchoring
+
+After the result digest exists, trusted ingestion creates a separate
+`RESULT_INGESTION_V1` payload containing:
+
+- review result ID and digest;
+- review request ID and request digest;
+- reviewer identity-envelope digest;
+- invocation/execution ID;
+- execution-receipt digest;
+- orchestrator ingestion timestamp;
+- authenticated ingestion-receipt digest;
+- idempotency key.
+
+That ingestion payload is appended through the generic `LEDGER_RECORD_V1`
+procedure in section 13.
+
+The ledger record therefore depends on the already-computed review-result
+digest. The review-result digest never depends on a ledger record digest.
+
+The resulting ledger record digest is an external durable anchor/reference for
+the result. It is not inserted back into `REVIEW_RESULT_PAYLOAD_V1`, so no
+result <-> ledger digest cycle exists.
+
+A trusted read model may expose:
+
+- `review_result_id`;
+- `review_result_digest`;
+- ingestion ledger-record digest;
+- ledger sequence;
+- computed eligibility/status.
+
+Those are views over immutable records and MUST NOT alter the canonical result
+payload.
+
+The model-produced payload MUST NOT provide authoritative `current`, `stale`,
 `independent`, `qualified` or `counting` booleans. Those are computed views of
-trusted state. A GitHub comment or detached JSON object that was not correlated
-with the exact live invocation, nonce, receipt and request digest is
-`UNTRUSTED_RESULT` and never becomes a vote.
+trusted state.
+
+A GitHub comment or detached JSON object that was not correlated with the
+exact live invocation, nonce, receipt, request digest and trusted ingestion
+record is `UNTRUSTED_RESULT` and never becomes a vote.
 
 ## 10. Staleness and replay rejection
 
@@ -279,6 +439,19 @@ One invocation nonce, execution receipt and result digest can contribute at
 most one vote. Duplicate exact delivery returns the existing ingestion record.
 A reused idempotency key with different content is
 `BLOCKED_LEDGER_RECONCILIATION`.
+
+A failed provider/transport invocation that produced no accepted result does
+not stale otherwise-current votes in the same campaign. A retry under unchanged
+campaign context uses the same `review_generation` and campaign ID, with a new
+request nonce and incremented `lane_attempt`.
+
+A retry MUST NOT reuse the failed invocation receipt or nonce. A failed attempt
+cannot later be transformed into a counting result by editing transport
+records.
+
+If any campaign-common semantic field changed while waiting to retry, section
+5 requires a new review generation and campaign; all prior campaign votes then
+remain historical and non-counting for the new campaign.
 
 ## 11. Canonical lineage registry and independence
 
