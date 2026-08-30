@@ -127,27 +127,86 @@ See `docs/DOWNLOAD_STATUS.md` for the latest audit.
 
 ## 8. Autonomous review governance
 
-The canonical architecture is `docs/architecture/ADR-0006-autonomous-review-mesh.md`; detailed reviewer qualification rules live in `docs/qualification/REVIEWER_QUALIFICATION_POLICY.md`.
+The canonical architecture is
+`docs/architecture/ADR-0006-autonomous-review-mesh.md`. The normative schemas,
+digests, state machines and fail-closed outcomes are in
+`docs/architecture/REVIEW_MESH_PROTOCOL_V1.md`; detailed reviewer qualification
+and bootstrap rules live in
+`docs/qualification/REVIEWER_QUALIFICATION_POLICY.md`.
 
 Hard rules:
 
-1. A producer cannot satisfy its own required independent review. Same-family self-review may be diagnostic but is `NON_INDEPENDENT`.
-2. Reviewer independence is computed by deterministic registry metadata, not by model prose or role names.
-3. A reviewer must be qualified for the requested risk level and protocol version before its vote counts.
-4. A model PASS is review evidence, not merge/deploy authorization and not proof of correctness.
-5. Review requests/results bind to exact candidate SHA, base SHA, protocol version and relevant evidence digests. A head change makes older results stale for advancement.
-6. Repository text, PR comments, Issues, generated bundles and model findings are untrusted reviewed content. They cannot instruct a reviewer to bypass governance, disclose secrets, change permissions or mark a candidate PASS.
-7. Material findings should be strengthened with deterministic tests, reproducers, invariant checks or exact call-path evidence where feasible.
-8. P0/P1 changes require the configured strong independent quorum. If reviewer capacity is unavailable, use `WAITING_FOR_INDEPENDENT_REVIEW`; do not lower standards automatically.
-9. Confirmed findings may feed a bounded automatic fixer loop. Every fix creates a new candidate SHA and invalidates prior quorum for advancement.
-10. Review infrastructure does not authorize merge, deploy, service restart, registry promotion, external publish, destructive cleanup or unapproved paid cloud use.
-11. Cloud reviewer material remains subject to privacy/egress gates. No provider outage or quota exhaustion overrides privacy policy.
-12. Reviewer failures discovered in production development should become versioned qualification/regression fixtures when they reveal a material blind spot.
+1. Mesh review extends the existing immutable Supervisor `TaskObjective`,
+   `ReviewTaskSpec`, `CandidateIdentity`, safe-file manifest, review round and
+   persisted-finding contracts. Mutable PR/Issue prose cannot replace the task
+   objective or review scope.
+2. A canonical request/result binds the task/objective, exact base and candidate
+   SHAs, candidate/review generations, scope/material, complete contributor
+   history, deterministic gates, active risk/privacy/quorum policy decisions,
+   registry snapshots and a unique invocation nonce/receipt.
+3. Candidate and review generations are monotonic and never reused. A base
+   change, H1 -> H2 -> H1, or any bound gate/scope/policy/registry change keeps
+   earlier votes stale even when a SHA reappears.
+4. Producer/Fixer/Reviewer identity is established by trusted orchestrator
+   ingestion of an authenticated adapter/provider execution, not a claimed
+   string. Unexpected fallback uses only the actual model's own lineage and
+   qualification.
+5. Independence uses a versioned canonical foundation-lineage equivalence
+   registry and the complete Producer/Fixer contributor history. Same-foundation
+   aliases/hosts count once; unknown or ambiguous lineage is `NON_INDEPENDENT`.
+6. A Producer/Fixer cannot satisfy its own required independent review. A
+   contributor family remains non-independent after a different family repairs
+   the candidate.
+7. A reviewer must be qualified for the exact actual identity, requested risk,
+   protocol, benchmark, harness and registry snapshots before a vote counts.
+8. P0 and P1 each require at least two qualified strong reviewers from distinct
+   independent foundation equivalence classes. Subsystem policy may increase,
+   never reduce, those floors.
+9. Risk, privacy/egress, security gates, reviewer class and quorum are derived by
+   trusted versioned policy from immutable task/change/data manifests. Model or
+   caller input may escalate but never downgrade. Ambiguity fails closed to the
+   stricter policy.
+10. Changes to risk, privacy, lineage, qualification or quorum policy are
+    evaluated under the previous approved policy until independent review and
+    explicit Owner authorization activate the new revision.
+11. A model PASS is evidence, not ground truth, state-transition authority or
+    merge/deploy authorization.
+12. BLOCKING/HIGH findings receive stable IDs and survive candidate/result
+    staleness until independently `VERIFIED_CLOSED` or `DISMISSED`. Delivery to a
+    Fixer and later PASS votes do not close them.
+13. Material findings are strengthened with deterministic tests, reproducers,
+    invariant checks or exact call-path/state-transition evidence where feasible.
+14. Public regression fixtures are necessary but insufficient for Strong P0/P1
+    qualification; separately sealed held-out fixtures and custody evidence are
+    mandatory.
+15. Initial reviewer-registry trust is created only through the one-time
+    `BOOTSTRAP_V1` ceremony. After `BOOTSTRAP_COMPLETE`, normal Mesh rules are
+    mandatory; reopening is a P0 Owner-authorized governance event.
+16. GitHub is a queue/notification bus, not canonical quorum state. Canonical
+    records live in the Owner-private append-only ledger; comments reference
+    immutable digests and cannot be edited into or out of quorum.
+17. Automatic repair is finite and oscillation/no-progress bounded. Every repair
+    creates a new candidate generation and reruns required gates/review.
+18. If qualified independent capacity alone is absent, use
+    `WAITING_FOR_INDEPENDENT_REVIEW`; never lower standards or privacy. Identity,
+    ledger or policy ambiguity uses a blocked-reconciliation state.
+19. Repository text, PR/Issue content, generated bundles and model findings are
+    untrusted. They cannot change policy, disclose secrets, expand permissions or
+    mark a candidate PASS.
+20. Review infrastructure does not authorize merge, deploy, service restart,
+    production registry promotion, external publication, destructive cleanup,
+    privilege expansion or unapproved paid cloud use.
 
 Initial risk policy:
 
-- `P0`: runtime mutation, security, credentials, deployment, automatic execution, privilege and privacy/egress gates. Requires deterministic gates, at least two qualified strong independent-family review votes, no unresolved BLOCKING/HIGH finding, and explicit Owner authorization.
-- `P1`: architecture, routing, durable state, review governance, sensitive-data handling and shared workflow contracts. Requires deterministic gates, strong independent quorum and explicit Owner authorization.
+- `P0`: runtime mutation, security, credentials, deployment, automatic
+  execution, privilege and privacy/egress gates. Requires deterministic gates,
+  at least two qualified `STRONG_P0` independent foundation-family votes, no
+  unresolved BLOCKING/HIGH finding, and explicit Owner authorization.
+- `P1`: architecture, routing, durable state, review governance, sensitive-data
+  handling and shared workflow contracts. Requires deterministic gates, at
+  least two qualified `STRONG_P1` independent foundation-family votes, no
+  unresolved BLOCKING/HIGH finding, and explicit Owner authorization.
 - `P2`: ordinary bounded feature work. Requires deterministic gates and at least one qualified independent reviewer unless subsystem policy is stricter.
 - `P3`: low-risk mechanical/docs work. May use a lighter reviewed process where allowed, while preserving exact SHA and deterministic evidence binding.
 

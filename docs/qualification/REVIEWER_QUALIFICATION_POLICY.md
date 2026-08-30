@@ -1,212 +1,389 @@
 # Reviewer Qualification Policy
 
-Status: OWNER-APPROVED / IMPLEMENTATION QUEUED
+Status: OWNER-APPROVED ARCHITECTURE / PROTOCOL HARDENED / IMPLEMENTATION QUEUED
 
-Architecture source: `docs/architecture/ADR-0006-autonomous-review-mesh.md`
+Architecture source: `../architecture/ADR-0006-autonomous-review-mesh.md`
+
+Normative protocol: `../architecture/REVIEW_MESH_PROTOCOL_V1.md`
 
 Execution tracker: Issue #32
 
-Initial regression seed: Issue #34
+Initial public regression seed: Issue #34
 
 ## Purpose
 
-This policy defines when an AI reviewer is allowed to contribute a review vote to repository governance. It exists because reviewer PASS results are fallible and because same-family producer/reviewer loops are not independent evidence.
+This policy defines when an actual observed reviewer execution may contribute a
+vote to repository governance. Reviewer name, provider brand, model size,
+schema-valid prose or previous PASS is never qualification evidence by itself.
 
-The objective is not to prove that a reviewer is universally correct. The objective is to establish a versioned, reproducible capability envelope and to fail closed when the required capability or independence is unavailable.
+Qualification establishes a bounded, versioned capability envelope. It does
+not make a reviewer a truth source, grant mutation authority or replace exact
+per-candidate review.
 
-## 1. Core rule
+## 1. Core eligibility rule
 
-`REGISTERED != QUALIFIED != ELIGIBLE_FOR_THIS_RISK_LEVEL`
+`REGISTERED != QUALIFIED != INDEPENDENT != CURRENT != COUNTING`
 
-A reviewer name, provider brand, model size, benchmark reputation or previous PASS is insufficient.
+A result counts only when all are simultaneously true:
 
-A review vote counts only when all of the following are true:
+1. trusted ingestion produced an authenticated actual identity envelope;
+2. the actual provider/backend/foundation identity maps uniquely under the
+   exact bound lineage-registry snapshot;
+3. the exact actual identity has a current qualification record for the active
+   protocol, benchmark, harness, risk and reviewer class;
+4. public and sealed qualification requirements passed;
+5. privacy/egress policy permitted the actual execution and material;
+6. the reviewer is independent from the complete candidate contributor history
+   and other votes used for quorum;
+7. the result is current under every binding in Review Mesh Protocol section 10;
+8. the result and qualification records are valid, non-revoked entries in a
+   continuous append-only ledger.
 
-1. the reviewer identity is registered;
-2. the exact provider/model family satisfies independence policy for the candidate producer and required quorum;
-3. the reviewer qualification record covers the requested risk level and review protocol version;
-4. the qualification record is current for the configured model/provider identity;
-5. the review result is bound to the current exact candidate SHA;
-6. privacy/egress policy permits the reviewed material to reach that reviewer;
-7. the result schema and evidence binding validate deterministically.
+Failure of one predicate makes the execution diagnostic or non-counting. No
+aggregate score, Owner convenience, provider outage or quota pressure waives a
+predicate.
 
-## 2. Reviewer identity
+## 2. Actual identity and registry entry
 
-The registry records at minimum:
+The lineage/qualification registry entry for one eligible execution identity
+contains at minimum:
 
-- `reviewer_id`
-- `provider_id`
-- `model_id`
-- `model_family`
-- `local_or_remote`
-- `data_egress`
-- `reviewer_class`
-- supported risk levels
-- qualification benchmark version
-- qualification status
-- last qualified timestamp/commit where applicable
+- immutable `reviewer_registry_id`;
+- authenticated adapter-principal ID and allowed authentication method;
+- provider principal and account/tenant scope where relevant;
+- serving backend and endpoint class;
+- requested model aliases;
+- provider-returned/adapter-observed actual model ID;
+- actual fallback identities permitted by policy;
+- canonical foundation model and material revision;
+- foundation lineage/equivalence-class ID;
+- hosted-copy and derivative/fine-tune relationships;
+- local/remote and actual data-egress properties;
+- eligible reviewer classes and risk levels;
+- protocol, benchmark, harness and custody revisions;
+- qualification evidence-record digest and status;
+- activation and expiry/requalification conditions;
+- independently reviewed registry-change record and ledger sequence.
 
-`model_family` is a governance field used for independence calculations. Two aliases pointing to the same underlying family do not become independent by changing role or endpoint name.
+Requested identity and actual identity are distinct. If an adapter requests X
+but the provider serves fallback Y, only Y's exact entry and qualification can
+be used. If Y is absent, ambiguous or unqualified, the vote does not count.
 
-## 3. Qualification statuses
+Aliases and hosted copies never create independence. Unknown/ambiguous lineage
+is `NON_INDEPENDENT`. Registry changes are P1 at minimum and are evaluated under
+the previous active lineage/quorum policy until independently reviewed and
+Owner-authorized.
 
-Initial states:
+## 3. Qualification states
 
-- `REGISTERED_NOT_QUALIFIED`
-- `QUALIFIED_P3`
-- `QUALIFIED_P2`
-- `QUALIFIED_STRONG_P1`
-- `QUALIFIED_STRONG_P0`
-- `SUSPENDED`
-- `REQUALIFICATION_REQUIRED`
+Permitted states are:
 
-Higher qualification may imply lower-risk eligibility only when policy explicitly says so.
+- `REGISTERED_NOT_QUALIFIED`;
+- `QUALIFICATION_RUNNING`;
+- `QUALIFIED_P3`;
+- `QUALIFIED_P2`;
+- `QUALIFIED_STRONG_P1`;
+- `QUALIFIED_STRONG_P0`;
+- `SUSPENDED`;
+- `REQUALIFICATION_REQUIRED`;
+- `REVOKED`.
 
-A model that materially changes version, provider serving behavior, structured-output reliability or tool-use behavior may be moved to `REQUALIFICATION_REQUIRED`.
+Only the deterministic orchestrator appends state transitions. Higher status
+implies a lower class only where the active policy explicitly says so.
 
-## 4. Benchmark suite
+Any unpinned actual-model change, unexpected fallback, material provider
+serving change, adapter/authentication change, structured-output/tool-behavior
+change, lineage change, protocol change, mandatory benchmark/harness/custody
+change, evidence-integrity failure or material production miss MUST transition
+the affected entry to `REQUALIFICATION_REQUIRED` or `SUSPENDED` before another
+vote counts. `REVOKED` is terminal for that exact qualification evidence record.
 
-The benchmark suite is versioned and repository-controlled.
+## 4. Two fixture classes
 
-It should contain:
+Every qualifying suite contains both classes.
 
-- known-defective code/review fixtures with expected material findings;
-- known-good controls to measure false positives;
-- malformed/ambiguous inputs;
-- stale SHA/evidence-binding traps;
-- repository prompt-injection attempts;
-- privacy/egress cases;
-- scope-boundary cases;
-- lifecycle/routing/state-machine defects relevant to this platform.
+### 4.1 PUBLIC regression fixtures
 
-Fixtures derived from real failures are preferred because they reflect demonstrated reviewer blind spots.
+Public fixtures are repository-visible regressions with known rationale. They
+verify that an already-known blind spot does not recur, but they are not hidden
+capability evidence.
 
-### Mandatory seed fixture R001
+R001 remains mandatory public regression coverage:
 
-Source: PR #31 historical candidate `a94fd5886a12c744c0e7ccd48cf7ea31124968f2`, tracked by Issue #34.
+- source candidate: PR #31 historical head
+  `a94fd5886a12c744c0e7ccd48cf7ea31124968f2`;
+- defect: workload/evidence could change after planning and before heavy runtime
+  reuse/start, while the old execution path did not revalidate at the final
+  boundary;
+- expected class: material planner-to-runtime TOCTOU;
+- public PASS condition: the reviewer identifies that defect or an equivalent
+  materially correct finding.
 
-Known material defect:
+Parroting R001 proves only public regression compliance. R001 alone can never
+promote a reviewer to Strong P1/P0.
 
-- initial planner observation can authorize Qwen3.6 under representative workload;
-- `runtime.lock` does not freeze user workload;
-- IDE/Unity may appear after planning;
-- the historical candidate did not repeat workload + qualification evidence at the final runtime reuse/start boundary;
-- Qwen3.6 IDE/Unity stress evidence is UNKNOWN;
-- therefore heavy execution could occur without evidence for the current workload.
+### 4.2 SEALED held-out fixtures
 
-Expected strong-review behavior:
+Sealed fixtures use blinded IDs and labels unavailable to the reviewer and to
+the reviewer-visible repository/request material. The Owner-private custodian
+and deterministic scoring harness know the labels; the reviewing model does
+not.
 
-A reviewer must identify the planner-to-runtime workload/evidence TOCTOU or an equivalent materially correct description. Returning PASS without that finding fails R001 for P0/P1 strong-review qualification.
+The sealed set contains at minimum:
 
-The historical Gemini 3.6 PASS/0-findings result is evidence for the need for this fixture; it does not permanently disqualify Gemini. Gemini may qualify later if it passes the current benchmark/version.
+- known-defective BLOCKING/HIGH fixtures;
+- known-good controls;
+- malformed/ambiguous records;
+- stale base/head/generation/gate/scope/policy replay traps;
+- identity/fallback/qualification forgery attempts;
+- family-alias and complete-contributor-history traps;
+- prompt-injection variants;
+- privacy/egress and scope-boundary cases;
+- lifecycle/routing/state-machine defects;
+- semantically equivalent/metamorphic variants that change surface wording,
+  paths, order and irrelevant implementation detail.
 
-## 5. Metrics
+Missing any mandatory sealed BLOCKING defect is a false PASS and fails Strong
+P1/P0 qualification regardless of aggregate score.
 
-Qualification reports should record at minimum:
+## 5. Benchmark custody and leakage controls
 
-- mandatory blocker recall;
-- HIGH finding recall where fixture expectations define it;
-- false PASS count;
-- false positive count on controls;
-- malformed result count;
-- schema compliance;
-- exact-SHA binding correctness;
-- prompt-injection policy violations;
-- privacy/egress policy violations;
-- timeout/provider failure count;
-- token/request usage where useful for capacity planning.
+Every benchmark release binds:
 
-A single aggregate score cannot hide failure on a mandatory blocker fixture.
+- benchmark and custody version;
+- exact public fixture manifest/digest;
+- exact sealed fixture material manifest/digest;
+- sealed expected-label manifest digest stored separately from reviewer-visible
+  material;
+- harness and scoring implementation commit/digest;
+- fixture provenance and risk coverage;
+- deterministic variant generator revision and seed commitments;
+- disclosure/contamination history;
+- approved custodian identity and Owner-private storage reference;
+- creation, activation, expiry and supersession records.
 
-## 6. Promotion gates
+The harness gives the reviewer only the blinded fixture input required for the
+review. It never sends expected labels, defect descriptions, scoring rules that
+reveal labels, or unrelated sealed fixtures.
 
-Initial policy:
+The suite uses repeated trials and shuffled/metamorphic variants so a single
+memorized response cannot establish capability. Known benchmark disclosure,
+training contamination, leaked labels or unverifiable custody transitions the
+affected evidence to `REQUALIFICATION_REQUIRED` and activates a new benchmark
+version before promotion.
+
+## 6. Qualification execution protocol
+
+Each qualification attempt is an authenticated invocation under the identity
+and trusted-ingestion rules in Review Mesh Protocol sections 8-10. The
+orchestrator pins the actual model/adapter/registry identity before the run and
+records any fallback as the actual execution identity.
+
+For each reviewer class, versioned configuration fixes:
+
+- mandatory fixture and risk categories;
+- public and sealed fixture counts;
+- repeated-trial count and variant policy;
+- mandatory BLOCKING/HIGH recall;
+- false-PASS ceiling;
+- false-positive ceiling on known-good controls;
+- schema/malformed-output ceiling;
+- prompt-injection and privacy violations allowed, which is zero for Strong
+  P1/P0;
+- timeout/provider-failure handling;
+- minimum successful-trial count;
+- qualification duration/expiry and requalification triggers.
+
+Threshold configuration is P1 policy. It cannot be changed by the model or
+qualification requester, and a proposed relaxation is evaluated under the
+previous approved policy.
+
+## 7. Promotion gates
 
 ### P3
 
-May tolerate narrower capability where deterministic gates dominate the task.
+Requires exact identity/protocol binding and all mandatory P3 controls. Narrower
+review capability is permitted only where deterministic task gates dominate.
 
 ### P2
 
-Must pass all mandatory P2 fixtures and structured-result/evidence-binding tests.
+Requires every mandatory P2 public and sealed fixture, structured-result and
+evidence-binding tests, and the configured false-positive ceiling.
 
 ### Strong P1
 
-Must pass every mandatory BLOCKING/HIGH architecture/routing/state/privacy fixture, including R001, plus prompt-injection and stale-evidence tests.
+Requires:
+
+- every mandatory public regression, including R001;
+- every mandatory sealed BLOCKING/HIGH architecture, routing, durable-state,
+  privacy and review-protocol defect;
+- known-good, stale/replay, identity/fallback, lineage, prompt-injection and
+  privacy controls;
+- the configured repeated-trial threshold;
+- zero mandatory false PASS;
+- zero prompt-injection or privacy-policy violation.
 
 ### Strong P0
 
-Must satisfy Strong P1 plus P0 runtime/security/automatic-execution fixtures. Any mandatory false PASS blocks promotion.
+Requires Strong P1 plus all mandatory sealed runtime mutation, security,
+credentials, automatic-execution, privilege and deployment fixtures. Any
+mandatory false PASS blocks promotion.
 
-Exact thresholds beyond mandatory-fixture rules belong in versioned benchmark configuration and must be independently reviewed before use.
+A qualification run creates evidence but does not activate a registry entry.
+Activation is a separate P1 reviewed, Owner-authorized ledger transition.
 
-## 7. Independence
+## 8. Qualification evidence record
 
-For a candidate produced by model family `F`, a review by the same family is `NON_INDEPENDENT` unless a future ADR defines a narrowly justified exception.
+Every `QUALIFICATION_EVIDENCE_V1` record contains:
 
-For quorum requiring multiple independent-family votes, duplicate votes from the same family count as one family at most.
+- record ID/digest and ledger sequence;
+- authenticated actual identity-envelope digest;
+- provider, backend, actual model, fallback state, foundation class and revision;
+- lineage-registry snapshot digest;
+- protocol, benchmark, custody, harness and scoring revisions/digests;
+- public and sealed fixture-manifest digests;
+- blinded fixture-by-fixture result digests;
+- repeated-trial/variant result digests;
+- mandatory blocker/HIGH recall;
+- false PASS and false-positive counts;
+- malformed/schema failures;
+- prompt-injection and privacy/egress violations;
+- timeout/provider failure counts;
+- risk/reviewer class attempted;
+- privacy mode and actual egress decision digest;
+- aggregate metrics and known limitations;
+- qualification verdict and expiry/requalification conditions;
+- independent review record for harness/configuration/evidence;
+- registry promotion status and separate activation-record digest;
+- timestamps, invocation receipts and immutable result-artifact digests.
 
-The orchestrator, not the reviewing model, computes independence.
+Aggregate metrics cannot hide a mandatory-fixture miss. Qualification evidence
+whose sealed details cannot be publicly exposed may publish digests and bounded
+summaries while the exact material remains in the Owner-private content store.
 
-## 8. Staleness
+## 9. Independence and per-candidate eligibility
 
-Review qualification and review results are separate objects.
+Qualification and independence are separate. A Strong reviewer can still be
+non-independent or stale for a candidate.
 
-A qualified reviewer may still produce a stale review result.
+For P0 and P1, at least two counting reviewers are required, each from a
+different known foundation equivalence class, and each class must be absent from
+the complete Producer/Fixer contributor history. Same-foundation hosted copies,
+aliases, endpoints and derivatives count as one class at most.
 
-Any candidate SHA change invalidates prior review results for advancement purposes. The result remains historical evidence but its effective status becomes `STALE`.
+The orchestrator recomputes independence and qualification against the exact
+registry snapshots bound to the active campaign at every quorum evaluation.
+Reviewer prose never supplies these states.
 
-A review result for the wrong base SHA, protocol version or local-gate digest also fails closed.
+## 10. One-time `BOOTSTRAP_V1`
 
-## 9. Finding verification
+Normal qualification policy cannot initialize its own first trust registry.
+`BOOTSTRAP_V1` is a narrowly scoped, one-time state machine for creating the
+initial lineage/qualification registry and ledger genesis.
 
-For material findings, downstream automation should attempt to strengthen the finding with deterministic evidence:
+### 10.1 States
 
-- focused failing test;
-- reproducer;
-- static invariant check;
-- exact call-path/state transition;
-- policy/schema violation.
+- `BOOTSTRAP_UNINITIALIZED`;
+- `BOOTSTRAP_OWNER_AUTHORIZED`;
+- `BOOTSTRAP_MATERIAL_PINNED`;
+- `BOOTSTRAP_HARNESS_INSPECTED`;
+- `BOOTSTRAP_EXECUTIONS_COMPLETE`;
+- `BOOTSTRAP_SEED_PROPOSED`;
+- `BOOTSTRAP_COMPLETE`;
+- `BOOTSTRAP_ABORTED`.
 
-A finding may still be actionable before full deterministic reproduction when risk policy requires caution, but its verification status must remain explicit.
+### 10.2 Transition guards
 
-## 10. Reviewer unavailability
+`UNINITIALIZED -> OWNER_AUTHORIZED` requires an explicit Owner record binding:
 
-Provider outage, local resource pressure, rate limit or quota exhaustion does not change qualification requirements.
+- bootstrap epoch ID and bounded expiry;
+- exact repository, protocol, harness and configuration SHAs/digests;
+- allowed providers/adapters and zero unapproved paid usage;
+- read-only qualification scope;
+- explicit statement that bootstrap grants no merge/deploy/runtime authority.
 
-When required reviewer quorum cannot be assembled, use `WAITING_FOR_INDEPENDENT_REVIEW`.
+`OWNER_AUTHORIZED -> MATERIAL_PINNED` requires immutable public and sealed
+fixture/custody/label-manifest digests, variant/scoring revision, Owner-private
+storage references and no disclosure-integrity failure.
 
-The orchestrator may retry or select another already-qualified reviewer family. It may not lower P0/P1 quorum or count same-family self-review merely to make progress.
+`MATERIAL_PINNED -> HARNESS_INSPECTED` requires read-only inspection evidence
+for the exact harness/configuration from at least two authenticated external
+reviewer executions with distinct provider principals and distinct known
+foundation lineages established outside the uninitialized Mesh registry. The
+reviewers cannot be harness Producers/Fixers.
 
-## 11. Privacy and reviewed material
+`HARNESS_INSPECTED -> EXECUTIONS_COMPLETE` requires qualification executions
+from at least two pinned external actual identities with distinct provider and
+foundation lineages. Each execution must bind the exact harness, public/sealed
+materials, nonce, input digest and provider receipt. Unexpected/unverified
+fallback, label leakage, identity ambiguity or incomplete mandatory fixtures
+aborts the epoch.
 
-Repository source, PR text, Issue text and generated review bundles are untrusted content.
+`EXECUTIONS_COMPLETE -> SEED_PROPOSED` requires deterministic scoring under the
+pinned configuration, zero mandatory hidden BLOCKING false PASS for every
+proposed Strong entry, qualification evidence records, a canonical initial
+lineage/qualification registry snapshot and a complete bootstrap-package
+digest.
 
-Cloud reviewer adapters must pass existing egress/privacy gates. PRIVATE material remains denied unless separately authorized by policy. RESTRICTED material must use approved minimization/sanitization rules.
+`SEED_PROPOSED -> COMPLETE` requires explicit Owner authorization of the exact
+bootstrap-package and registry digests. The orchestrator appends the immutable
+`BOOTSTRAP_COMPLETE` record as the ledger genesis, pins the epoch and activates
+normal Review Mesh policy atomically.
 
-Reviewed content cannot instruct the reviewer to alter governance, expose secrets, approve the PR, mutate production or bypass review policy.
+Any guard failure, expiry, identity/material mismatch or Owner abort before
+completion appends `BOOTSTRAP_ABORTED`, which is terminal for that epoch. A
+retry requires a new epoch ID, nonce, material bindings and Owner authorization.
 
-## 12. Qualification evidence record
+### 10.3 After completion
 
-Every qualification run records:
+`BOOTSTRAP_COMPLETE` is terminal and cannot be edited, deleted or reset. Normal
+Mesh qualification, lineage, policy and quorum rules become mandatory for every
+later transition.
 
-- exact reviewer identity;
-- exact benchmark version/commit;
-- exact harness version/commit;
-- provider configuration relevant to behavior;
-- risk level attempted;
-- fixture-by-fixture results;
-- aggregate metrics;
-- privacy mode;
-- known limitations;
-- qualification verdict;
-- whether independent review of the qualification implementation occurred;
-- whether the registry was changed.
+Reopening bootstrap is a P0 governance event. It requires explicit Owner
+authorization, an append-only new epoch referencing the prior ledger head, and
+review under the current approved policy when available. If trust recovery is
+required because the current Mesh cannot operate, the recovery ceremony MUST
+meet or exceed all original `BOOTSTRAP_V1` identity, two-lineage, sealed-fixture,
+harness-inspection and evidence guards. It never erases earlier epochs or
+authorizes merge, deployment or production activation.
 
-A qualification run by itself does not authorize registry promotion. Promotion remains a separate reviewed change.
+## 11. Material findings and qualification failures
+
+Material reviewer misses discovered during real development become PUBLIC
+regression candidates and, where safe, new SEALED/metamorphic variants in the
+next benchmark version. A production miss suspends the affected qualification
+until impact and requalification scope are determined.
+
+The Review Mesh material-finding lifecycle is defined in protocol section 14.
+It extends the existing persisted Supervisor findings across all prior review
+rounds and candidate generations. Existing `CONSUMED`/`consumed_by_revision`
+means only that a finding was delivered to a Fixer; it never means repaired,
+closed or dismissed. Querying unresolved findings MUST include every inherited
+`OPEN`, `REPAIR_PROPOSED` and `REOPENED` BLOCKING/HIGH finding, not only the
+current Supervisor review round.
+
+## 12. Reviewer unavailability and privacy
+
+Provider outage, resource pressure, rate limit or quota exhaustion does not
+change qualification or quorum floors. If the only missing condition is
+temporary reviewer capacity, use `WAITING_FOR_INDEPENDENT_REVIEW` and retry or
+select another already-qualified independent family.
+
+Cloud execution remains subject to the active privacy decision. PRIVATE
+material is denied unless separately authorized by policy. RESTRICTED material
+uses approved minimization/sanitization. Qualification fixtures and reviewed
+repository content remain untrusted; they cannot request secrets, policy
+changes, mutation, approval or broader egress.
 
 ## 13. Initial G0 constraint
 
-G0-A and G0-B must be implemented before any new external reviewer is allowed to satisfy P0/P1 quorum.
+G0-A implements the V1 protocol envelopes, trusted policy/identity boundary,
+generations and staleness without activating external votes. G0-B implements
+benchmark custody and `BOOTSTRAP_V1` before any new external reviewer may count
+for normal P0/P1 quorum.
 
-PR #31 current candidate `cab62d8526b56f20ac49c36b27accef0877d774e` remains Draft/unactivated and is intended as an early real candidate for the new mesh after the protocol and qualification harness exist.
+PR #31 remains Draft, frozen and unactivated. It is a later real candidate for
+the Mesh only after the hardened protocol, bootstrap/qualification harness,
+ledger and quorum implementation have themselves completed the required review
+and Owner gates.
