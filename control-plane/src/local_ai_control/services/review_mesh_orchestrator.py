@@ -70,8 +70,10 @@ from .review_mesh_quorum import (
     QuorumDecisionV1,
     QuorumPolicyV1,
     ReviewerCapacityState,
+    ReviewMeshDecisionState,
     TrustedCheckStatus,
     TrustedOwnerGateInputsV1,
+    VoteRejectionV1,
     evaluate_quorum,
 )
 
@@ -1062,6 +1064,224 @@ def result_has_active_ledger_evidence(
     )
 
 
+def _cross_campaign_vote_reuse_rejections(
+    *,
+    snapshot: ReviewMeshLedgerSnapshotV1,
+
+    bound: BoundReviewCampaignV1,
+
+    results: tuple[
+        ReviewResultPayloadV1,
+        ...
+    ],
+) -> tuple[
+    VoteRejectionV1,
+    ...
+]:
+    """Reject reuse of one accepted execution across campaigns.
+
+    REVIEW_MESH_PROTOCOL_V1 sections 10 and 15 require one
+    invocation/execution nonce, execution receipt and result digest
+    to contribute at most one vote, including across campaigns.
+
+    This evidence is derived from the append-only ledger. It is not
+    accepted as a caller-supplied trust assertion.
+    """
+
+    current_campaign_id = (
+        bound.campaign
+        .review_campaign_id
+    )
+
+    historical = {
+        "review-result-digest":
+            set(),
+
+        "invocation-id":
+            set(),
+
+        "execution-nonce":
+            set(),
+
+        "execution-receipt":
+            set(),
+    }
+
+    for entry in snapshot.entries:
+        record = entry.record
+
+        if (
+            record.record_type
+            is not LedgerRecordType
+            .REVIEW_RESULT
+        ):
+            continue
+
+        if (
+            record.related_campaign_id
+            == current_campaign_id
+        ):
+            continue
+
+        outer = (
+            entry.payload_mapping()
+        )
+
+        if set(outer) != {
+            "schema_version",
+            "review_result_id",
+            "review_result_digest",
+            "review_result_payload",
+        }:
+            raise ValueError(
+                "historical review-result ledger schema mismatch"
+            )
+
+        if (
+            outer["schema_version"]
+            != RESULT_LEDGER_SCHEMA
+        ):
+            raise ValueError(
+                "historical review-result schema version mismatch"
+            )
+
+        inner = (
+            outer[
+                "review_result_payload"
+            ]
+        )
+
+        if not isinstance(
+            inner,
+            dict,
+        ):
+            raise ValueError(
+                "historical review-result payload is invalid"
+            )
+
+        historical_digest = (
+            canonical_digest(
+                inner
+            )
+        )
+
+        if (
+            outer[
+                "review_result_digest"
+            ]
+            != historical_digest
+        ):
+            raise ValueError(
+                "historical review-result digest mismatch"
+            )
+
+        if (
+            outer[
+                "review_result_id"
+            ]
+            != (
+                "rrs1:"
+                + historical_digest
+            )
+        ):
+            raise ValueError(
+                "historical review-result id mismatch"
+            )
+
+        required = {
+            "invocation_id",
+            "execution_nonce",
+            "execution_receipt_digest",
+        }
+
+        if not required.issubset(
+            inner
+        ):
+            raise ValueError(
+                "historical review-result vote identity incomplete"
+            )
+
+        historical[
+            "review-result-digest"
+        ].add(
+            historical_digest
+        )
+
+        historical[
+            "invocation-id"
+        ].add(
+            inner[
+                "invocation_id"
+            ]
+        )
+
+        historical[
+            "execution-nonce"
+        ].add(
+            inner[
+                "execution_nonce"
+            ]
+        )
+
+        historical[
+            "execution-receipt"
+        ].add(
+            inner[
+                "execution_receipt_digest"
+            ]
+        )
+
+    rejected = []
+
+    for result in results:
+        checks = (
+            (
+                "review-result-digest",
+                result.review_result_digest,
+            ),
+            (
+                "invocation-id",
+                result.invocation_id,
+            ),
+            (
+                "execution-nonce",
+                result.execution_nonce,
+            ),
+            (
+                "execution-receipt",
+                result.execution_receipt_digest,
+            ),
+        )
+
+        for label, value in checks:
+            if value not in historical[
+                label
+            ]:
+                continue
+
+            rejected.append(
+                VoteRejectionV1(
+                    result_digest=(
+                        result
+                        .review_result_digest
+                    ),
+
+                    reason=(
+                        "cross-campaign-"
+                        + label
+                        + "-reuse"
+                    ),
+                )
+            )
+
+            # One deterministic reason per result is sufficient.
+            break
+
+    return tuple(
+        rejected
+    )
+
+
 def _derive_contributor_provenance(
     *,
     bound: BoundReviewCampaignV1,
@@ -1194,6 +1414,49 @@ def evaluate_owner_gate(
                 result=result,
             )
             for result in results
+        )
+
+    reuse_rejections = ()
+
+    if ledger_ok:
+        try:
+            reuse_rejections = (
+                _cross_campaign_vote_reuse_rejections(
+                    snapshot=snapshot,
+                    bound=bound,
+                    results=results,
+                )
+            )
+
+        except ValueError:
+            ledger_ok = False
+
+    if (
+        ledger_ok
+        and reuse_rejections
+    ):
+        return QuorumDecisionV1(
+            state=(
+                ReviewMeshDecisionState
+                .UNTRUSTED_RESULT
+            ),
+
+            required_independent_families=(
+                quorum_policy
+                .minimum_independent_families
+            ),
+
+            counted_result_digests=(),
+
+            counted_lineage_classes=(),
+
+            rejected_votes=(
+                reuse_rejections
+            ),
+
+            reason=(
+                "cross-campaign-vote-identity-reuse"
+            ),
         )
 
     ledger_status = (

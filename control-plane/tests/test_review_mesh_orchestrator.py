@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -1399,4 +1400,172 @@ def test_two_ledger_backed_independent_votes_reach_owner_gate():
         decision
         .protected_action_authorized
         is False
+    )
+
+
+def test_cross_campaign_review_execution_reuse_is_untrusted():
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        first_bound,
+    ) = bound_fixture()
+
+    (
+        first_result,
+        first_ingestion,
+    ) = reviewer_result(
+        first_bound,
+        family="gemini",
+    )
+
+    first_recorded = (
+        record_result_evidence(
+            snapshot=(
+                ReviewMeshLedgerSnapshotV1()
+            ),
+
+            bound=first_bound,
+
+            result=first_result,
+
+            ingestion=first_ingestion,
+        )
+    )
+
+    second_campaign = (
+        first_bound
+        .campaign
+        .new_review_generation(
+            local_gate_evidence_digest=(
+                "0" * 64
+            )
+        )
+    )
+
+    second_bound = replace(
+        first_bound,
+        campaign=second_campaign,
+    )
+
+    (
+        second_result,
+        second_ingestion,
+    ) = reviewer_result(
+        second_bound,
+        family="gemini",
+    )
+
+    # reviewer_result intentionally gives this second campaign
+    # the same trusted invocation ID, execution nonce and receipt.
+    # Its request/campaign/result digest is different, so this is
+    # exactly the cross-campaign replay case.
+    assert (
+        second_result
+        .review_result_digest
+        != first_result
+        .review_result_digest
+    )
+
+    assert (
+        second_result.invocation_id
+        == first_result.invocation_id
+    )
+
+    assert (
+        second_result.execution_nonce
+        == first_result.execution_nonce
+    )
+
+    assert (
+        second_result
+        .execution_receipt_digest
+        == first_result
+        .execution_receipt_digest
+    )
+
+    second_recorded = (
+        record_result_evidence(
+            snapshot=(
+                first_recorded.snapshot
+            ),
+
+            bound=second_bound,
+
+            result=second_result,
+
+            ingestion=second_ingestion,
+        )
+    )
+
+    decision = evaluate_owner_gate(
+        bound=second_bound,
+
+        snapshot=(
+            second_recorded.snapshot
+        ),
+
+        results=(
+            second_result,
+        ),
+
+        contributor_history=history,
+
+        contributor_identities=(
+            contributor_facts(
+                registry
+            )
+        ),
+
+        lineage_registry=registry,
+
+        qualification_by_evidence_digest={
+            second_result
+            .reviewer_identity
+            .qualification_evidence_digest:
+                qualification(
+                    second_result
+                )
+        },
+
+        quorum_policy=policy,
+
+        inherited_findings=(
+            InheritedFindingSetV1()
+        ),
+
+        gate_inputs=(
+            clean_gate_inputs()
+        ),
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .UNTRUSTED_RESULT
+    )
+
+    assert (
+        decision
+        .protected_action_authorized
+        is False
+    )
+
+    assert (
+        len(
+            decision.rejected_votes
+        )
+        == 1
+    )
+
+    assert (
+        decision
+        .rejected_votes[0]
+        .reason
+        == (
+            "cross-campaign-"
+            "invocation-id-reuse"
+        )
     )
