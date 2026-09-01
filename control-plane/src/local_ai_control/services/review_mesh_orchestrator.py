@@ -45,6 +45,7 @@ from .review_mesh_protocol import (
     ReviewResultPayloadV1,
     RiskLevel,
     canonical_digest,
+    validate_review_result_stable_mapping_v1,
 )
 
 from .review_mesh_decisions import (
@@ -58,10 +59,13 @@ from .review_mesh_decisions import (
 from .review_mesh_ledger import (
     LedgerRecordType,
     LedgerRecordV1,
+    LedgerReconciliationError,
 )
 
 from .review_mesh_ledger_store import (
+    ReviewMeshLedgerAuthorityV1,
     ReviewMeshLedgerSnapshotV1,
+    ReviewMeshLedgerStoreV1,
     StoredLedgerEntryV1,
 )
 
@@ -137,7 +141,33 @@ class RecordedReviewEvidenceV1:
 
 
 @dataclass(frozen=True)
+class DurableRecordedReviewEvidenceV1:
+    """Result evidence committed through one pinned durable authority."""
+
+    authority: ReviewMeshLedgerAuthorityV1
+    snapshot: ReviewMeshLedgerSnapshotV1
+
+    result_record_digest: str
+    ingestion_record_digest: str
+
+    result_duplicate: bool
+    ingestion_duplicate: bool
+
+
+@dataclass(frozen=True)
 class OrchestratorGateInputsV1:
+    """Owner-private trust inputs, never review/model-supplied data.
+
+    Both ledger digests must be loaded from the orchestrator's independently
+    persisted trusted checkpoint.  Deriving them from the same authority value
+    being evaluated would erase the rollback/fork trust boundary.  As with the
+    deterministic/security/privacy statuses below, provenance is established
+    by the trusted caller rather than by an unkeyed digest alone.
+    """
+
+    ledger_authority_identity_digest: str
+    ledger_authority_checkpoint_digest: str
+
     deterministic_gates: TrustedCheckStatus
     security_evidence: TrustedCheckStatus
     privacy_evidence: TrustedCheckStatus
@@ -145,6 +175,29 @@ class OrchestratorGateInputsV1:
     fixer_convergence_clear: TrustedCheckStatus
 
     reviewer_capacity: ReviewerCapacityState
+
+    def __post_init__(self):
+        for label, value in (
+            (
+                "ledger authority identity digest",
+                self.ledger_authority_identity_digest,
+            ),
+            (
+                "ledger authority checkpoint digest",
+                self.ledger_authority_checkpoint_digest,
+            ),
+        ):
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in value
+                )
+            ):
+                raise ValueError(
+                    f"{label} is invalid"
+                )
 
 
 def _candidate_identity_digest(
@@ -880,6 +933,183 @@ def record_result_evidence(
     )
 
 
+def record_result_evidence_durably(
+    *,
+    ledger_store: ReviewMeshLedgerStoreV1,
+    ledger_authority: ReviewMeshLedgerAuthorityV1,
+
+    bound: BoundReviewCampaignV1,
+    result: ReviewResultPayloadV1,
+    ingestion: ResultIngestionV1,
+) -> DurableRecordedReviewEvidenceV1:
+    """Commit result evidence through the pinned durable authority.
+
+    Each append compares the authority's trusted current head before
+    advancing its immutable head/count checkpoint. An in-memory snapshot
+    can still be useful for pure protocol tests, but it is never sufficient
+    for Owner-gate evaluation.
+
+    The trusted orchestrator must durably persist the returned authority.
+    If execution stops after a ledger write but before that checkpoint is
+    persisted, callers must enter explicit reconciliation rather than derive
+    or adopt a replacement checkpoint from the ledger's current self-report.
+    """
+
+    if (
+        result.request.campaign
+        .campaign_context_digest
+        != bound.campaign
+        .campaign_context_digest
+    ):
+        raise ValueError(
+            "result does not belong to bound campaign"
+        )
+
+    if (
+        ingestion.result
+        .review_result_digest
+        != result.review_result_digest
+    ):
+        raise ValueError(
+            "ingestion does not bind exact result"
+        )
+
+    result_outcome = (
+        ledger_store
+        .append_authoritatively(
+            authority=ledger_authority,
+
+            record_type=(
+                LedgerRecordType
+                .REVIEW_RESULT
+            ),
+
+            payload=(
+                review_result_ledger_payload(
+                    result
+                )
+            ),
+
+            related_task_id=(
+                bound.campaign.task_id
+            ),
+
+            related_request_id=(
+                result.request
+                .review_request_id
+            ),
+
+            related_campaign_id=(
+                bound.campaign
+                .review_campaign_id
+            ),
+
+            actor_provenance_digest=(
+                result.reviewer_identity
+                .identity_envelope_digest
+            ),
+
+            ingestion_receipt_digest=(
+                result.reviewer_identity
+                .authenticated_ingestion_receipt_digest
+            ),
+
+            idempotency_key=(
+                "review-result:"
+                + result.review_result_digest
+            ),
+
+            created_at=(
+                result
+                .invocation_completed_at
+            ),
+        )
+    )
+
+    ingestion_outcome = (
+        ledger_store
+        .append_authoritatively(
+            authority=(
+                result_outcome.authority
+            ),
+
+            record_type=(
+                LedgerRecordType
+                .RESULT_INGESTION
+            ),
+
+            payload=(
+                result_ingestion_ledger_payload(
+                    ingestion
+                )
+            ),
+
+            related_task_id=(
+                bound.campaign.task_id
+            ),
+
+            related_request_id=(
+                result.request
+                .review_request_id
+            ),
+
+            related_campaign_id=(
+                bound.campaign
+                .review_campaign_id
+            ),
+
+            actor_provenance_digest=(
+                result.reviewer_identity
+                .identity_envelope_digest
+            ),
+
+            ingestion_receipt_digest=(
+                ingestion
+                .authenticated_ingestion_receipt_digest
+            ),
+
+            idempotency_key=(
+                "result-ingestion:"
+                + ingestion
+                .ingestion_payload_digest
+            ),
+
+            created_at=(
+                ingestion
+                .orchestrator_ingested_at
+            ),
+        )
+    )
+
+    return DurableRecordedReviewEvidenceV1(
+        authority=(
+            ingestion_outcome.authority
+        ),
+
+        snapshot=(
+            ingestion_outcome.snapshot
+        ),
+
+        result_record_digest=(
+            result_outcome.record
+            .record_digest
+        ),
+
+        ingestion_record_digest=(
+            ingestion_outcome.record
+            .record_digest
+        ),
+
+        result_duplicate=(
+            result_outcome.duplicate
+        ),
+
+        ingestion_duplicate=(
+            ingestion_outcome.duplicate
+        ),
+    )
+
+
 def _tombstoned_record_digests(
     snapshot: ReviewMeshLedgerSnapshotV1,
 ) -> frozenset[str]:
@@ -1117,12 +1347,6 @@ def _cross_campaign_vote_reuse_rejections(
         ):
             continue
 
-        if (
-            record.related_campaign_id
-            == current_campaign_id
-        ):
-            continue
-
         outer = (
             entry.payload_mapping()
         )
@@ -1137,6 +1361,18 @@ def _cross_campaign_vote_reuse_rejections(
                 "historical review-result ledger schema mismatch"
             )
 
+        if any(
+            type(outer[field]) is not str
+            for field in (
+                "schema_version",
+                "review_result_id",
+                "review_result_digest",
+            )
+        ):
+            raise ValueError(
+                "historical review-result ledger field type mismatch"
+            )
+
         if (
             outer["schema_version"]
             != RESULT_LEDGER_SCHEMA
@@ -1145,19 +1381,11 @@ def _cross_campaign_vote_reuse_rejections(
                 "historical review-result schema version mismatch"
             )
 
-        inner = (
+        inner = validate_review_result_stable_mapping_v1(
             outer[
                 "review_result_payload"
             ]
         )
-
-        if not isinstance(
-            inner,
-            dict,
-        ):
-            raise ValueError(
-                "historical review-result payload is invalid"
-            )
 
         historical_digest = (
             canonical_digest(
@@ -1188,18 +1416,29 @@ def _cross_campaign_vote_reuse_rejections(
                 "historical review-result id mismatch"
             )
 
-        required = {
-            "invocation_id",
-            "execution_nonce",
-            "execution_receipt_digest",
-        }
-
-        if not required.issubset(
-            inner
+        if (
+            record.related_request_id
+            != inner["review_request_id"]
+            or record.related_campaign_id
+            != inner["review_campaign_id"]
+            or record.actor_provenance_digest
+            != inner[
+                "reviewer_identity_envelope_digest"
+            ]
+            or record.created_at
+            != inner[
+                "invocation_completed_at"
+            ]
         ):
             raise ValueError(
-                "historical review-result vote identity incomplete"
+                "historical review-result ledger header binding mismatch"
             )
+
+        if (
+            record.related_campaign_id
+            == current_campaign_id
+        ):
+            continue
 
         historical[
             "review-result-digest"
@@ -1368,7 +1607,8 @@ def evaluate_owner_gate(
     *,
     bound: BoundReviewCampaignV1,
 
-    snapshot: ReviewMeshLedgerSnapshotV1,
+    ledger_store: ReviewMeshLedgerStoreV1,
+    ledger_authority: ReviewMeshLedgerAuthorityV1,
 
     results: tuple[
         ReviewResultPayloadV1,
@@ -1395,45 +1635,93 @@ def evaluate_owner_gate(
 
     gate_inputs: OrchestratorGateInputsV1,
 ) -> QuorumDecisionV1:
-    """Derive ledger/provenance trust before invoking quorum evaluation."""
+    """Derive trusted durable-ledger state before quorum evaluation.
+
+    A caller-created ``ReviewMeshLedgerSnapshotV1`` is deliberately not an
+    input. The configured authority binds the canonical store identity,
+    pinned genesis, trusted current head and record-count checkpoint. The
+    store reloads and verifies that exact checkpoint on every evaluation.
+    """
+
+    snapshot = None
+    reuse_rejections = ()
+    ledger_ok = False
 
     try:
+        if (
+            gate_inputs
+            .ledger_authority_identity_digest
+            != ledger_authority
+            .store_identity_digest
+        ):
+            raise ValueError(
+                "ledger authority identity is not the trusted gate authority"
+            )
+
+        if (
+            gate_inputs
+            .ledger_authority_checkpoint_digest
+            != ledger_authority
+            .checkpoint_digest
+        ):
+            raise ValueError(
+                "ledger authority checkpoint is not the trusted gate checkpoint"
+            )
+
+        snapshot = (
+            ledger_store
+            .load_authoritative(
+                ledger_authority
+            )
+        )
+
         ledger_ok = (
             snapshot.ledger
             .verify_continuity()
         )
 
-    except Exception:
-        ledger_ok = False
+        if not ledger_ok:
+            raise LedgerReconciliationError(
+                "authoritative ledger continuity verification failed"
+            )
 
-    if ledger_ok:
-        ledger_ok = all(
-            result_has_active_ledger_evidence(
+        # Reconcile every historical result before trusting current-result
+        # evidence. This both reserves execution identities across campaigns
+        # and makes malformed durable history a deterministic ledger block.
+        reuse_rejections = (
+            _cross_campaign_vote_reuse_rejections(
                 snapshot=snapshot,
                 bound=bound,
-                result=result,
+                results=results,
             )
-            for result in results
         )
 
-    reuse_rejections = ()
-
-    if ledger_ok:
-        try:
-            reuse_rejections = (
-                _cross_campaign_vote_reuse_rejections(
-                    snapshot=snapshot,
-                    bound=bound,
-                    results=results,
+        if not reuse_rejections:
+            ledger_ok = (
+                ledger_ok
+                and all(
+                    result_has_active_ledger_evidence(
+                        snapshot=snapshot,
+                        bound=bound,
+                        result=result,
+                    )
+                    for result in results
                 )
             )
 
-        except ValueError:
-            ledger_ok = False
+    except (
+        LedgerReconciliationError,
+        KeyError,
+        OSError,
+        ValueError,
+    ):
+        # Authority, continuity, payload decoding and evidence-binding
+        # ambiguity all fail closed to the protocol reconciliation state.
+        ledger_ok = False
+        reuse_rejections = ()
 
     if (
-        ledger_ok
-        and reuse_rejections
+        reuse_rejections
     ):
         return QuorumDecisionV1(
             state=(

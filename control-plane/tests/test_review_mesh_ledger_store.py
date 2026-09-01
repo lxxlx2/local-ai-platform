@@ -12,6 +12,8 @@ from local_ai_control.services.review_mesh_ledger import (
 )
 
 from local_ai_control.services.review_mesh_ledger_store import (
+    AUTHORITY_SCHEMA_VERSION,
+    ReviewMeshLedgerAuthorityV1,
     ReviewMeshLedgerStoreV1,
 )
 
@@ -54,6 +56,54 @@ def append(
         ),
 
         related_task_id="g0a-slice5",
+
+        related_request_id=(
+            "rr1:" + A
+        ),
+
+        related_campaign_id=(
+            "rc1:" + B
+        ),
+
+        actor_provenance_digest=C,
+        ingestion_receipt_digest=D,
+
+        idempotency_key=key,
+
+        created_at=created,
+
+        expected_head_digest=(
+            expected_head
+        ),
+    )
+
+
+def append_authoritatively(
+    store,
+    authority,
+    *,
+    key,
+    payload=None,
+    expected_head=None,
+    created="2026-08-30T06:00:00+00:00",
+):
+    return store.append_authoritatively(
+        authority=authority,
+
+        record_type=(
+            LedgerRecordType.REVIEW_RESULT
+        ),
+
+        payload=(
+            {
+                "value": key,
+                "evidence": A,
+            }
+            if payload is None
+            else payload
+        ),
+
+        related_task_id="g0a-authority",
 
         related_request_id=(
             "rr1:" + A
@@ -843,4 +893,315 @@ def test_payload_lookup_requires_exact_record_digest(
     ):
         loaded.payload_for_record(
             "0" * 64
+        )
+
+
+def test_authority_round_trip_and_restart_preserve_empty_checkpoint(
+    tmp_path,
+):
+    path = store_path(
+        tmp_path
+    )
+
+    store = ReviewMeshLedgerStoreV1(
+        path
+    )
+
+    authority = store.initialize_authority(
+        authority_id="owner-private-g0a"
+    )
+
+    mapping = authority.to_mapping()
+
+    assert (
+        mapping["schema_version"]
+        == AUTHORITY_SCHEMA_VERSION
+    )
+    assert authority.trusted_record_count == 0
+    assert (
+        authority.trusted_head_digest
+        == LEDGER_GENESIS_DIGEST
+    )
+
+    restored = (
+        ReviewMeshLedgerAuthorityV1
+        .from_mapping(mapping)
+    )
+
+    restarted = ReviewMeshLedgerStoreV1(
+        path
+    )
+
+    loaded = restarted.load_authoritative(
+        restored
+    )
+
+    assert restored == authority
+    assert loaded.record_count == 0
+    assert loaded.head_digest == LEDGER_GENESIS_DIGEST
+
+
+def test_new_authority_cannot_adopt_non_empty_store(
+    tmp_path,
+):
+    store = ReviewMeshLedgerStoreV1(
+        store_path(tmp_path)
+    )
+
+    append(
+        store,
+        key="pre-existing-record",
+    )
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="cannot initialize authority from non-empty ledger",
+    ):
+        store.initialize_authority(
+            authority_id="manufactured-authority"
+        )
+
+
+def test_authoritative_append_advances_only_verified_checkpoint(
+    tmp_path,
+):
+    store = ReviewMeshLedgerStoreV1(
+        store_path(tmp_path)
+    )
+
+    authority = store.initialize_authority(
+        authority_id="owner-private-g0a"
+    )
+
+    advanced = append_authoritatively(
+        store,
+        authority,
+        key="record-1",
+        expected_head=LEDGER_GENESIS_DIGEST,
+    )
+
+    assert advanced.persisted is True
+    assert advanced.duplicate is False
+    assert advanced.authority.trusted_record_count == 1
+    assert (
+        advanced.authority.trusted_head_digest
+        == advanced.snapshot.head_digest
+        == advanced.record.record_digest
+    )
+    assert (
+        advanced.authority.store_identity_digest
+        == authority.store_identity_digest
+    )
+    assert (
+        advanced.authority.checkpoint_digest
+        != authority.checkpoint_digest
+    )
+
+    duplicate = append_authoritatively(
+        store,
+        advanced.authority,
+        key="record-1",
+        expected_head=advanced.snapshot.head_digest,
+    )
+
+    assert duplicate.duplicate is True
+    assert duplicate.persisted is False
+    assert duplicate.authority == advanced.authority
+    assert duplicate.snapshot == advanced.snapshot
+
+    reloaded = store.load_authoritative(
+        advanced.authority
+    )
+
+    assert reloaded == advanced.snapshot
+
+
+def test_stale_authority_rejects_newer_durable_store(
+    tmp_path,
+):
+    store = ReviewMeshLedgerStoreV1(
+        store_path(tmp_path)
+    )
+
+    stale = store.initialize_authority(
+        authority_id="owner-private-g0a"
+    )
+
+    append_authoritatively(
+        store,
+        stale,
+        key="record-1",
+    )
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="checkpoint is not current",
+    ):
+        store.load_authoritative(
+            stale
+        )
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="checkpoint is not current",
+    ):
+        append_authoritatively(
+            store,
+            stale,
+            key="record-2",
+        )
+
+
+def test_authority_rejects_wrong_canonical_store_path(
+    tmp_path,
+):
+    store = ReviewMeshLedgerStoreV1(
+        store_path(tmp_path)
+    )
+
+    authority = store.initialize_authority(
+        authority_id="owner-private-g0a"
+    )
+
+    other = ReviewMeshLedgerStoreV1(
+        tmp_path / "other-ledger.json"
+    )
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="store path mismatch",
+    ):
+        other.load_authoritative(
+            authority
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-field",
+        "unknown-field",
+        "bool-record-count",
+        "short-identity-digest",
+        "uppercase-checkpoint-digest",
+    ),
+)
+def test_authority_mapping_rejects_malformed_schema_and_types(
+    tmp_path,
+    mutation,
+):
+    store = ReviewMeshLedgerStoreV1(
+        store_path(tmp_path)
+    )
+
+    raw = store.initialize_authority(
+        authority_id="owner-private-g0a"
+    ).to_mapping()
+
+    if mutation == "missing-field":
+        raw.pop("authority_id")
+    elif mutation == "unknown-field":
+        raw["unexpected"] = "field"
+    elif mutation == "bool-record-count":
+        raw["trusted_record_count"] = True
+    elif mutation == "short-identity-digest":
+        raw["store_identity_digest"] = "0" * 63
+    else:
+        raw["checkpoint_digest"] = (
+            raw["checkpoint_digest"].upper()
+        )
+
+    with pytest.raises(
+        LedgerReconciliationError,
+    ):
+        ReviewMeshLedgerAuthorityV1.from_mapping(
+            raw
+        )
+
+
+def test_authority_rejects_wrong_genesis_and_expected_head_type(
+    tmp_path,
+):
+    store = ReviewMeshLedgerStoreV1(
+        store_path(tmp_path)
+    )
+
+    authority = store.initialize_authority(
+        authority_id="owner-private-g0a"
+    )
+
+    raw = authority.to_mapping()
+    raw["genesis_digest"] = "0" * 64
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="genesis mismatch",
+    ):
+        ReviewMeshLedgerAuthorityV1.from_mapping(
+            raw
+        )
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="invalid type",
+    ):
+        append_authoritatively(
+            store,
+            authority,
+            key="record-1",
+            expected_head=True,
+        )
+
+
+def test_authoritative_crash_after_replace_requires_reconciliation(
+    tmp_path,
+):
+    path = store_path(
+        tmp_path
+    )
+
+    normal = ReviewMeshLedgerStoreV1(
+        path
+    )
+
+    trusted = normal.initialize_authority(
+        authority_id="owner-private-g0a"
+    )
+
+    def fail_after_replace(stage):
+        if stage == "AFTER_REPLACE":
+            raise RuntimeError(
+                "SIMULATED_AUTHORITY_CHECKPOINT_WINDOW"
+            )
+
+    crashing = ReviewMeshLedgerStoreV1(
+        path,
+        fault_hook=fail_after_replace,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="SIMULATED_AUTHORITY_CHECKPOINT_WINDOW",
+    ):
+        append_authoritatively(
+            crashing,
+            trusted,
+            key="record-1",
+        )
+
+    # The ledger may contain the complete next atomic snapshot, while the
+    # independently persisted Owner checkpoint remains at H0.  Adopting H1
+    # automatically would erase the rollback/fork trust anchor, so restart
+    # must stop at explicit reconciliation instead.
+    durable = normal.load()
+
+    assert durable.record_count == 1
+    assert durable.ledger.verify_continuity()
+
+    with pytest.raises(
+        LedgerReconciliationError,
+        match="checkpoint is not current",
+    ):
+        normal.load_authoritative(
+            trusted
         )

@@ -1575,6 +1575,370 @@ class ReviewResultPayloadV1:
         )
 
 
+_REVIEW_RESULT_STABLE_MAPPING_KEYS = frozenset({
+    "protocol_version",
+    "review_request_id",
+    "request_digest",
+    "review_campaign_id",
+    "campaign_context_digest",
+    "review_work_unit_id",
+    "lane_attempt",
+    "review_round",
+    "candidate_generation",
+    "review_generation",
+    "objective_sha256",
+    "objective_manifest_hash",
+    "base_sha",
+    "candidate_sha",
+    "candidate_identity_digest",
+    "candidate_diff_sha256",
+    "review_scope_manifest_digest",
+    "reviewed_material_digest",
+    "local_gate_evidence_digest",
+    "policy_revision",
+    "policy_decision_digest",
+    "risk_decision_digest",
+    "privacy_decision_digest",
+    "quorum_policy_digest",
+    "lineage_registry_snapshot_digest",
+    "qualification_registry_snapshot_digest",
+    "contributor_set_digest",
+    "reviewer_identity_envelope_digest",
+    "qualification_evidence_digest",
+    "invocation_id",
+    "execution_nonce",
+    "execution_receipt_digest",
+    "claimed_verdict",
+    "normalized_findings",
+    "findings_digest",
+    "invocation_completed_at",
+    "raw_result_content_digest",
+    "raw_result_storage_ref",
+})
+
+
+def _historical_string(
+    raw: dict,
+    field: str,
+) -> str:
+    value = raw[field]
+
+    if type(value) is not str:
+        raise ValueError(
+            f"historical review-result field {field} must be a string"
+        )
+
+    return value
+
+
+def _historical_positive_integer(
+    raw: dict,
+    field: str,
+    *,
+    bounded_uint64: bool,
+) -> int:
+    value = raw[field]
+
+    if (
+        type(value) is not int
+        or value < 1
+        or (
+            bounded_uint64
+            and value >= 2**64
+        )
+    ):
+        raise ValueError(
+            f"historical review-result field {field} "
+            "must be a positive integer"
+        )
+
+    return value
+
+
+def _validate_historical_findings(
+    raw: object,
+) -> list[dict]:
+    if type(raw) is not list:
+        raise ValueError(
+            "historical review-result findings must be a list"
+        )
+
+    if len(raw) > 100:
+        raise ValueError(
+            "historical review-result findings exceed bound"
+        )
+
+    exact_keys = {
+        "scope",
+        "severity",
+        "file",
+        "evidence",
+        "recommended_fix",
+    }
+
+    validated = []
+
+    for item in raw:
+        if (
+            type(item) is not dict
+            or set(item) != exact_keys
+        ):
+            raise ValueError(
+                "historical review-result finding fields are invalid"
+            )
+
+        for field in (
+            "scope",
+            "severity",
+            "evidence",
+            "recommended_fix",
+        ):
+            if type(item[field]) is not str:
+                raise ValueError(
+                    "historical review-result finding field "
+                    f"{field} must be a string"
+                )
+
+        if (
+            item["file"] is not None
+            and type(item["file"])
+            is not str
+        ):
+            raise ValueError(
+                "historical review-result finding field file "
+                "must be a string or null"
+            )
+
+        if item["scope"] not in _FINDING_SCOPES:
+            raise ValueError(
+                "historical review-result finding scope is invalid"
+            )
+
+        if item["severity"] not in _FINDING_SEVERITIES:
+            raise ValueError(
+                "historical review-result finding severity is invalid"
+            )
+
+        if item["file"] is not None:
+            _require_text(
+                item["file"],
+                "historical review-result finding file",
+                max_bytes=4096,
+            )
+
+        _require_text(
+            item["evidence"],
+            "historical review-result finding evidence",
+        )
+
+        _require_text(
+            item["recommended_fix"],
+            "historical review-result finding recommended fix",
+        )
+
+        validated.append(dict(item))
+
+    return validated
+
+
+def _validate_historical_review_result_stable_mapping(
+    raw: object,
+) -> dict:
+    if (
+        type(raw) is not dict
+        or set(raw)
+        != _REVIEW_RESULT_STABLE_MAPPING_KEYS
+    ):
+        raise ValueError(
+            "historical review-result stable mapping schema mismatch"
+        )
+
+    string_fields = tuple(
+        _REVIEW_RESULT_STABLE_MAPPING_KEYS
+        - {
+            "lane_attempt",
+            "review_round",
+            "candidate_generation",
+            "review_generation",
+            "normalized_findings",
+        }
+    )
+
+    strings = {
+        field: _historical_string(
+            raw,
+            field,
+        )
+        for field in string_fields
+    }
+
+    if strings["protocol_version"] != PROTOCOL_VERSION:
+        raise ValueError(
+            "historical review-result protocol version mismatch"
+        )
+
+    for field in (
+        "lane_attempt",
+    ):
+        _historical_positive_integer(
+            raw,
+            field,
+            bounded_uint64=False,
+        )
+
+    for field in (
+        "review_round",
+        "candidate_generation",
+        "review_generation",
+    ):
+        _historical_positive_integer(
+            raw,
+            field,
+            bounded_uint64=True,
+        )
+
+    for field in (
+        "review_work_unit_id",
+        "policy_revision",
+        "invocation_id",
+        "raw_result_storage_ref",
+    ):
+        _require_identifier(
+            strings[field],
+            f"historical review-result {field}",
+        )
+
+    for field in (
+        "request_digest",
+        "campaign_context_digest",
+        "objective_sha256",
+        "objective_manifest_hash",
+        "candidate_identity_digest",
+        "candidate_diff_sha256",
+        "review_scope_manifest_digest",
+        "reviewed_material_digest",
+        "local_gate_evidence_digest",
+        "policy_decision_digest",
+        "risk_decision_digest",
+        "privacy_decision_digest",
+        "quorum_policy_digest",
+        "lineage_registry_snapshot_digest",
+        "qualification_registry_snapshot_digest",
+        "contributor_set_digest",
+        "reviewer_identity_envelope_digest",
+        "qualification_evidence_digest",
+        "execution_receipt_digest",
+        "findings_digest",
+        "raw_result_content_digest",
+    ):
+        _require_sha256(
+            strings[field],
+            f"historical review-result {field}",
+        )
+
+    for field in (
+        "base_sha",
+        "candidate_sha",
+    ):
+        _require_sha40(
+            strings[field],
+            f"historical review-result {field}",
+        )
+
+    _require_nonce(
+        strings["execution_nonce"]
+    )
+
+    _parse_timestamp(
+        strings["invocation_completed_at"],
+        "historical review-result invocation completion timestamp",
+    )
+
+    try:
+        ReviewVerdict(
+            strings["claimed_verdict"]
+        )
+    except ValueError as error:
+        raise ValueError(
+            "historical review-result verdict is invalid"
+        ) from error
+
+    findings = _validate_historical_findings(
+        raw["normalized_findings"]
+    )
+
+    if (
+        strings["findings_digest"]
+        != canonical_digest(findings)
+    ):
+        raise ValueError(
+            "historical review-result findings digest mismatch"
+        )
+
+    expected_request_id = (
+        "rr1:"
+        + strings["request_digest"]
+    )
+
+    if (
+        strings["review_request_id"]
+        != expected_request_id
+    ):
+        raise ValueError(
+            "historical review-result request id mismatch"
+        )
+
+    expected_campaign_id = (
+        "rc1:"
+        + strings["campaign_context_digest"]
+    )
+
+    if (
+        strings["review_campaign_id"]
+        != expected_campaign_id
+    ):
+        raise ValueError(
+            "historical review-result campaign id mismatch"
+        )
+
+    validated = dict(raw)
+
+    validated["normalized_findings"] = [
+        dict(item)
+        for item in findings
+    ]
+
+    return validated
+
+
+def validate_review_result_stable_mapping_v1(
+    raw: object,
+) -> dict:
+    """Strictly decode one stored ``ReviewResultPayloadV1`` mapping.
+
+    Historical ledger content is untrusted even when its surrounding record
+    digests are internally consistent. This boundary deliberately performs no
+    string coercion and converts structural access failures to ``ValueError``
+    so reconciliation callers can fail closed deterministically.
+    """
+
+    try:
+        return (
+            _validate_historical_review_result_stable_mapping(
+                raw
+            )
+        )
+    except (
+        KeyError,
+        TypeError,
+        UnicodeError,
+        OverflowError,
+    ) as error:
+        raise ValueError(
+            "historical review-result stable mapping is invalid"
+        ) from error
+
+
 @dataclass(frozen=True)
 class ResultIngestionV1:
     """Post-result trusted ingestion payload.

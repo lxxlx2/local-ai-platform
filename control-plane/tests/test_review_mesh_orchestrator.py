@@ -34,7 +34,14 @@ from local_ai_control.services.review_mesh_decisions import (
 )
 
 from local_ai_control.services.review_mesh_ledger_store import (
+    ReviewMeshLedgerAuthorityV1,
+    ReviewMeshLedgerStoreV1,
     ReviewMeshLedgerSnapshotV1,
+)
+
+from local_ai_control.services.review_mesh_ledger import (
+    LedgerRecordType,
+    ReviewMeshLedgerV1,
 )
 
 from local_ai_control.services.review_mesh_quorum import (
@@ -48,12 +55,15 @@ from local_ai_control.services.review_mesh_quorum import (
 from local_ai_control.services.review_mesh_orchestrator import (
     BoundReviewCampaignV1,
     CampaignBindingInputsV1,
+    RESULT_LEDGER_SCHEMA,
     OrchestratorGateInputsV1,
     bind_review_task,
     build_review_request,
     evaluate_owner_gate,
     record_result_evidence,
+    record_result_evidence_durably,
     result_has_active_ledger_evidence,
+    review_result_ledger_payload,
 )
 
 from local_ai_control.services.review_mesh_protocol import (
@@ -464,6 +474,7 @@ def reviewer_request(
     bound,
     *,
     family,
+    request_nonce=None,
 ):
     if family == "gemini":
         return build_review_request(
@@ -481,7 +492,11 @@ def reviewer_request(
 
             lane_attempt=1,
 
-            request_nonce="1" * 32,
+            request_nonce=(
+                "1" * 32
+                if request_nonce is None
+                else request_nonce
+            ),
 
             created_at=(
                 "2026-08-30T05:10:00+00:00"
@@ -507,7 +522,11 @@ def reviewer_request(
 
         lane_attempt=1,
 
-        request_nonce="2" * 32,
+        request_nonce=(
+            "2" * 32
+            if request_nonce is None
+            else request_nonce
+        ),
 
         created_at=(
             "2026-08-30T05:10:00+00:00"
@@ -523,10 +542,15 @@ def reviewer_result(
     bound,
     *,
     family,
+    invocation_id=None,
+    execution_nonce_override=None,
+    execution_receipt_digest=None,
+    request_nonce=None,
 ):
     req = reviewer_request(
         bound,
         family=family,
+        request_nonce=request_nonce,
     )
 
     if family == "gemini":
@@ -536,10 +560,25 @@ def reviewer_result(
         foundation = "gemini-3.6-flash"
         revision = "gemini-3.6-flash"
         lineage = "google-gemini3"
-        invocation = "gemini-invocation"
-        receipt = "4" * 64
+        invocation = (
+            "gemini-invocation"
+            if invocation_id is None
+            else invocation_id
+        )
+
+        receipt = (
+            "4" * 64
+            if execution_receipt_digest is None
+            else execution_receipt_digest
+        )
+
         qualification = "5" * 64
-        execution_nonce = "6" * 32
+
+        execution_nonce = (
+            "6" * 32
+            if execution_nonce_override is None
+            else execution_nonce_override
+        )
 
     else:
         provider = "mistral"
@@ -548,10 +587,25 @@ def reviewer_result(
         foundation = "mistral-large"
         revision = "mistral-large-v1"
         lineage = "mistral-large"
-        invocation = "mistral-invocation"
-        receipt = "7" * 64
+        invocation = (
+            "mistral-invocation"
+            if invocation_id is None
+            else invocation_id
+        )
+
+        receipt = (
+            "7" * 64
+            if execution_receipt_digest is None
+            else execution_receipt_digest
+        )
+
         qualification = "8" * 64
-        execution_nonce = "9" * 32
+
+        execution_nonce = (
+            "9" * 32
+            if execution_nonce_override is None
+            else execution_nonce_override
+        )
 
     identity = IdentityEnvelopeV1(
         authenticated_adapter_principal=(
@@ -790,11 +844,35 @@ def contributor_facts(
     }
 
 
+def authoritative_ledger(
+    tmp_path,
+    *,
+    name="review-mesh-authority.json",
+):
+    store = ReviewMeshLedgerStoreV1(
+        tmp_path / name
+    )
+
+    authority = store.initialize_authority(
+        authority_id="g0a-test-authority"
+    )
+
+    return store, authority
+
+
 def clean_gate_inputs(
+    authority,
     *,
     capacity=ReviewerCapacityState.AVAILABLE,
 ):
     return OrchestratorGateInputsV1(
+        ledger_authority_identity_digest=(
+            authority.store_identity_digest
+        ),
+        ledger_authority_checkpoint_digest=(
+            authority.checkpoint_digest
+        ),
+
         deterministic_gates=(
             TrustedCheckStatus.PASS
         ),
@@ -812,6 +890,186 @@ def clean_gate_inputs(
         ),
 
         reviewer_capacity=capacity,
+    )
+
+
+def owner_gate_decision(
+    *,
+    bound,
+    store,
+    authority,
+    trusted_authority,
+    results,
+    history,
+    registry,
+    policy,
+):
+    return evaluate_owner_gate(
+        bound=bound,
+
+        ledger_store=store,
+        ledger_authority=authority,
+
+        results=results,
+
+        contributor_history=history,
+
+        contributor_identities=(
+            contributor_facts(
+                registry
+            )
+        ),
+
+        lineage_registry=registry,
+
+        qualification_by_evidence_digest={
+            result.reviewer_identity
+            .qualification_evidence_digest:
+                qualification(result)
+            for result in results
+        },
+
+        quorum_policy=policy,
+
+        inherited_findings=(
+            InheritedFindingSetV1()
+        ),
+
+        gate_inputs=(
+            clean_gate_inputs(
+                trusted_authority
+            )
+        ),
+    )
+
+
+def next_review_campaign(
+    bound,
+):
+    return replace(
+        bound,
+        campaign=(
+            bound.campaign
+            .new_review_generation(
+                local_gate_evidence_digest=(
+                    "0" * 64
+                )
+            )
+        ),
+    )
+
+
+def record_ready_quorum(
+    *,
+    store,
+    authority,
+    bound,
+):
+    gemini = reviewer_result(
+        bound,
+        family="gemini",
+    )
+
+    mistral = reviewer_result(
+        bound,
+        family="mistral",
+    )
+
+    first = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=authority,
+        bound=bound,
+        result=gemini[0],
+        ingestion=gemini[1],
+    )
+
+    second = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=first.authority,
+        bound=bound,
+        result=mistral[0],
+        ingestion=mistral[1],
+    )
+
+    return (
+        second,
+        (
+            gemini[0],
+            mistral[0],
+        ),
+    )
+
+
+def append_historical_result_mapping(
+    *,
+    store,
+    authority,
+    result,
+    inner,
+    mutate_outer=None,
+):
+    digest = canonical_digest(
+        inner
+    )
+
+    payload = {
+        "schema_version":
+            RESULT_LEDGER_SCHEMA,
+
+        "review_result_id":
+            "rrs1:" + digest,
+
+        "review_result_digest":
+            digest,
+
+        "review_result_payload":
+            inner,
+    }
+
+    if mutate_outer is not None:
+        mutate_outer(
+            payload
+        )
+
+    return store.append_authoritatively(
+        authority=authority,
+
+        record_type=(
+            LedgerRecordType.REVIEW_RESULT
+        ),
+
+        payload=payload,
+
+        related_task_id=(
+            result.request.campaign.task_id
+        ),
+
+        related_request_id=(
+            result.request.review_request_id
+        ),
+
+        related_campaign_id=(
+            result.request.campaign.review_campaign_id
+        ),
+
+        actor_provenance_digest=(
+            result.reviewer_identity
+            .identity_envelope_digest
+        ),
+
+        ingestion_receipt_digest=(
+            result.reviewer_identity
+            .authenticated_ingestion_receipt_digest
+        ),
+
+        idempotency_key=(
+            "historical-result:"
+            + digest
+        ),
+
+        created_at=(
+            result.invocation_completed_at
+        ),
     )
 
 
@@ -1098,7 +1356,9 @@ def test_result_evidence_replay_is_idempotent():
     )
 
 
-def test_result_without_ingestion_blocks_owner_gate():
+def test_result_without_ingestion_blocks_owner_gate(
+    tmp_path,
+):
     (
         _,
         _,
@@ -1115,28 +1375,64 @@ def test_result_without_ingestion_blocks_owner_gate():
         )
     )
 
-    recorded = record_result_evidence(
-        snapshot=(
-            ReviewMeshLedgerSnapshotV1()
-        ),
-
-        bound=bound,
-        result=result,
-        ingestion=ingestion,
+    store, authority = (
+        authoritative_ledger(
+            tmp_path
+        )
     )
 
-    result_only_snapshot = (
-        ReviewMeshLedgerSnapshotV1(
-            recorded.snapshot
-            .entries[:1]
-        )
+    result_only = store.append_authoritatively(
+        authority=authority,
+
+        record_type=(
+            LedgerRecordType.REVIEW_RESULT
+        ),
+
+        payload=(
+            review_result_ledger_payload(
+                result
+            )
+        ),
+
+        related_task_id=(
+            bound.campaign.task_id
+        ),
+
+        related_request_id=(
+            result.request.review_request_id
+        ),
+
+        related_campaign_id=(
+            bound.campaign.review_campaign_id
+        ),
+
+        actor_provenance_digest=(
+            result.reviewer_identity
+            .identity_envelope_digest
+        ),
+
+        ingestion_receipt_digest=(
+            result.reviewer_identity
+            .authenticated_ingestion_receipt_digest
+        ),
+
+        idempotency_key=(
+            "review-result:"
+            + result.review_result_digest
+        ),
+
+        created_at=(
+            result.invocation_completed_at
+        ),
     )
 
     decision = evaluate_owner_gate(
         bound=bound,
 
-        snapshot=(
-            result_only_snapshot
+        ledger_store=store,
+
+        ledger_authority=(
+            result_only.authority
         ),
 
         results=(result,),
@@ -1166,7 +1462,9 @@ def test_result_without_ingestion_blocks_owner_gate():
         ),
 
         gate_inputs=(
-            clean_gate_inputs()
+            clean_gate_inputs(
+                result_only.authority
+            )
         ),
     )
 
@@ -1177,7 +1475,9 @@ def test_result_without_ingestion_blocks_owner_gate():
     )
 
 
-def test_missing_contributor_identity_blocks_before_capacity_wait():
+def test_missing_contributor_identity_blocks_before_capacity_wait(
+    tmp_path,
+):
     (
         _,
         _,
@@ -1187,12 +1487,16 @@ def test_missing_contributor_identity_blocks_before_capacity_wait():
         bound,
     ) = bound_fixture()
 
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
     decision = evaluate_owner_gate(
         bound=bound,
 
-        snapshot=(
-            ReviewMeshLedgerSnapshotV1()
-        ),
+        ledger_store=store,
+
+        ledger_authority=authority,
 
         results=(),
 
@@ -1212,6 +1516,8 @@ def test_missing_contributor_identity_blocks_before_capacity_wait():
 
         gate_inputs=(
             clean_gate_inputs(
+                authority,
+
                 capacity=(
                     ReviewerCapacityState
                     .TEMPORARILY_UNAVAILABLE
@@ -1227,7 +1533,9 @@ def test_missing_contributor_identity_blocks_before_capacity_wait():
     )
 
 
-def test_clean_capacity_shortage_waits_for_review():
+def test_clean_capacity_shortage_waits_for_review(
+    tmp_path,
+):
     (
         _,
         _,
@@ -1237,12 +1545,16 @@ def test_clean_capacity_shortage_waits_for_review():
         bound,
     ) = bound_fixture()
 
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
     decision = evaluate_owner_gate(
         bound=bound,
 
-        snapshot=(
-            ReviewMeshLedgerSnapshotV1()
-        ),
+        ledger_store=store,
+
+        ledger_authority=authority,
 
         results=(),
 
@@ -1266,6 +1578,8 @@ def test_clean_capacity_shortage_waits_for_review():
 
         gate_inputs=(
             clean_gate_inputs(
+                authority,
+
                 capacity=(
                     ReviewerCapacityState
                     .TEMPORARILY_UNAVAILABLE
@@ -1281,7 +1595,9 @@ def test_clean_capacity_shortage_waits_for_review():
     )
 
 
-def test_two_ledger_backed_independent_votes_reach_owner_gate():
+def test_two_ledger_backed_independent_votes_reach_owner_gate(
+    tmp_path,
+):
     (
         _,
         _,
@@ -1305,12 +1621,16 @@ def test_two_ledger_backed_independent_votes_reach_owner_gate():
         )
     )
 
-    snapshot = (
-        ReviewMeshLedgerSnapshotV1()
+    store, authority = (
+        authoritative_ledger(
+            tmp_path
+        )
     )
 
-    first = record_result_evidence(
-        snapshot=snapshot,
+    first = record_result_evidence_durably(
+        ledger_store=store,
+
+        ledger_authority=authority,
 
         bound=bound,
 
@@ -1319,8 +1639,10 @@ def test_two_ledger_backed_independent_votes_reach_owner_gate():
         ingestion=gemini_ingestion,
     )
 
-    second = record_result_evidence(
-        snapshot=first.snapshot,
+    second = record_result_evidence_durably(
+        ledger_store=store,
+
+        ledger_authority=first.authority,
 
         bound=bound,
 
@@ -1348,8 +1670,10 @@ def test_two_ledger_backed_independent_votes_reach_owner_gate():
     decision = evaluate_owner_gate(
         bound=bound,
 
-        snapshot=(
-            second.snapshot
+        ledger_store=store,
+
+        ledger_authority=(
+            second.authority
         ),
 
         results=(
@@ -1378,7 +1702,9 @@ def test_two_ledger_backed_independent_votes_reach_owner_gate():
         ),
 
         gate_inputs=(
-            clean_gate_inputs()
+            clean_gate_inputs(
+                second.authority
+            )
         ),
     )
 
@@ -1403,7 +1729,9 @@ def test_two_ledger_backed_independent_votes_reach_owner_gate():
     )
 
 
-def test_cross_campaign_review_execution_reuse_is_untrusted():
+def test_cross_campaign_review_execution_reuse_is_untrusted(
+    tmp_path,
+):
     (
         _,
         _,
@@ -1421,11 +1749,17 @@ def test_cross_campaign_review_execution_reuse_is_untrusted():
         family="gemini",
     )
 
+    store, authority = (
+        authoritative_ledger(
+            tmp_path
+        )
+    )
+
     first_recorded = (
-        record_result_evidence(
-            snapshot=(
-                ReviewMeshLedgerSnapshotV1()
-            ),
+        record_result_evidence_durably(
+            ledger_store=store,
+
+            ledger_authority=authority,
 
             bound=first_bound,
 
@@ -1487,9 +1821,11 @@ def test_cross_campaign_review_execution_reuse_is_untrusted():
     )
 
     second_recorded = (
-        record_result_evidence(
-            snapshot=(
-                first_recorded.snapshot
+        record_result_evidence_durably(
+            ledger_store=store,
+
+            ledger_authority=(
+                first_recorded.authority
             ),
 
             bound=second_bound,
@@ -1503,8 +1839,10 @@ def test_cross_campaign_review_execution_reuse_is_untrusted():
     decision = evaluate_owner_gate(
         bound=second_bound,
 
-        snapshot=(
-            second_recorded.snapshot
+        ledger_store=store,
+
+        ledger_authority=(
+            second_recorded.authority
         ),
 
         results=(
@@ -1537,7 +1875,9 @@ def test_cross_campaign_review_execution_reuse_is_untrusted():
         ),
 
         gate_inputs=(
-            clean_gate_inputs()
+            clean_gate_inputs(
+                second_recorded.authority
+            )
         ),
     )
 
@@ -1569,3 +1909,879 @@ def test_cross_campaign_review_execution_reuse_is_untrusted():
             "invocation-id-reuse"
         )
     )
+
+
+def test_fresh_genesis_checkpoint_substitution_is_blocked(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        first_bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    first_result, first_ingestion = reviewer_result(
+        first_bound,
+        family="gemini",
+    )
+
+    first_recorded = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=authority,
+        bound=first_bound,
+        result=first_result,
+        ingestion=first_ingestion,
+    )
+
+    trusted_authority = first_recorded.authority
+
+    assert trusted_authority.trusted_record_count == 2
+
+    # Simulate replacement/rollback of the durable history with a fresh,
+    # structurally valid genesis at the exact same canonical store path.
+    #
+    # Reusing the same authority_id intentionally preserves store identity.
+    store._atomic_write(
+        ReviewMeshLedgerSnapshotV1()
+    )
+
+    forged_genesis_authority = store.initialize_authority(
+        authority_id=trusted_authority.authority_id
+    )
+
+    assert (
+        forged_genesis_authority.store_identity_digest
+        == trusted_authority.store_identity_digest
+    )
+    assert (
+        forged_genesis_authority.checkpoint_digest
+        != trusted_authority.checkpoint_digest
+    )
+
+    second_bound = next_review_campaign(
+        first_bound
+    )
+
+    second_gemini_result, second_gemini_ingestion = (
+        reviewer_result(
+            second_bound,
+            family="gemini",
+        )
+    )
+
+    # The helper deliberately reuses Gemini's trusted execution identity.
+    assert (
+        second_gemini_result.invocation_id
+        == first_result.invocation_id
+    )
+    assert (
+        second_gemini_result.execution_nonce
+        == first_result.execution_nonce
+    )
+    assert (
+        second_gemini_result.execution_receipt_digest
+        == first_result.execution_receipt_digest
+    )
+
+    second_mistral_result, second_mistral_ingestion = (
+        reviewer_result(
+            second_bound,
+            family="mistral",
+        )
+    )
+
+    second_first = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=forged_genesis_authority,
+        bound=second_bound,
+        result=second_gemini_result,
+        ingestion=second_gemini_ingestion,
+    )
+
+    second_recorded = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=second_first.authority,
+        bound=second_bound,
+        result=second_mistral_result,
+        ingestion=second_mistral_ingestion,
+    )
+
+    # trusted_authority represents the Owner-private checkpoint that existed
+    # before the durable ledger was replaced. A fresh-genesis authority must
+    # not be accepted merely because its store identity is unchanged.
+    decision = owner_gate_decision(
+        bound=second_bound,
+        store=store,
+        authority=second_recorded.authority,
+        trusted_authority=trusted_authority,
+        results=(
+            second_gemini_result,
+            second_mistral_result,
+        ),
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+
+    assert (
+        decision.protected_action_authorized
+        is False
+    )
+
+
+def test_stale_authority_checkpoint_against_newer_store_is_blocked(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    recorded, results = record_ready_quorum(
+        store=store,
+        authority=authority,
+        bound=bound,
+    )
+
+    decision = owner_gate_decision(
+        bound=bound,
+        store=store,
+        authority=authority,
+        trusted_authority=recorded.authority,
+        results=results,
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+    assert decision.protected_action_authorized is False
+
+
+def test_valid_old_prefix_rollback_is_blocked(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    gemini_result, gemini_ingestion = reviewer_result(
+        bound,
+        family="gemini",
+    )
+
+    prefix = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=authority,
+        bound=bound,
+        result=gemini_result,
+        ingestion=gemini_ingestion,
+    )
+
+    mistral_result, mistral_ingestion = reviewer_result(
+        bound,
+        family="mistral",
+    )
+
+    authoritative = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=prefix.authority,
+        bound=bound,
+        result=mistral_result,
+        ingestion=mistral_ingestion,
+    )
+
+    assert prefix.snapshot.ledger.verify_continuity()
+    assert (
+        prefix.snapshot.record_count
+        < authoritative.snapshot.record_count
+    )
+
+    store._atomic_write(
+        prefix.snapshot
+    )
+
+    decision = owner_gate_decision(
+        bound=bound,
+        store=store,
+        authority=authoritative.authority,
+        trusted_authority=authoritative.authority,
+        results=(
+            gemini_result,
+            mistral_result,
+        ),
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+    assert decision.protected_action_authorized is False
+
+
+def test_same_length_valid_fork_is_blocked(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    gemini_result, gemini_ingestion = reviewer_result(
+        bound,
+        family="gemini",
+    )
+
+    prefix = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=authority,
+        bound=bound,
+        result=gemini_result,
+        ingestion=gemini_ingestion,
+    )
+
+    mistral_result, mistral_ingestion = reviewer_result(
+        bound,
+        family="mistral",
+    )
+
+    authoritative = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=prefix.authority,
+        bound=bound,
+        result=mistral_result,
+        ingestion=mistral_ingestion,
+    )
+
+    # Restore a real verified prefix, then extend it with different valid
+    # records to create a locally continuous fork of the same final length.
+    store._atomic_write(
+        prefix.snapshot
+    )
+
+    fork_result, fork_ingestion = reviewer_result(
+        bound,
+        family="mistral",
+        invocation_id="mistral-fork-invocation",
+        execution_nonce_override="d" * 32,
+        execution_receipt_digest="e" * 64,
+        request_nonce="f" * 32,
+    )
+
+    forked = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=prefix.authority,
+        bound=bound,
+        result=fork_result,
+        ingestion=fork_ingestion,
+    )
+
+    assert forked.snapshot.ledger.verify_continuity()
+    assert authoritative.snapshot.ledger.verify_continuity()
+    assert (
+        forked.authority.trusted_record_count
+        == authoritative.authority.trusted_record_count
+    )
+    assert (
+        forked.authority.trusted_head_digest
+        != authoritative.authority.trusted_head_digest
+    )
+
+    decision = owner_gate_decision(
+        bound=bound,
+        store=store,
+        # The Owner-private authority still pins the original Hn. The store
+        # now contains a same-length, structurally valid divergent Hn'.
+        authority=authoritative.authority,
+        trusted_authority=authoritative.authority,
+        results=(
+            gemini_result,
+            mistral_result,
+        ),
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+    assert decision.protected_action_authorized is False
+
+
+def test_wrong_canonical_store_path_is_blocked(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path,
+        name="authoritative.json",
+    )
+
+    recorded, results = record_ready_quorum(
+        store=store,
+        authority=authority,
+        bound=bound,
+    )
+
+    other_store = ReviewMeshLedgerStoreV1(
+        tmp_path / "different-path.json"
+    )
+
+    other_store._atomic_write(
+        recorded.snapshot
+    )
+
+    decision = owner_gate_decision(
+        bound=bound,
+        store=other_store,
+        authority=recorded.authority,
+        trusted_authority=recorded.authority,
+        results=results,
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+    assert decision.protected_action_authorized is False
+
+
+def test_restart_reload_preserves_authoritative_owner_gate_decision(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    recorded, results = record_ready_quorum(
+        store=store,
+        authority=authority,
+        bound=bound,
+    )
+
+    before = owner_gate_decision(
+        bound=bound,
+        store=store,
+        authority=recorded.authority,
+        trusted_authority=recorded.authority,
+        results=results,
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    persisted_checkpoint = (
+        recorded.authority.to_mapping()
+    )
+
+    restarted_store = ReviewMeshLedgerStoreV1(
+        store.path
+    )
+
+    restarted_authority = (
+        ReviewMeshLedgerAuthorityV1
+        .from_mapping(
+            persisted_checkpoint
+        )
+    )
+
+    loaded = restarted_store.load_authoritative(
+        restarted_authority
+    )
+
+    after = owner_gate_decision(
+        bound=bound,
+        store=restarted_store,
+        authority=restarted_authority,
+        trusted_authority=restarted_authority,
+        results=results,
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert loaded.head_digest == recorded.snapshot.head_digest
+    assert loaded.record_count == recorded.snapshot.record_count
+    assert before.state is ReviewMeshDecisionState.OWNER_GATE_READY
+    assert after.state is ReviewMeshDecisionState.OWNER_GATE_READY
+    assert after.decision_digest == before.decision_digest
+    assert after.protected_action_authorized is False
+
+
+def test_cross_campaign_review_result_digest_reuse_is_untrusted(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        first_bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    first_result, first_ingestion = reviewer_result(
+        first_bound,
+        family="gemini",
+    )
+
+    recorded = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=authority,
+        bound=first_bound,
+        result=first_result,
+        ingestion=first_ingestion,
+    )
+
+    second_bound = next_review_campaign(
+        first_bound
+    )
+
+    decision = owner_gate_decision(
+        bound=second_bound,
+        store=store,
+        authority=recorded.authority,
+        trusted_authority=recorded.authority,
+        # Replaying the whole old typed result is the only semantically valid
+        # way to reuse its digest, because the digest itself binds campaign.
+        results=(first_result,),
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert decision.state is ReviewMeshDecisionState.UNTRUSTED_RESULT
+    assert decision.counted_result_digests == ()
+    assert len(decision.rejected_votes) == 1
+    assert (
+        decision.rejected_votes[0].reason
+        == "cross-campaign-review-result-digest-reuse"
+    )
+    assert decision.protected_action_authorized is False
+
+
+@pytest.mark.parametrize(
+    ("reuse_kind", "expected_reason"),
+    (
+        (
+            "invocation_id",
+            "cross-campaign-invocation-id-reuse",
+        ),
+        (
+            "execution_nonce",
+            "cross-campaign-execution-nonce-reuse",
+        ),
+        (
+            "execution_receipt_digest",
+            "cross-campaign-execution-receipt-reuse",
+        ),
+    ),
+)
+def test_cross_campaign_execution_identity_reuse_isolated(
+    tmp_path,
+    reuse_kind,
+    expected_reason,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        first_bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    first_result, first_ingestion = reviewer_result(
+        first_bound,
+        family="gemini",
+    )
+
+    first_recorded = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=authority,
+        bound=first_bound,
+        result=first_result,
+        ingestion=first_ingestion,
+    )
+
+    second_bound = next_review_campaign(
+        first_bound
+    )
+
+    second_values = {
+        "invocation_id":
+            "gemini-invocation-2",
+
+        "execution_nonce_override":
+            "d" * 32,
+
+        "execution_receipt_digest":
+            "e" * 64,
+
+        "request_nonce":
+            "f" * 32,
+    }
+
+    if reuse_kind == "invocation_id":
+        second_values["invocation_id"] = (
+            first_result.invocation_id
+        )
+    elif reuse_kind == "execution_nonce":
+        second_values["execution_nonce_override"] = (
+            first_result.execution_nonce
+        )
+    else:
+        second_values["execution_receipt_digest"] = (
+            first_result.execution_receipt_digest
+        )
+
+    second_result, second_ingestion = reviewer_result(
+        second_bound,
+        family="gemini",
+        **second_values,
+    )
+
+    assert second_result.review_result_digest != first_result.review_result_digest
+
+    second_recorded = record_result_evidence_durably(
+        ledger_store=store,
+        ledger_authority=first_recorded.authority,
+        bound=second_bound,
+        result=second_result,
+        ingestion=second_ingestion,
+    )
+
+    decision = owner_gate_decision(
+        bound=second_bound,
+        store=store,
+        authority=second_recorded.authority,
+        trusted_authority=second_recorded.authority,
+        results=(second_result,),
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert decision.state is ReviewMeshDecisionState.UNTRUSTED_RESULT
+    assert decision.counted_result_digests == ()
+    assert len(decision.rejected_votes) == 1
+    assert decision.rejected_votes[0].reason == expected_reason
+    assert decision.protected_action_authorized is False
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        (
+            "ledger_authority_identity_digest",
+            True,
+        ),
+        (
+            "ledger_authority_checkpoint_digest",
+            1,
+        ),
+        (
+            "ledger_authority_identity_digest",
+            "0" * 63,
+        ),
+        (
+            "ledger_authority_checkpoint_digest",
+            "A" * 64,
+        ),
+    ),
+)
+def test_gate_authority_digests_require_exact_lowercase_sha256(
+    tmp_path,
+    field,
+    invalid,
+):
+    _, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    trusted = clean_gate_inputs(
+        authority
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="ledger authority .* digest is invalid",
+    ):
+        replace(
+            trusted,
+            **{field: invalid},
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "outer-missing-field",
+        "outer-unknown-field",
+        "outer-wrong-primitive",
+        "inner-missing-field",
+        "inner-unknown-field",
+        "inner-wrong-primitive",
+        "nested-finding-wrong-type",
+    ),
+)
+def test_malformed_historical_review_result_fails_closed(
+    tmp_path,
+    mutation,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        first_bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    result, _ = reviewer_result(
+        first_bound,
+        family="gemini",
+    )
+
+    inner = result.stable_mapping()
+    mutate_outer = None
+
+    if mutation == "outer-missing-field":
+        mutate_outer = lambda outer: outer.pop(
+            "review_result_id"
+        )
+    elif mutation == "outer-unknown-field":
+        mutate_outer = lambda outer: outer.update({
+            "unexpected": "field",
+        })
+    elif mutation == "outer-wrong-primitive":
+        mutate_outer = lambda outer: outer.update({
+            "review_result_id": [],
+        })
+    elif mutation == "inner-missing-field":
+        inner.pop(
+            "claimed_verdict"
+        )
+    elif mutation == "inner-unknown-field":
+        inner["unexpected"] = "field"
+    elif mutation == "inner-wrong-primitive":
+        inner["invocation_id"] = []
+    else:
+        finding = {
+            "scope": "WORKFLOW",
+            "severity": "HIGH",
+            "file": None,
+            "evidence": {
+                "nested": "not-text",
+            },
+            "recommended_fix": "reject malformed history",
+        }
+
+        inner["normalized_findings"] = [
+            finding
+        ]
+        inner["findings_digest"] = canonical_digest(
+            [finding]
+        )
+
+    appended = append_historical_result_mapping(
+        store=store,
+        authority=authority,
+        result=result,
+        inner=inner,
+        mutate_outer=mutate_outer,
+    )
+
+    decision = owner_gate_decision(
+        bound=next_review_campaign(
+            first_bound
+        ),
+        store=store,
+        authority=appended.authority,
+        trusted_authority=appended.authority,
+        results=(),
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+    assert decision.counted_result_digests == ()
+    assert decision.protected_action_authorized is False
+
+
+def test_owner_gate_does_not_hide_unrelated_programmer_type_error(
+    tmp_path,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    _, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    def broken_load_authoritative(_authority):
+        raise TypeError(
+            "unrelated programmer defect"
+        )
+
+    broken_store = SimpleNamespace(
+        load_authoritative=(
+            broken_load_authoritative
+        )
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="unrelated programmer defect",
+    ):
+        owner_gate_decision(
+            bound=bound,
+            store=broken_store,
+            authority=authority,
+            trusted_authority=authority,
+            results=(),
+            history=history,
+            registry=registry,
+            policy=policy,
+        )
+
+
+def test_false_continuity_signal_cannot_be_overwritten_by_vote_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    (
+        _,
+        _,
+        history,
+        registry,
+        policy,
+        bound,
+    ) = bound_fixture()
+
+    store, authority = authoritative_ledger(
+        tmp_path
+    )
+
+    recorded, results = record_ready_quorum(
+        store=store,
+        authority=authority,
+        bound=bound,
+    )
+
+    monkeypatch.setattr(
+        ReviewMeshLedgerV1,
+        "verify_continuity",
+        lambda _ledger: False,
+    )
+
+    decision = owner_gate_decision(
+        bound=bound,
+        store=store,
+        authority=recorded.authority,
+        trusted_authority=recorded.authority,
+        results=results,
+        history=history,
+        registry=registry,
+        policy=policy,
+    )
+
+    assert (
+        decision.state
+        is ReviewMeshDecisionState
+        .BLOCKED_LEDGER_RECONCILIATION
+    )
+    assert decision.protected_action_authorized is False

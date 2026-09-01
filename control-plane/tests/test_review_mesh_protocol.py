@@ -12,6 +12,7 @@ from local_ai_control.services.review_mesh_protocol import (
     ReviewVerdict,
     RiskLevel,
     canonical_digest,
+    validate_review_result_stable_mapping_v1,
 )
 
 
@@ -602,6 +603,30 @@ def result_payload(
     )
 
 
+def historical_result_mapping(
+    *,
+    findings=(),
+):
+    req = request(
+        campaign()
+    )
+
+    observed = identity(req)
+
+    return result_payload(
+        req,
+        observed,
+        claimed_verdict=(
+            ReviewVerdict.FAIL
+            if findings
+            else ReviewVerdict.PASS
+        ),
+        normalized_findings=(
+            tuple(findings)
+        ),
+    ).stable_mapping()
+
+
 def ingestion(
     result,
     **changes,
@@ -872,6 +897,235 @@ def test_result_rejects_unknown_finding_fields():
                 "recommended_fix": "fix",
                 "counting": True,
             },),
+        )
+
+
+def test_historical_result_validator_accepts_exact_stable_mapping():
+    mapping = (
+        historical_result_mapping()
+    )
+
+    validated = (
+        validate_review_result_stable_mapping_v1(
+            mapping
+        )
+    )
+
+    assert validated == mapping
+    assert validated is not mapping
+
+    assert (
+        canonical_digest(validated)
+        == canonical_digest(mapping)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing",
+        "unknown",
+    ),
+)
+def test_historical_result_validator_requires_exact_top_level_schema(
+    mutation,
+):
+    mapping = (
+        historical_result_mapping()
+    )
+
+    if mutation == "missing":
+        mapping.pop(
+            "claimed_verdict"
+        )
+    else:
+        mapping["unexpected"] = "field"
+
+    with pytest.raises(
+        ValueError,
+        match="schema mismatch",
+    ):
+        validate_review_result_stable_mapping_v1(
+            mapping
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        (
+            "candidate_generation",
+            True,
+        ),
+        (
+            "lane_attempt",
+            "1",
+        ),
+        (
+            "invocation_id",
+            [],
+        ),
+        (
+            "claimed_verdict",
+            1,
+        ),
+    ),
+)
+def test_historical_result_validator_rejects_wrong_primitive_type(
+    field,
+    invalid,
+):
+    mapping = (
+        historical_result_mapping()
+    )
+
+    mapping[field] = invalid
+
+    with pytest.raises(
+        ValueError,
+    ):
+        validate_review_result_stable_mapping_v1(
+            mapping
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        (
+            "review_request_id",
+            "rr1:" + "0" * 64,
+        ),
+        (
+            "review_campaign_id",
+            "rc1:" + "0" * 64,
+        ),
+        (
+            "objective_sha256",
+            "not-a-digest",
+        ),
+        (
+            "base_sha",
+            "A" * 40,
+        ),
+        (
+            "execution_nonce",
+            "abc",
+        ),
+        (
+            "invocation_completed_at",
+            "2026-08-30T05:02:03",
+        ),
+        (
+            "claimed_verdict",
+            "UNKNOWN",
+        ),
+        (
+            "findings_digest",
+            "0" * 64,
+        ),
+    ),
+)
+def test_historical_result_validator_enforces_field_semantics(
+    field,
+    invalid,
+):
+    mapping = (
+        historical_result_mapping()
+    )
+
+    mapping[field] = invalid
+
+    with pytest.raises(
+        ValueError,
+    ):
+        validate_review_result_stable_mapping_v1(
+            mapping
+        )
+
+
+def test_historical_result_validator_rejects_malformed_nested_finding():
+    finding = {
+        "scope": "WORKFLOW",
+        "severity": "HIGH",
+        "file": None,
+        "evidence": "replay evidence",
+        "recommended_fix": "reject replay",
+    }
+
+    mapping = (
+        historical_result_mapping(
+            findings=(finding,)
+        )
+    )
+
+    mapping["normalized_findings"][0][
+        "evidence"
+    ] = {
+        "nested": "not-text",
+    }
+
+    # Keep the malformed content digest-consistent. The schema/type
+    # validator, not a surrounding digest mismatch, must reject it.
+    mapping["findings_digest"] = (
+        canonical_digest(
+            mapping[
+                "normalized_findings"
+            ]
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="evidence must be a string",
+    ):
+        validate_review_result_stable_mapping_v1(
+            mapping
+        )
+
+
+def test_historical_result_validator_requires_finding_list_and_exact_keys():
+    mapping = (
+        historical_result_mapping()
+    )
+
+    mapping["normalized_findings"] = ()
+
+    with pytest.raises(
+        ValueError,
+        match="findings must be a list",
+    ):
+        validate_review_result_stable_mapping_v1(
+            mapping
+        )
+
+    finding = {
+        "scope": "WORKFLOW",
+        "severity": "HIGH",
+        "file": None,
+        "evidence": "replay evidence",
+        "recommended_fix": "reject replay",
+        "unexpected": "field",
+    }
+
+    mapping = (
+        historical_result_mapping()
+    )
+
+    mapping["normalized_findings"] = [
+        finding
+    ]
+
+    mapping["findings_digest"] = (
+        canonical_digest([finding])
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="finding fields are invalid",
+    ):
+        validate_review_result_stable_mapping_v1(
+            mapping
         )
 
 
