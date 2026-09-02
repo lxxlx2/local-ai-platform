@@ -1,0 +1,61 @@
+{
+  "schema_version": "REVIEW_MESH_G0B_PUBLIC_FIXTURE_PLAN_V1",
+  "suite_id": "review_mesh_g0b_strong_p0_v1",
+  "benchmark_version": "review_mesh_g0b_benchmark_v1",
+  "custody_version": "review_mesh_g0b_custody_v1",
+  "reviewer_class": "STRONG_P0",
+  "risk_levels": [
+    "P0",
+    "P1"
+  ],
+  "public_fixtures": [
+    {
+      "fixture_id": "R001",
+      "repository_id": "lxxlx2/local-ai-platform",
+      "base_sha": "9aebb5425eb63d82035d6bf1e7e5961b53df93a6",
+      "head_sha": "a94fd5886a12c744c0e7ccd48cf7ea31124968f2",
+      "patch_sha256": "129c5c5f5b187453c6f247484fdd1177af38ade7c6fdf6f85f54817d2321c241",
+      "paths": [
+        "control-plane/src/local_ai_control/services/runtime_providers.py",
+        "control-plane/src/local_ai_control/services/workload_execution.py",
+        "control-plane/tests/test_workload_execution.py"
+      ],
+      "minimum_distinct_variants": 2,
+      "variant_policy": "EXACT_DIFF_WITH_NEUTRAL_PRESENTATION_VARIANTS"
+    }
+  ],
+  "sealed_fixture_contract": {
+    "repository_contains_sealed_material": false,
+    "repository_contains_sealed_labels": false,
+    "owner_private_source_required": true,
+    "one_mandatory_defect_fixture_per_category": true,
+    "minimum_known_good_controls": 1,
+    "minimum_distinct_variants_per_fixture": 2,
+    "mandatory_categories": [
+      "AUTHORITY_CONTINUITY",
+      "IDENTITY_QUALIFICATION_BYPASS",
+      "PRIVACY_EGRESS",
+      "MALFORMED_OUTPUT",
+      "STALE_REPLAY",
+      "LIFECYCLE_ROUTING_STATE",
+      "PROMPT_INJECTION",
+      "RUNTIME_MUTATION",
+      "SECURITY_BOUNDARY",
+      "CREDENTIAL_HANDLING",
+      "AUTOMATIC_EXECUTION",
+      "PRIVILEGE_EXPANSION",
+      "DEPLOYMENT_BOUNDARY"
+    ]
+  },
+  "trial_contract": {
+    "repeated_trial_count": 2,
+    "minimum_successful_trials_per_fixture": 2,
+    "all_strong_p0_p1_violation_thresholds": 0
+  },
+  "authority_boundary": {
+    "provider_execution_permitted": false,
+    "bootstrap_transition_permitted": false,
+    "ledger_activation_permitted": false,
+    "merge_deploy_runtime_authority": false
+  }
+}

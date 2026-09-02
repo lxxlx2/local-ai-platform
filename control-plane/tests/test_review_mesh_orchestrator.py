@@ -838,7 +838,7 @@ def contributor_facts(
 
             lineage_registry_snapshot_digest=(
                 registry
-                .snapshot_digest
+                .binding_digest
             ),
         )
     }
@@ -864,6 +864,7 @@ def clean_gate_inputs(
     authority,
     *,
     capacity=ReviewerCapacityState.AVAILABLE,
+    bootstrap_complete_payload_digest=None,
 ):
     return OrchestratorGateInputsV1(
         ledger_authority_identity_digest=(
@@ -890,6 +891,7 @@ def clean_gate_inputs(
         ),
 
         reviewer_capacity=capacity,
+        bootstrap_complete_payload_digest=bootstrap_complete_payload_digest,
     )
 
 
@@ -941,6 +943,45 @@ def owner_gate_decision(
             )
         ),
     )
+
+
+def test_g0b_compiled_registry_cannot_reach_gate_without_bootstrap_anchor(tmp_path):
+    task_objective = objective()
+    candidate_obj = candidate()
+    history = history_for_candidate(candidate_obj)
+    registry = replace(
+        lineage_registry(),
+        source_registry_snapshot_digest=A,
+    )
+    spec = FakeReviewSpec(
+        objective=task_objective,
+        candidate=candidate_obj,
+        validated=validated_mapping(task_objective),
+    )
+    bound = bind_review_task(
+        spec=spec,
+        bindings=binding_inputs(),
+        contributor_history=history,
+        lineage_registry=registry,
+        quorum_policy=quorum_policy(),
+    )
+    store, authority = authoritative_ledger(tmp_path)
+
+    decision = evaluate_owner_gate(
+        bound=bound,
+        ledger_store=store,
+        ledger_authority=authority,
+        results=(),
+        contributor_history=history,
+        contributor_identities=contributor_facts(registry),
+        lineage_registry=registry,
+        qualification_by_evidence_digest={},
+        quorum_policy=quorum_policy(),
+        inherited_findings=InheritedFindingSetV1(),
+        gate_inputs=clean_gate_inputs(authority),
+    )
+
+    assert decision.state is ReviewMeshDecisionState.BLOCKED_LEDGER_RECONCILIATION
 
 
 def next_review_campaign(
