@@ -422,12 +422,22 @@ class LineageRegistrySnapshotV1:
         LineageRegistryEntryV1,
         ...
     ]
+    # G0-B compiles this quorum view from a richer, authoritative registry.
+    # Campaigns must bind the authoritative registry digest, not a lossy view
+    # digest.  Legacy/direct G0-A snapshots leave this unset.
+    source_registry_snapshot_digest: str | None = None
 
     def __post_init__(self):
         _require_identifier(
             self.policy_revision,
             "lineage policy revision",
         )
+
+        if self.source_registry_snapshot_digest is not None:
+            _require_sha256(
+                self.source_registry_snapshot_digest,
+                "source lineage registry snapshot digest",
+            )
 
         seen = {}
 
@@ -470,13 +480,19 @@ class LineageRegistrySnapshotV1:
             self.stable_mapping()
         )
 
+    @property
+    def binding_digest(self) -> str:
+        """Digest that protocol/campaign objects must bind."""
+
+        return self.source_registry_snapshot_digest or self.snapshot_digest
+
     def resolve(
         self,
         facts: "ObservedIdentityFactsV1",
     ) -> LineageRegistryEntryV1 | None:
         if (
             facts.lineage_registry_snapshot_digest
-            != self.snapshot_digest
+            != self.binding_digest
         ):
             return None
 
@@ -903,7 +919,7 @@ def evaluate_result_freshness(
 
     if (
         active.lineage_registry
-        .snapshot_digest
+        .binding_digest
         != active.campaign
         .lineage_registry_snapshot_digest
     ):

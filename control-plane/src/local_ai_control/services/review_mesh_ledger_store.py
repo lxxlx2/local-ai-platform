@@ -58,6 +58,12 @@ from .review_mesh_ledger import (
     ReviewMeshLedgerV1,
 )
 
+from .review_mesh_bootstrap import (
+    BootstrapCompletePayloadV1,
+    BootstrapStateV1,
+    BootstrapV1,
+)
+
 
 STORE_SCHEMA_VERSION = (
     "REVIEW_MESH_LEDGER_STORE_V1"
@@ -219,6 +225,19 @@ class StoredLedgerEntryV1:
             raise LedgerReconciliationError(
                 "stored ledger payload digest mismatch"
             )
+
+        if (
+            self.record.record_type
+            is LedgerRecordType.BOOTSTRAP_COMPLETE
+        ):
+            try:
+                BootstrapCompletePayloadV1.from_mapping(
+                    payload
+                )
+            except ValueError as error:
+                raise LedgerReconciliationError(
+                    "stored bootstrap completion payload is invalid"
+                ) from error
 
     @classmethod
     def from_payload(
@@ -1519,8 +1538,26 @@ class ReviewMeshLedgerStoreV1:
                 "stale expected ledger head"
             )
 
-        outcome: LedgerAppendOutcomeV1 = (
-            current.ledger.append(
+        if record_type is LedgerRecordType.BOOTSTRAP_COMPLETE:
+            if (
+                related_request_id is not None
+                or related_campaign_id is not None
+                or superseded_or_revoked_record_digest is not None
+            ):
+                raise LedgerReconciliationError(
+                    "bootstrap completion has invalid review/tombstone binding"
+                )
+
+            outcome = current.ledger.append_bootstrap_complete(
+                payload=canonical_payload,
+                related_task_id=related_task_id,
+                actor_provenance_digest=actor_provenance_digest,
+                ingestion_receipt_digest=ingestion_receipt_digest,
+                idempotency_key=idempotency_key,
+                created_at=created_at,
+            )
+        else:
+            outcome = current.ledger.append(
                 record_type=record_type,
 
                 payload=(
@@ -1559,7 +1596,6 @@ class ReviewMeshLedgerStoreV1:
                     superseded_or_revoked_record_digest
                 ),
             )
-        )
 
         if outcome.duplicate:
             return (
@@ -1645,6 +1681,11 @@ class ReviewMeshLedgerStoreV1:
             str | None
         ) = None,
     ) -> DurableLedgerAppendOutcomeV1:
+        if record_type is LedgerRecordType.BOOTSTRAP_COMPLETE:
+            raise LedgerReconciliationError(
+                "use bootstrap initialization API for BOOTSTRAP_COMPLETE"
+            )
+
         canonical_payload = json.loads(
             _canonical_payload_json(
                 payload
@@ -1660,6 +1701,11 @@ class ReviewMeshLedgerStoreV1:
             current = (
                 self._load_unlocked()
             )
+
+            if current.ledger.bootstrap_complete_record is not None:
+                raise LedgerReconciliationError(
+                    "bootstrapped ledger requires authoritative append"
+                )
 
             return self._append_current_unlocked(
                 current=current,
@@ -1707,6 +1753,110 @@ class ReviewMeshLedgerStoreV1:
                 ),
             )
 
+    def initialize_bootstrap_complete_authoritatively(
+        self,
+        *,
+        authority: ReviewMeshLedgerAuthorityV1,
+        bootstrap: BootstrapV1,
+        related_task_id: str,
+        actor_provenance_digest: str,
+        ingestion_receipt_digest: str,
+        idempotency_key: str,
+        created_at: str,
+    ) -> AuthoritativeLedgerAppendOutcomeV1:
+        """Install BOOTSTRAP_COMPLETE under the exclusive store writer lock.
+
+        A generic append cannot create this record.  The caller must present an
+        exact Owner-private authority checkpoint for the still-empty durable
+        store plus the complete, hash-chained bootstrap journal produced only
+        after the second Owner seed authorization.  The returned checkpoint is
+        advanced only after durable post-write verification; persisting that
+        Owner-private checkpoint remains a separate fail-closed caller step.
+        """
+
+        if (
+            not isinstance(bootstrap, BootstrapV1)
+            or bootstrap.state is not BootstrapStateV1.COMPLETE
+            or bootstrap.complete_payload is None
+        ):
+            raise LedgerReconciliationError(
+                "bootstrap initialization requires a complete typed journal"
+            )
+        payload = bootstrap.complete_payload
+
+        self._assert_authority_binding(authority)
+
+        canonical_payload = json.loads(
+            _canonical_payload_json(payload.stable_mapping())
+        )
+
+        assert isinstance(canonical_payload, dict)
+
+        with self._writer_lock():
+            current = self._load_unlocked()
+            self._assert_exact_authoritative_snapshot(
+                authority=authority,
+                snapshot=current,
+            )
+
+            if current.record_count != 0:
+                raise LedgerReconciliationError(
+                    "bootstrap completion requires an empty durable ledger"
+                )
+
+            appended = self._append_current_unlocked(
+                current=current,
+                canonical_payload=canonical_payload,
+                record_type=LedgerRecordType.BOOTSTRAP_COMPLETE,
+                related_task_id=related_task_id,
+                related_request_id=None,
+                related_campaign_id=None,
+                actor_provenance_digest=actor_provenance_digest,
+                ingestion_receipt_digest=ingestion_receipt_digest,
+                idempotency_key=idempotency_key,
+                created_at=created_at,
+                expected_head_digest=authority.trusted_head_digest,
+                superseded_or_revoked_record_digest=None,
+            )
+
+            if (
+                appended.duplicate
+                or not appended.persisted
+                or appended.record.sequence_number != 1
+                or appended.record.record_type
+                is not LedgerRecordType.BOOTSTRAP_COMPLETE
+                or appended.record.payload_digest != payload.payload_digest
+            ):
+                raise LedgerReconciliationError(
+                    "bootstrap completion did not create the exact genesis record"
+                )
+
+            updated_authority = ReviewMeshLedgerAuthorityV1(
+                authority_id=authority.authority_id,
+                canonical_store_path=authority.canonical_store_path,
+                trusted_head_digest=appended.snapshot.head_digest,
+                trusted_record_count=1,
+                genesis_digest=authority.genesis_digest,
+                protocol_version=authority.protocol_version,
+            )
+
+            self._assert_exact_authoritative_snapshot(
+                authority=updated_authority,
+                snapshot=appended.snapshot,
+            )
+
+            appended.snapshot.ledger.require_bootstrap_complete(
+                expected_payload_digest=payload.payload_digest,
+            )
+
+            return AuthoritativeLedgerAppendOutcomeV1(
+                authority=updated_authority,
+                snapshot=appended.snapshot,
+                record=appended.record,
+                duplicate=False,
+                persisted=True,
+            )
+
     def append_authoritatively(
         self,
         *,
@@ -1743,6 +1893,11 @@ class ReviewMeshLedgerStoreV1:
         deliberately rejects the newer store.  That ambiguity requires explicit
         Owner reconciliation; this API never adopts a self-reported newer head.
         """
+
+        if record_type is LedgerRecordType.BOOTSTRAP_COMPLETE:
+            raise LedgerReconciliationError(
+                "use bootstrap initialization API for BOOTSTRAP_COMPLETE"
+            )
 
         self._assert_authority_binding(
             authority

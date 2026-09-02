@@ -176,6 +176,10 @@ class OrchestratorGateInputsV1:
 
     reviewer_capacity: ReviewerCapacityState
 
+    # Required whenever a G0-B authoritative registry was compiled into the
+    # G0-A decision view.  Legacy G0-A-only callers leave this unset.
+    bootstrap_complete_payload_digest: str | None = None
+
     def __post_init__(self):
         for label, value in (
             (
@@ -198,6 +202,15 @@ class OrchestratorGateInputsV1:
                 raise ValueError(
                     f"{label} is invalid"
                 )
+
+        if self.bootstrap_complete_payload_digest is not None:
+            value = self.bootstrap_complete_payload_digest
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError("bootstrap completion payload digest is invalid")
 
 
 def _candidate_identity_digest(
@@ -335,7 +348,7 @@ def bind_review_task(
         )
 
     if (
-        lineage_registry.snapshot_digest
+        lineage_registry.binding_digest
         == ""
     ):
         raise ValueError(
@@ -547,7 +560,7 @@ def bind_review_task(
 
         lineage_registry_snapshot_digest=(
             lineage_registry
-            .snapshot_digest
+            .binding_digest
         ),
 
         qualification_registry_snapshot_digest=(
@@ -1555,7 +1568,7 @@ def _derive_contributor_provenance(
 
     if (
         lineage_registry
-        .snapshot_digest
+        .binding_digest
         != bound.campaign
         .lineage_registry_snapshot_digest
     ):
@@ -1684,6 +1697,41 @@ def evaluate_owner_gate(
             raise LedgerReconciliationError(
                 "authoritative ledger continuity verification failed"
             )
+
+        # A rich G0-B registry view is usable only after the exact bootstrap
+        # package is the immutable first ledger record.  The completion payload
+        # must bind both authoritative registry snapshots used by this campaign.
+        if lineage_registry.source_registry_snapshot_digest is not None:
+            from .review_mesh_bootstrap import BootstrapCompletePayloadV1
+
+            expected_bootstrap = gate_inputs.bootstrap_complete_payload_digest
+            if expected_bootstrap is None:
+                raise LedgerReconciliationError(
+                    "G0-B campaign lacks trusted bootstrap completion binding"
+                )
+            record = snapshot.ledger.require_bootstrap_complete(
+                expected_payload_digest=expected_bootstrap,
+            )
+            stored_matches = tuple(
+                entry for entry in snapshot.entries
+                if entry.record.record_digest == record.record_digest
+            )
+            if len(stored_matches) != 1:
+                raise LedgerReconciliationError(
+                    "bootstrap completion payload is not uniquely durable"
+                )
+            complete = BootstrapCompletePayloadV1.from_mapping(
+                stored_matches[0].payload_mapping()
+            )
+            if (
+                complete.lineage_registry_snapshot_digest
+                != lineage_registry.binding_digest
+                or complete.qualification_registry_snapshot_digest
+                != bound.campaign.qualification_registry_snapshot_digest
+            ):
+                raise LedgerReconciliationError(
+                    "bootstrap completion registry binding mismatch"
+                )
 
         # Reconcile every historical result before trusting current-result
         # evidence. This both reserves execution identities across campaigns

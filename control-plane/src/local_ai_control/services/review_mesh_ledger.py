@@ -133,6 +133,8 @@ LEDGER_GENESIS_DIGEST = canonical_digest({
 
 
 class LedgerRecordType(str, Enum):
+    BOOTSTRAP_COMPLETE = "BOOTSTRAP_COMPLETE"
+
     REVIEW_REQUEST = "REVIEW_REQUEST"
     IDENTITY_ENVELOPE = "IDENTITY_ENVELOPE"
     REVIEW_RESULT = "REVIEW_RESULT"
@@ -472,6 +474,16 @@ class ReviewMeshLedgerV1:
                         "tombstone target is missing or not earlier"
                     )
 
+                if (
+                    self.records
+                    and self.records[0].record_type
+                    is LedgerRecordType.BOOTSTRAP_COMPLETE
+                    and target == self.records[0].record_digest
+                ):
+                    raise LedgerReconciliationError(
+                        "bootstrap completion cannot be tombstoned"
+                    )
+
             seen_digests.add(
                 record.record_digest
             )
@@ -482,6 +494,20 @@ class ReviewMeshLedgerV1:
 
             previous = (
                 record.record_digest
+            )
+
+        bootstrap_records = tuple(
+            record
+            for record in self.records
+            if record.record_type is LedgerRecordType.BOOTSTRAP_COMPLETE
+        )
+
+        if bootstrap_records and (
+            len(bootstrap_records) != 1
+            or self.records[0] is not bootstrap_records[0]
+        ):
+            raise LedgerReconciliationError(
+                "bootstrap completion is not the unique first ledger record"
             )
 
     @property
@@ -516,6 +542,115 @@ class ReviewMeshLedgerV1:
 
         return True
 
+    @property
+    def bootstrap_complete_record(
+        self,
+    ) -> LedgerRecordV1 | None:
+        """Return the one valid bootstrap anchor, if this is an activated chain.
+
+        G0-A ledgers created before the qualification bootstrap may still hold
+        diagnostic records.  Such a chain is intentionally not activatable:
+        BOOTSTRAP_COMPLETE must be sequence 1 and may occur only once.
+        """
+
+        matches = tuple(
+            record
+            for record in self.records
+            if record.record_type is LedgerRecordType.BOOTSTRAP_COMPLETE
+        )
+
+        if not matches:
+            return None
+
+        if (
+            len(matches) != 1
+            or self.records[0] is not matches[0]
+            or matches[0].sequence_number != 1
+            or matches[0].previous_ledger_head_digest != self.genesis_digest
+        ):
+            raise LedgerReconciliationError(
+                "bootstrap completion is not the unique first ledger record"
+            )
+
+        return matches[0]
+
+    def require_bootstrap_complete(
+        self,
+        *,
+        expected_payload_digest: str,
+    ) -> LedgerRecordV1:
+        _require_sha256(
+            expected_payload_digest,
+            "expected bootstrap completion payload digest",
+        )
+
+        record = self.bootstrap_complete_record
+
+        if record is None:
+            raise LedgerReconciliationError(
+                "bootstrap completion ledger anchor is missing"
+            )
+
+        if record.payload_digest != expected_payload_digest:
+            raise LedgerReconciliationError(
+                "bootstrap completion payload digest mismatch"
+            )
+
+        return record
+
+    def append_bootstrap_complete(
+        self,
+        *,
+        payload: Mapping,
+        related_task_id: str,
+        actor_provenance_digest: str,
+        ingestion_receipt_digest: str,
+        idempotency_key: str,
+        created_at: str,
+    ) -> LedgerAppendOutcomeV1:
+        """Append the one BOOTSTRAP_COMPLETE genesis transition.
+
+        The strict payload object is imported lazily to keep the generic ledger
+        primitives independent from bootstrap construction.
+        """
+
+        from .review_mesh_bootstrap import BootstrapCompletePayloadV1
+
+        if self.records:
+            raise LedgerReconciliationError(
+                "bootstrap completion requires an empty ledger"
+            )
+
+        validated = BootstrapCompletePayloadV1.from_mapping(payload)
+
+        if created_at != validated.completed_at:
+            raise LedgerReconciliationError(
+                "bootstrap record timestamp must equal completion timestamp"
+            )
+
+        record = LedgerRecordV1(
+            record_type=LedgerRecordType.BOOTSTRAP_COMPLETE,
+            sequence_number=1,
+            previous_ledger_head_digest=self.genesis_digest,
+            payload_digest=validated.payload_digest,
+            related_task_id=related_task_id,
+            related_request_id=None,
+            related_campaign_id=None,
+            actor_provenance_digest=actor_provenance_digest,
+            ingestion_receipt_digest=ingestion_receipt_digest,
+            idempotency_key=idempotency_key,
+            created_at=created_at,
+        )
+
+        return LedgerAppendOutcomeV1(
+            ledger=ReviewMeshLedgerV1(
+                records=(record,),
+                genesis_digest=self.genesis_digest,
+            ),
+            record=record,
+            duplicate=False,
+        )
+
     def append(
         self,
         *,
@@ -536,6 +671,11 @@ class ReviewMeshLedgerV1:
             str | None
         ) = None,
     ) -> LedgerAppendOutcomeV1:
+        if record_type is LedgerRecordType.BOOTSTRAP_COMPLETE:
+            raise LedgerReconciliationError(
+                "use append_bootstrap_complete for bootstrap genesis"
+            )
+
         payload_digest = canonical_digest(
             payload
         )
@@ -626,6 +766,17 @@ class ReviewMeshLedgerV1:
             ):
                 raise LedgerReconciliationError(
                     "tombstone target is missing or not earlier"
+                )
+
+            target_record = next(
+                record
+                for record in self.records
+                if record.record_digest == target
+            )
+
+            if target_record.record_type is LedgerRecordType.BOOTSTRAP_COMPLETE:
+                raise LedgerReconciliationError(
+                    "bootstrap completion cannot be tombstoned"
                 )
 
         ledger = ReviewMeshLedgerV1(
