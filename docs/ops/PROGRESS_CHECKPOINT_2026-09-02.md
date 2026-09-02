@@ -17,13 +17,13 @@ Status type: collaboration handoff snapshot. This document is intentionally isol
 
 Epoch: `g0b-bootstrap-b620d939-v1`
 
-Current durable state: `BOOTSTRAP_MATERIAL_PINNED`
+Current durable state: `BOOTSTRAP_HARNESS_INSPECTED`
 
 Current trusted checkpoint:
 
-- event count: `2`
-- journal digest: `7697ded138ab27131c8729977f786f2388f5de3ec3c34bb067017f5e8d7ad4e8`
-- journal head digest: `18325b7a25deb516e10fb532450214739e861f18980970f862aea9260d397c5a`
+- event count: `3`
+- journal digest: `6bcf653b355ef7e9f609bfb753cb4fc2d53c6d888b8831087eb8b8e9db141993`
+- journal head digest: `bfc44c79033e2ba8296ff6d4e3746abd1dc921fa659bfc6d177d7aaa65b6b05f`
 - material pins digest: `e205aeb5a476a1042cefb9d03159a756cb4247328aa13ad18df8e0b7cf4b1082`
 - Owner disclosure attestation digest: `852f3cb44e4b112d960d273342abfd053a9e7830e495e77c2cd68dbfe201f49b`
 
@@ -31,44 +31,25 @@ Completed ceremony transitions:
 
 1. `BOOTSTRAP_UNINITIALIZED -> BOOTSTRAP_OWNER_AUTHORIZED`
 2. `BOOTSTRAP_OWNER_AUTHORIZED -> BOOTSTRAP_MATERIAL_PINNED`
+3. `BOOTSTRAP_MATERIAL_PINNED -> BOOTSTRAP_HARNESS_INSPECTED`
+
+External harness inspection evidence:
+
+- Gemini exact requested model `gemini-3.6-flash`; metadata version `3.6-flash-07-2026`; returned `modelVersion=gemini-3.6-flash`; final bounded retry PASS; zero findings; inspection digest `c519e0a83d54df55c8a561fa346a561feba615093ccd975d2c51330164bda61e`.
+- Mistral exact requested/returned model `mistral-medium-3-5`; observed revision `2604`; PASS; zero findings; inspection digest `5d5f0e5a5c6e682552123b796d215b1ea825afd9201b707dfff46e6cdeb06eec`.
+- Distinct provider principals: `google-gemini`, `mistral`.
+- Distinct foundation lineage classes: `google-gemini3`, `mistral-medium3`.
+- Owner confirms both provider paths are within the authorized free/no-PAYG boundary.
 
 Pending ceremony sequence:
 
-1. two external harness inspections from distinct authenticated providers and foundation lineages
-2. `BOOTSTRAP_MATERIAL_PINNED -> BOOTSTRAP_HARNESS_INSPECTED`
-3. two full qualification executions against the pinned 15-fixture, 30-trial-per-reviewer suite
-4. deterministic scoring and `BOOTSTRAP_EXECUTIONS_COMPLETE`
-5. canonical lineage/qualification seed proposal
-6. second exact Owner authorization of bootstrap package and registry snapshot digests
-7. atomic ledger genesis and `BOOTSTRAP_COMPLETE`
+1. two full qualification executions against the pinned 15-fixture suite, 30 trials per reviewer, 60 total provider trials
+2. deterministic scoring and `BOOTSTRAP_EXECUTIONS_COMPLETE`
+3. canonical lineage/qualification seed proposal
+4. second exact Owner authorization of bootstrap package and registry snapshot digests
+5. atomic ledger genesis and `BOOTSTRAP_COMPLETE`
 
 No merge, deploy, runtime activation, service restart, destructive cleanup, privilege expansion, unapproved paid usage or other protected action is authorized by the bootstrap ceremony.
-
-## External reviewer readiness
-
-macOS Keychain credentials are configured for:
-
-- `google-gemini`
-- `mistral`
-
-Exact read-only provider preflight succeeded:
-
-### Gemini
-
-- requested model: `gemini-3.6-flash`
-- visible model: `models/gemini-3.6-flash`
-- observed version: `3.6-flash-07-2026`
-- generation capability visible: yes
-- Owner confirms account/tier is free for this bootstrap work
-
-### Mistral
-
-- requested model: `mistral-medium-3-5`
-- visible model id: `mistral-medium-3-5`
-- aliases were observed but must not be used for bootstrap identity
-- Owner confirms plan is free and PAYG is disabled for this bootstrap work
-
-No provider generation had occurred at the time of this checkpoint. The next mainline action is bounded external read-only harness inspection using only the exact frozen harness/configuration and the two exact model IDs above.
 
 ## Model download result
 
@@ -106,28 +87,38 @@ Current approximate model directory sizes after stale-cache cleanup:
 
 Downloaded does not imply qualified or deployed.
 
-## Cleanup already completed
+## Cleanup completed
 
-Safe cleanup was executed only after authoritative download completion checks.
+Cleanup was performed only against exact audited paths and download caches. Current approximate reclaimed space is about 25.6 GiB total.
 
-Approximately reclaimed:
+Previously reclaimed:
 
 - stale/abandoned model download cache and partial attempts: about 18.7 GiB
 - duplicate/manual JMeter runtime and installer material: about 0.9 GiB
 - pip/uv/Homebrew download caches: about 2.1 GiB
-- total reclaimed: about 21.7 GiB
 
-The following were intentionally preserved:
+Additional confirmed cleanup:
+
+- `/Users/jerson/Documents/教学接单`: 3.8 GiB removed completely, including remaining JMeter teaching archives/build output, old editing material and its 2.2 GiB Git object store
+- `/Users/jerson/Documents/代下单项目`: about 51 MiB removed
+- `/Users/jerson/codex-agentrouter-test`: removed
+- post-delete JMeter residue scan under Documents/Desktop/Downloads: no matches
+- post-delete old AI-video-material scan under Documents/Desktop/Downloads: no matches
+
+The following remain intentionally protected:
 
 - all 8 official configured model payloads
+- `/Users/jerson/AI/models/longcat-video-q8`
+- `/Users/jerson/AI/models/qwen38-27b-raw-8bit`
 - Python virtual environments
 - Java/JDK
 - Unity/Android environment
-- Review Mesh Owner-private evidence
-- Git worktrees
-- current provider credentials
+- Review Mesh Owner-private evidence under `/Users/jerson/AI/runtime/review-evidence`
+- frozen G0-B worktree `/Users/jerson/local-ai-review-mesh-g0b-v01`
+- Git worktrees and current provider credentials
+- novel project material such as `归灯纪`; keyword matches like `剧情设计` are not old AI-video residue
 
-JMeter was not installed through Homebrew. Manual JMeter runtime copies and installers were removed, while teaching material, DOCX/PDF/JMX and demonstration project content were preserved.
+Codex sidebar project/conversation entries may remain visible after local files are removed; those application records are separate from filesystem residue.
 
 ## Future deletion gate
 
@@ -142,8 +133,10 @@ It becomes a deletion candidate only after all of these are true:
 
 Expected reclaim after that future gate: about 28 GiB.
 
+Do not delete `longcat-video-q8` merely because the historical standalone `ai视频` project is no longer needed. It is still a configured platform payload until the platform video capability itself is explicitly retired.
+
 ## Project-level execution priority
 
 Immediate priority remains G0 Autonomous Review Mesh bootstrap. PR #31 remains Draft/frozen and should be re-reviewed through the Mesh after bootstrap completion rather than resumed now.
 
-The next collaborator should first read the exact frozen G0-B branch and Owner-private current checkpoint, then continue from external harness inspection. Do not reconstruct bootstrap state from chat history and do not write progress commits onto the frozen G0-A/G0-B branches.
+The next collaborator must first read the exact frozen G0-B branch plus the Owner-private current checkpoint, verify durable state `BOOTSTRAP_HARNESS_INSPECTED` and journal digest `6bcf653b355ef7e9f609bfb753cb4fc2d53c6d888b8831087eb8b8e9db141993`, then continue with the two external-lineage qualification executions. Do not reconstruct bootstrap state from chat history and do not write progress commits onto the frozen G0-A/G0-B branches.
