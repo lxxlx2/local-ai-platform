@@ -31,6 +31,7 @@ jobs:
       PROJECT_NUMBER: "1"
       EXPECTED_PROJECT_TITLE: Local AI Platform
       EXPECTED_REPOSITORY: lxxlx2/local-ai-platform
+      EXPECTED_TOKEN_OWNER: lxxlx2
     steps:
       - name: Reconcile project item
         shell: bash
@@ -47,6 +48,7 @@ jobs:
           case "$GITHUB_EVENT_NAME" in
             issues)
               CONTENT_URL="$(jq -r '.issue.html_url' "$GITHUB_EVENT_PATH")"
+              CONTENT_NODE_ID="$(jq -r '.issue.node_id' "$GITHUB_EVENT_PATH")"
               case "$ACTION" in
                 opened) TARGET_STATUS="Todo" ;;
                 reopened|assigned) TARGET_STATUS="In Progress" ;;
@@ -55,6 +57,7 @@ jobs:
               ;;
             pull_request)
               CONTENT_URL="$(jq -r '.pull_request.html_url' "$GITHUB_EVENT_PATH")"
+              CONTENT_NODE_ID="$(jq -r '.pull_request.node_id' "$GITHUB_EVENT_PATH")"
               case "$ACTION" in
                 opened|reopened|synchronize|ready_for_review|converted_to_draft) TARGET_STATUS="In Progress" ;;
                 closed) TARGET_STATUS="Done" ;;
@@ -64,65 +67,72 @@ jobs:
               CONTENT_URL="$(jq -r '.inputs.content_url' "$GITHUB_EVENT_PATH")"
               MANUAL_STATUS="$(jq -r '.inputs.status // "keep"' "$GITHUB_EVENT_PATH")"
               [[ "$MANUAL_STATUS" == keep ]] || TARGET_STATUS="$MANUAL_STATUS"
+              REL="${CONTENT_URL#https://github.com/}"
+              OWNER="${REL%%/*}"; REST="${REL#*/}"; REPO="${REST%%/*}"; REST="${REST#*/}"; KIND="${REST%%/*}"; NUM="${REST##*/}"
+              [[ "$OWNER/$REPO" == "$EXPECTED_REPOSITORY" && "$NUM" =~ ^[0-9]+$ ]] || defer dispatch_url
+              CONTENT_NODE_ID="$(gh api "repos/$OWNER/$REPO/issues/$NUM" --jq '.node_id')"
               ;;
             *) defer unsupported_event ;;
           esac
 
           [[ "$CONTENT_URL" == https://github.com/${EXPECTED_REPOSITORY}/issues/* || "$CONTENT_URL" == https://github.com/${EXPECTED_REPOSITORY}/pull/* ]] || defer content_url_guard
+          [[ -n "$CONTENT_NODE_ID" && "$CONTENT_NODE_ID" != null ]] || defer content_node_id
 
-          PROJECT_JSON="$(gh project view "$PROJECT_NUMBER" --owner '@me' --format json 2>/dev/null || true)"
-          jq -e . >/dev/null 2>&1 <<<"$PROJECT_JSON" || defer project_lookup
-          PROJECT_ID="$(jq -r '.id // empty' <<<"$PROJECT_JSON")"
-          PROJECT_TITLE="$(jq -r '.title // empty' <<<"$PROJECT_JSON")"
-          [[ -n "$PROJECT_ID" && "$PROJECT_TITLE" == "$EXPECTED_PROJECT_TITLE" ]] || defer project_guard
-          echo "PROJECT_RESOLVED id=$PROJECT_ID title=$PROJECT_TITLE"
+          PROJECTS="$(gh api graphql -f query='query { viewer { login projectsV2(first: 100) { nodes { id number title } } } }')"
+          TOKEN_OWNER="$(jq -r '.data.viewer.login // empty' <<<"$PROJECTS")"
+          [[ "$TOKEN_OWNER" == "$EXPECTED_TOKEN_OWNER" ]] || defer token_owner_guard
+          PROJECT_ID="$(jq -r --argjson n "$PROJECT_NUMBER" --arg t "$EXPECTED_PROJECT_TITLE" 'first(.data.viewer.projectsV2.nodes[] | select(.number == $n and .title == $t) | .id) // empty' <<<"$PROJECTS")"
+          [[ -n "$PROJECT_ID" ]] || defer project_lookup
+          echo "PROJECT_RESOLVED id=$PROJECT_ID title=$EXPECTED_PROJECT_TITLE"
 
-          gh project item-add "$PROJECT_NUMBER" --owner '@me' --url "$CONTENT_URL" >/dev/null 2>&1 || true
+          ITEMS="$(gh api graphql -F project="$PROJECT_ID" -f query='query($project:ID!){ node(id:$project){ ... on ProjectV2 { items(first:100){ nodes { id content { ... on Issue { id url } ... on PullRequest { id url } } } pageInfo { hasNextPage } } } } }')"
+          HAS_MORE="$(jq -r '.data.node.items.pageInfo.hasNextPage // false' <<<"$ITEMS")"
+          [[ "$HAS_MORE" == false ]] || defer item_pagination_required
+          ITEM_ID="$(jq -r --arg cid "$CONTENT_NODE_ID" 'first(.data.node.items.nodes[] | select(.content.id == $cid) | .id) // empty' <<<"$ITEMS")"
 
-          ITEMS="$(gh project item-list "$PROJECT_NUMBER" --owner '@me' --limit 1000 --format json)"
-          FIELDS="$(gh project field-list "$PROJECT_NUMBER" --owner '@me' --limit 100 --format json)"
-          ITEM_ID="$(jq -r --arg url "$CONTENT_URL" 'first(.items[] | select(.content.url == $url) | .id) // empty' <<<"$ITEMS")"
-          [[ -n "$ITEM_ID" ]] || defer item_not_found
+          if [[ -z "$ITEM_ID" ]]; then
+            ADD="$(gh api graphql -F project="$PROJECT_ID" -F content="$CONTENT_NODE_ID" -f query='mutation($project:ID!,$content:ID!){ addProjectV2ItemById(input:{projectId:$project,contentId:$content}){ item { id } } }')"
+            ITEM_ID="$(jq -r '.data.addProjectV2ItemById.item.id // empty' <<<"$ADD")"
+          fi
+          [[ -n "$ITEM_ID" ]] || defer item_add
+
+          FIELDS="$(gh api graphql -F project="$PROJECT_ID" -f query='query($project:ID!){ node(id:$project){ ... on ProjectV2 { fields(first:100){ nodes { ... on ProjectV2Field { id name } ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }')"
 
           META="$(python3 - "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME" <<'PY'
           import json, re, sys
-          event = json.load(open(sys.argv[1], encoding='utf-8'))
-          name = sys.argv[2]
-          obj = event.get('issue') if name == 'issues' else event.get('pull_request') if name == 'pull_request' else {}
-          obj = obj or {}
-          meta = {}
-          aliases = {'stage':'stage','workstream':'workstream','priority':'priority','phase':'phase','progress':'progress','blocker':'blocker','next':'next_action','next-action':'next_action'}
-          for label in obj.get('labels', []):
-              text = label.get('name','') if isinstance(label, dict) else ''
+          event=json.load(open(sys.argv[1],encoding='utf-8')); name=sys.argv[2]
+          obj=event.get('issue') if name=='issues' else event.get('pull_request') if name=='pull_request' else {}; obj=obj or {}
+          meta={}; aliases={'stage':'stage','workstream':'workstream','priority':'priority','phase':'phase','progress':'progress','blocker':'blocker','next':'next_action','next-action':'next_action'}
+          for label in obj.get('labels',[]):
+              text=label.get('name','') if isinstance(label,dict) else ''
               if ':' in text:
-                  k,v = text.split(':',1); key = aliases.get(k.strip().lower())
-                  if key and v.strip(): meta[key] = v.strip()
-          body = obj.get('body') or ''
-          for m in re.finditer(r'(?im)^\s*Project-(Stage|Workstream|Priority|Phase|Progress|Blocker|Next-Action)\s*:\s*(.*?)\s*$', body):
-              key = aliases[m.group(1).lower()]; value = m.group(2).strip()
-              if value: meta[key] = value
-          try:
-              if 'progress' in meta:
-                  n=float(meta['progress']); meta['progress']=n if 0 <= n <= 100 else None
-          except Exception: meta.pop('progress', None)
-          meta = {k:v for k,v in meta.items() if v is not None}
-          print(json.dumps(meta, ensure_ascii=False))
+                  k,v=text.split(':',1); key=aliases.get(k.strip().lower())
+                  if key and v.strip(): meta[key]=v.strip()
+          body=obj.get('body') or ''
+          for m in re.finditer(r'(?im)^\s*Project-(Stage|Workstream|Priority|Phase|Progress|Blocker|Next-Action)\s*:\s*(.*?)\s*$',body):
+              key=aliases[m.group(1).lower()]; value=m.group(2).strip()
+              if value: meta[key]=value
+          if 'progress' in meta:
+              try:
+                  n=float(meta['progress']); meta['progress']=n if 0<=n<=100 else None
+              except Exception: meta.pop('progress',None)
+          print(json.dumps({k:v for k,v in meta.items() if v is not None},ensure_ascii=False))
           PY
           )"
 
-          field_id() { jq -r --arg n "$1" 'first(.fields[] | select((.name|ascii_downcase)==($n|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
-          option_id() { jq -r --arg f "$1" --arg o "$2" 'first(.fields[] | select((.name|ascii_downcase)==($f|ascii_downcase)) | .options[]? | select((.name|ascii_downcase)==($o|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
-          set_select() { local f="$1" v="$2" fid oid; [[ -n "$v" ]] || return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]] || { echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; oid="$(option_id "$f" "$v")"; [[ -n "$oid" ]] || { echo "PROJECT_SYNC_SKIP missing_option=$f:$v"; return 0; }; gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$fid" --single-select-option-id "$oid" >/dev/null; }
-          set_text() { local f="$1" v="$2" fid; [[ -n "$v" ]] || return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]] || { echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$fid" --text "$v" >/dev/null; }
-          set_number() { local f="$1" v="$2" fid; [[ -n "$v" ]] || return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]] || { echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$fid" --number "$v" >/dev/null; }
+          field_id(){ jq -r --arg n "$1" 'first(.data.node.fields.nodes[] | select((.name//""|ascii_downcase)==($n|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
+          option_id(){ jq -r --arg f "$1" --arg o "$2" 'first(.data.node.fields.nodes[] | select((.name//""|ascii_downcase)==($f|ascii_downcase)) | .options[]? | select((.name|ascii_downcase)==($o|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
+          set_select(){ local f="$1" v="$2" fid oid; [[ -n "$v" ]]||return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]]||{ echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; oid="$(option_id "$f" "$v")"; [[ -n "$oid" ]]||{ echo "PROJECT_SYNC_SKIP missing_option=$f:$v"; return 0; }; gh api graphql -F project="$PROJECT_ID" -F item="$ITEM_ID" -F field="$fid" -f option="$oid" -f query='mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){ updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){ projectV2Item { id } } }' >/dev/null; }
+          set_text(){ local f="$1" v="$2" fid; [[ -n "$v" ]]||return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]]||{ echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; gh api graphql -F project="$PROJECT_ID" -F item="$ITEM_ID" -F field="$fid" -f value="$v" -f query='mutation($project:ID!,$item:ID!,$field:ID!,$value:String!){ updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{text:$value}}){ projectV2Item { id } } }' >/dev/null; }
+          set_number(){ local f="$1" v="$2" fid; [[ -n "$v" ]]||return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]]||{ echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; gh api graphql -F project="$PROJECT_ID" -F item="$ITEM_ID" -F field="$fid" -F value="$v" -f query='mutation($project:ID!,$item:ID!,$field:ID!,$value:Float!){ updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{number:$value}}){ projectV2Item { id } } }' >/dev/null; }
 
           set_select "Status" "$TARGET_STATUS"
-          set_select "Stage" "$(jq -r '.stage // empty' <<<"$META")"
-          set_select "Workstream" "$(jq -r '.workstream // empty' <<<"$META")"
-          set_select "Priority" "$(jq -r '.priority // empty' <<<"$META")"
-          set_text "Phase" "$(jq -r '.phase // empty' <<<"$META")"
-          set_number "Progress" "$(jq -r '.progress // empty' <<<"$META")"
-          set_text "Blocker" "$(jq -r '.blocker // empty' <<<"$META")"
-          set_text "Next Action" "$(jq -r '.next_action // empty' <<<"$META")"
+          set_select "Stage" "$(jq -r '.stage//empty' <<<"$META")"
+          set_select "Workstream" "$(jq -r '.workstream//empty' <<<"$META")"
+          set_select "Priority" "$(jq -r '.priority//empty' <<<"$META")"
+          set_text "Phase" "$(jq -r '.phase//empty' <<<"$META")"
+          set_number "Progress" "$(jq -r '.progress//empty' <<<"$META")"
+          set_text "Blocker" "$(jq -r '.blocker//empty' <<<"$META")"
+          set_text "Next Action" "$(jq -r '.next_action//empty' <<<"$META")"
 
           echo "PROJECT_SYNC_OK project=$EXPECTED_PROJECT_TITLE item=$CONTENT_URL status=${TARGET_STATUS:-unchanged}"
