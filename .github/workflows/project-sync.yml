@@ -18,11 +18,11 @@ on:
         type: choice
         options: [keep, Todo, In Progress, Done]
       stage:
-        description: Optional Stage override
+        description: Optional active Stage override
         required: true
         default: keep
         type: choice
-        options: [keep, Ready, In Progress, Testing, Owner Review, Blocked, Done]
+        options: [keep, In Progress, Review, Blocked]
 
 permissions:
   contents: read
@@ -58,9 +58,9 @@ jobs:
               CONTENT_URL="$(jq -r '.issue.html_url' "$GITHUB_EVENT_PATH")"
               CONTENT_NODE_ID="$(jq -r '.issue.node_id' "$GITHUB_EVENT_PATH")"
               case "$ACTION" in
-                opened) TARGET_STATUS="Todo"; TARGET_STAGE="Ready" ;;
+                opened) TARGET_STATUS="Todo" ;;
                 reopened|assigned) TARGET_STATUS="In Progress"; TARGET_STAGE="In Progress" ;;
-                closed) TARGET_STATUS="Done"; TARGET_STAGE="Done" ;;
+                closed) TARGET_STATUS="Done" ;;
               esac
               ;;
             pull_request)
@@ -68,8 +68,8 @@ jobs:
               CONTENT_NODE_ID="$(jq -r '.pull_request.node_id' "$GITHUB_EVENT_PATH")"
               case "$ACTION" in
                 opened|reopened|synchronize|converted_to_draft) TARGET_STATUS="In Progress"; TARGET_STAGE="In Progress" ;;
-                ready_for_review) TARGET_STATUS="In Progress"; TARGET_STAGE="Testing" ;;
-                closed) TARGET_STATUS="Done"; TARGET_STAGE="Done" ;;
+                ready_for_review) TARGET_STATUS="In Progress"; TARGET_STAGE="Review" ;;
+                closed) TARGET_STATUS="Done" ;;
               esac
               ;;
             workflow_dispatch)
@@ -100,6 +100,7 @@ jobs:
           ITEMS="$(gh api graphql -F project="$PROJECT_ID" -f query='query($project:ID!){ node(id:$project){ ... on ProjectV2 { items(first:100){ nodes { id content { ... on Issue { id url } ... on PullRequest { id url } } } pageInfo { hasNextPage } } } } }')"
           [[ "$(jq -r '.data.node.items.pageInfo.hasNextPage // false' <<<"$ITEMS")" == false ]] || defer item_pagination_required
           ITEM_ID="$(jq -r --arg cid "$CONTENT_NODE_ID" 'first(.data.node.items.nodes[] | select(.content.id == $cid) | .id) // empty' <<<"$ITEMS")"
+
           if [[ -z "$ITEM_ID" ]]; then
             ADD="$(gh api graphql -F project="$PROJECT_ID" -F content="$CONTENT_NODE_ID" -f query='mutation($project:ID!,$content:ID!){ addProjectV2ItemById(input:{projectId:$project,contentId:$content}){ item { id } } }')"
             ITEM_ID="$(jq -r '.data.addProjectV2ItemById.item.id // empty' <<<"$ADD")"
@@ -131,11 +132,17 @@ jobs:
           )"
 
           META_STAGE="$(jq -r '.stage // empty' <<<"$META")"
-          [[ -z "$META_STAGE" ]] || TARGET_STAGE="$META_STAGE"
-          case "$TARGET_STAGE" in
+          case "$META_STAGE" in
+            Testing|"Owner Review") TARGET_STAGE="Review" ;;
             Ready) [[ -n "$TARGET_STATUS" ]] || TARGET_STATUS="Todo" ;;
-            "In Progress"|Testing|"Owner Review"|Blocked) [[ -n "$TARGET_STATUS" ]] || TARGET_STATUS="In Progress" ;;
+            "In Progress"|Review|Blocked) TARGET_STAGE="$META_STAGE" ;;
             Done) TARGET_STATUS="Done" ;;
+            "") ;;
+            *) echo "PROJECT_SYNC_SKIP unsupported_stage=$META_STAGE" ;;
+          esac
+
+          case "$TARGET_STAGE" in
+            "In Progress"|Review|Blocked) [[ -n "$TARGET_STATUS" ]] || TARGET_STATUS="In Progress" ;;
           esac
 
           field_id(){ jq -r --arg n "$1" 'first(.data.node.fields.nodes[] | select((.name//""|ascii_downcase)==($n|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
