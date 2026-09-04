@@ -1,0 +1,199 @@
+name: Project Sync
+
+on:
+  issues:
+    types: [opened, reopened, closed, assigned, unassigned, labeled, unlabeled, edited]
+  pull_request:
+    types: [opened, reopened, closed, synchronize, ready_for_review, converted_to_draft, edited, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      content_url:
+        description: Issue or pull request URL to reconcile
+        required: true
+        type: string
+      status:
+        description: Optional Status override
+        required: true
+        default: keep
+        type: choice
+        options: [keep, Todo, In Progress, Done]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+      PROJECT_OWNER: lxxlx2
+      PROJECT_NUMBER: "1"
+      EXPECTED_PROJECT_TITLE: Local AI Platform
+      EXPECTED_REPOSITORY: lxxlx2/local-ai-platform
+    steps:
+      - name: Reconcile project item
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'rc=$?; echo "::warning::PROJECT_SYNC_DEFERRED rc=$rc"; exit 0' ERR
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::PROJECT_SYNC_DEFERRED reason=missing_token"
+            exit 0
+          fi
+
+          if [[ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" ]]; then
+            echo "::warning::PROJECT_SYNC_DEFERRED reason=repository_guard"
+            exit 0
+          fi
+
+          ACTION="$(jq -r '.action // ""' "$GITHUB_EVENT_PATH")"
+          TARGET_STATUS=""
+
+          case "$GITHUB_EVENT_NAME" in
+            issues)
+              CONTENT_URL="$(jq -r '.issue.html_url' "$GITHUB_EVENT_PATH")"
+              case "$ACTION" in
+                opened) TARGET_STATUS="Todo" ;;
+                reopened|assigned) TARGET_STATUS="In Progress" ;;
+                closed) TARGET_STATUS="Done" ;;
+              esac
+              ;;
+            pull_request)
+              CONTENT_URL="$(jq -r '.pull_request.html_url' "$GITHUB_EVENT_PATH")"
+              case "$ACTION" in
+                opened|reopened|synchronize|ready_for_review|converted_to_draft) TARGET_STATUS="In Progress" ;;
+                closed) TARGET_STATUS="Done" ;;
+              esac
+              ;;
+            workflow_dispatch)
+              CONTENT_URL="$(jq -r '.inputs.content_url' "$GITHUB_EVENT_PATH")"
+              MANUAL_STATUS="$(jq -r '.inputs.status // "keep"' "$GITHUB_EVENT_PATH")"
+              [[ "$MANUAL_STATUS" == "keep" ]] || TARGET_STATUS="$MANUAL_STATUS"
+              ;;
+            *)
+              echo "::warning::PROJECT_SYNC_DEFERRED reason=unsupported_event"
+              exit 0
+              ;;
+          esac
+
+          [[ "$CONTENT_URL" == https://github.com/${EXPECTED_REPOSITORY}/issues/* || "$CONTENT_URL" == https://github.com/${EXPECTED_REPOSITORY}/pull/* ]] || {
+            echo "::warning::PROJECT_SYNC_DEFERRED reason=content_url_guard"
+            exit 0
+          }
+
+          PROJECT_JSON="$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json)"
+          PROJECT_ID="$(jq -r '.id' <<<"$PROJECT_JSON")"
+          PROJECT_TITLE="$(jq -r '.title' <<<"$PROJECT_JSON")"
+
+          if [[ "$PROJECT_TITLE" != "$EXPECTED_PROJECT_TITLE" || -z "$PROJECT_ID" || "$PROJECT_ID" == "null" ]]; then
+            echo "::warning::PROJECT_SYNC_DEFERRED reason=project_guard"
+            exit 0
+          fi
+
+          gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$CONTENT_URL" >/dev/null 2>&1 || true
+
+          ITEMS_FILE="$(mktemp)"
+          FIELDS_FILE="$(mktemp)"
+          META_FILE="$(mktemp)"
+          trap 'rm -f "$ITEMS_FILE" "$FIELDS_FILE" "$META_FILE"' EXIT
+
+          gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 1000 --format json > "$ITEMS_FILE"
+          gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 100 --format json > "$FIELDS_FILE"
+
+          ITEM_ID="$(jq -r --arg url "$CONTENT_URL" '.items[] | select(.content.url == $url) | .id' "$ITEMS_FILE" | head -n1)"
+          if [[ -z "$ITEM_ID" || "$ITEM_ID" == "null" ]]; then
+            echo "::warning::PROJECT_SYNC_DEFERRED reason=item_not_found"
+            exit 0
+          fi
+
+          python3 - "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME" > "$META_FILE" <<'PY'
+          import json, re, sys
+          path, event_name = sys.argv[1:]
+          with open(path, encoding="utf-8") as f:
+              event = json.load(f)
+          obj = event.get("issue") if event_name == "issues" else event.get("pull_request") if event_name == "pull_request" else {}
+          obj = obj or {}
+          body = obj.get("body") or ""
+          labels = [x.get("name", "") for x in obj.get("labels", []) if isinstance(x, dict)]
+          meta = {}
+          label_map = {
+              "stage": "stage", "workstream": "workstream", "priority": "priority",
+              "phase": "phase", "progress": "progress", "blocker": "blocker",
+              "next": "next_action", "next-action": "next_action"
+          }
+          for label in labels:
+              if ":" not in label:
+                  continue
+              key, value = label.split(":", 1)
+              mapped = label_map.get(key.strip().lower())
+              if mapped and value.strip():
+                  meta[mapped] = value.strip()
+          body_map = {
+              "stage": "stage", "workstream": "workstream", "priority": "priority",
+              "phase": "phase", "progress": "progress", "blocker": "blocker",
+              "next-action": "next_action"
+          }
+          for m in re.finditer(r"(?im)^\s*Project-(Stage|Workstream|Priority|Phase|Progress|Blocker|Next-Action)\s*:\s*(.*?)\s*$", body):
+              mapped = body_map[m.group(1).lower()]
+              value = m.group(2).strip()
+              if value:
+                  meta[mapped] = value
+          if "progress" in meta:
+              try:
+                  n = float(meta["progress"])
+                  if not 0 <= n <= 100:
+                      meta.pop("progress", None)
+                  else:
+                      meta["progress"] = n
+              except Exception:
+                  meta.pop("progress", None)
+          print(json.dumps(meta, ensure_ascii=False))
+          PY
+
+          field_id() {
+            jq -r --arg n "$1" '.fields[] | select((.name | ascii_downcase) == ($n | ascii_downcase)) | .id' "$FIELDS_FILE" | head -n1
+          }
+
+          option_id() {
+            jq -r --arg f "$1" --arg o "$2" '.fields[] | select((.name | ascii_downcase) == ($f | ascii_downcase)) | .options[]? | select((.name | ascii_downcase) == ($o | ascii_downcase)) | .id' "$FIELDS_FILE" | head -n1
+          }
+
+          set_select() {
+            local field="$1" value="$2" fid oid
+            [[ -n "$value" ]] || return 0
+            fid="$(field_id "$field")"
+            [[ -n "$fid" && "$fid" != "null" ]] || { echo "PROJECT_SYNC_SKIP missing_field=$field"; return 0; }
+            oid="$(option_id "$field" "$value")"
+            [[ -n "$oid" && "$oid" != "null" ]] || { echo "PROJECT_SYNC_SKIP missing_option=$field:$value"; return 0; }
+            gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$fid" --single-select-option-id "$oid" >/dev/null
+          }
+
+          set_text() {
+            local field="$1" value="$2" fid
+            [[ -n "$value" ]] || return 0
+            fid="$(field_id "$field")"
+            [[ -n "$fid" && "$fid" != "null" ]] || { echo "PROJECT_SYNC_SKIP missing_field=$field"; return 0; }
+            gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$fid" --text "$value" >/dev/null
+          }
+
+          set_number() {
+            local field="$1" value="$2" fid
+            [[ -n "$value" ]] || return 0
+            fid="$(field_id "$field")"
+            [[ -n "$fid" && "$fid" != "null" ]] || { echo "PROJECT_SYNC_SKIP missing_field=$field"; return 0; }
+            gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$fid" --number "$value" >/dev/null
+          }
+
+          set_select "Status" "$TARGET_STATUS"
+          set_select "Stage" "$(jq -r '.stage // empty' "$META_FILE")"
+          set_select "Workstream" "$(jq -r '.workstream // empty' "$META_FILE")"
+          set_select "Priority" "$(jq -r '.priority // empty' "$META_FILE")"
+          set_text "Phase" "$(jq -r '.phase // empty' "$META_FILE")"
+          set_number "Progress" "$(jq -r '.progress // empty' "$META_FILE")"
+          set_text "Blocker" "$(jq -r '.blocker // empty' "$META_FILE")"
+          set_text "Next Action" "$(jq -r '.next_action // empty' "$META_FILE")"
+
+          echo "PROJECT_SYNC_OK project=$EXPECTED_PROJECT_TITLE item=$CONTENT_URL status=${TARGET_STATUS:-unchanged}"
