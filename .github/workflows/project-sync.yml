@@ -17,6 +17,12 @@ on:
         default: keep
         type: choice
         options: [keep, Todo, In Progress, Done]
+      stage:
+        description: Optional Stage override
+        required: true
+        default: keep
+        type: choice
+        options: [keep, Ready, In Progress, Testing, Owner Review, Blocked, Done]
 
 permissions:
   contents: read
@@ -45,31 +51,37 @@ jobs:
 
           ACTION="$(jq -r '.action // ""' "$GITHUB_EVENT_PATH")"
           TARGET_STATUS=""
+          TARGET_STAGE=""
+
           case "$GITHUB_EVENT_NAME" in
             issues)
               CONTENT_URL="$(jq -r '.issue.html_url' "$GITHUB_EVENT_PATH")"
               CONTENT_NODE_ID="$(jq -r '.issue.node_id' "$GITHUB_EVENT_PATH")"
               case "$ACTION" in
-                opened) TARGET_STATUS="Todo" ;;
-                reopened|assigned) TARGET_STATUS="In Progress" ;;
-                closed) TARGET_STATUS="Done" ;;
+                opened) TARGET_STATUS="Todo"; TARGET_STAGE="Ready" ;;
+                reopened|assigned) TARGET_STATUS="In Progress"; TARGET_STAGE="In Progress" ;;
+                closed) TARGET_STATUS="Done"; TARGET_STAGE="Done" ;;
               esac
               ;;
             pull_request)
               CONTENT_URL="$(jq -r '.pull_request.html_url' "$GITHUB_EVENT_PATH")"
               CONTENT_NODE_ID="$(jq -r '.pull_request.node_id' "$GITHUB_EVENT_PATH")"
               case "$ACTION" in
-                opened|reopened|synchronize|ready_for_review|converted_to_draft) TARGET_STATUS="In Progress" ;;
-                closed) TARGET_STATUS="Done" ;;
+                opened|reopened|synchronize|converted_to_draft) TARGET_STATUS="In Progress"; TARGET_STAGE="In Progress" ;;
+                ready_for_review) TARGET_STATUS="In Progress"; TARGET_STAGE="Testing" ;;
+                closed) TARGET_STATUS="Done"; TARGET_STAGE="Done" ;;
               esac
               ;;
             workflow_dispatch)
               CONTENT_URL="$(jq -r '.inputs.content_url' "$GITHUB_EVENT_PATH")"
               MANUAL_STATUS="$(jq -r '.inputs.status // "keep"' "$GITHUB_EVENT_PATH")"
+              MANUAL_STAGE="$(jq -r '.inputs.stage // "keep"' "$GITHUB_EVENT_PATH")"
               [[ "$MANUAL_STATUS" == keep ]] || TARGET_STATUS="$MANUAL_STATUS"
+              [[ "$MANUAL_STAGE" == keep ]] || TARGET_STAGE="$MANUAL_STAGE"
               REL="${CONTENT_URL#https://github.com/}"
               OWNER="${REL%%/*}"; REST="${REL#*/}"; REPO="${REST%%/*}"; REST="${REST#*/}"; KIND="${REST%%/*}"; NUM="${REST##*/}"
               [[ "$OWNER/$REPO" == "$EXPECTED_REPOSITORY" && "$NUM" =~ ^[0-9]+$ ]] || defer dispatch_url
+              [[ "$KIND" == issues || "$KIND" == pull ]] || defer dispatch_kind
               CONTENT_NODE_ID="$(gh api "repos/$OWNER/$REPO/issues/$NUM" --jq '.node_id')"
               ;;
             *) defer unsupported_event ;;
@@ -86,10 +98,8 @@ jobs:
           echo "PROJECT_RESOLVED id=$PROJECT_ID title=$EXPECTED_PROJECT_TITLE"
 
           ITEMS="$(gh api graphql -F project="$PROJECT_ID" -f query='query($project:ID!){ node(id:$project){ ... on ProjectV2 { items(first:100){ nodes { id content { ... on Issue { id url } ... on PullRequest { id url } } } pageInfo { hasNextPage } } } } }')"
-          HAS_MORE="$(jq -r '.data.node.items.pageInfo.hasNextPage // false' <<<"$ITEMS")"
-          [[ "$HAS_MORE" == false ]] || defer item_pagination_required
+          [[ "$(jq -r '.data.node.items.pageInfo.hasNextPage // false' <<<"$ITEMS")" == false ]] || defer item_pagination_required
           ITEM_ID="$(jq -r --arg cid "$CONTENT_NODE_ID" 'first(.data.node.items.nodes[] | select(.content.id == $cid) | .id) // empty' <<<"$ITEMS")"
-
           if [[ -z "$ITEM_ID" ]]; then
             ADD="$(gh api graphql -F project="$PROJECT_ID" -F content="$CONTENT_NODE_ID" -f query='mutation($project:ID!,$content:ID!){ addProjectV2ItemById(input:{projectId:$project,contentId:$content}){ item { id } } }')"
             ITEM_ID="$(jq -r '.data.addProjectV2ItemById.item.id // empty' <<<"$ADD")"
@@ -99,7 +109,7 @@ jobs:
           FIELDS="$(gh api graphql -F project="$PROJECT_ID" -f query='query($project:ID!){ node(id:$project){ ... on ProjectV2 { fields(first:100){ nodes { ... on ProjectV2Field { id name } ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }')"
 
           META="$(python3 - "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME" <<'PY'
-          import json, re, sys
+          import json,re,sys
           event=json.load(open(sys.argv[1],encoding='utf-8')); name=sys.argv[2]
           obj=event.get('issue') if name=='issues' else event.get('pull_request') if name=='pull_request' else {}; obj=obj or {}
           meta={}; aliases={'stage':'stage','workstream':'workstream','priority':'priority','phase':'phase','progress':'progress','blocker':'blocker','next':'next_action','next-action':'next_action'}
@@ -120,6 +130,14 @@ jobs:
           PY
           )"
 
+          META_STAGE="$(jq -r '.stage // empty' <<<"$META")"
+          [[ -z "$META_STAGE" ]] || TARGET_STAGE="$META_STAGE"
+          case "$TARGET_STAGE" in
+            Ready) [[ -n "$TARGET_STATUS" ]] || TARGET_STATUS="Todo" ;;
+            "In Progress"|Testing|"Owner Review"|Blocked) [[ -n "$TARGET_STATUS" ]] || TARGET_STATUS="In Progress" ;;
+            Done) TARGET_STATUS="Done" ;;
+          esac
+
           field_id(){ jq -r --arg n "$1" 'first(.data.node.fields.nodes[] | select((.name//""|ascii_downcase)==($n|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
           option_id(){ jq -r --arg f "$1" --arg o "$2" 'first(.data.node.fields.nodes[] | select((.name//""|ascii_downcase)==($f|ascii_downcase)) | .options[]? | select((.name|ascii_downcase)==($o|ascii_downcase)) | .id) // empty' <<<"$FIELDS"; }
           set_select(){ local f="$1" v="$2" fid oid; [[ -n "$v" ]]||return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]]||{ echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; oid="$(option_id "$f" "$v")"; [[ -n "$oid" ]]||{ echo "PROJECT_SYNC_SKIP missing_option=$f:$v"; return 0; }; gh api graphql -F project="$PROJECT_ID" -F item="$ITEM_ID" -F field="$fid" -f option="$oid" -f query='mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){ updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){ projectV2Item { id } } }' >/dev/null; }
@@ -127,7 +145,7 @@ jobs:
           set_number(){ local f="$1" v="$2" fid; [[ -n "$v" ]]||return 0; fid="$(field_id "$f")"; [[ -n "$fid" ]]||{ echo "PROJECT_SYNC_SKIP missing_field=$f"; return 0; }; gh api graphql -F project="$PROJECT_ID" -F item="$ITEM_ID" -F field="$fid" -F value="$v" -f query='mutation($project:ID!,$item:ID!,$field:ID!,$value:Float!){ updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{number:$value}}){ projectV2Item { id } } }' >/dev/null; }
 
           set_select "Status" "$TARGET_STATUS"
-          set_select "Stage" "$(jq -r '.stage//empty' <<<"$META")"
+          set_select "Stage" "$TARGET_STAGE"
           set_select "Workstream" "$(jq -r '.workstream//empty' <<<"$META")"
           set_select "Priority" "$(jq -r '.priority//empty' <<<"$META")"
           set_text "Phase" "$(jq -r '.phase//empty' <<<"$META")"
@@ -135,4 +153,4 @@ jobs:
           set_text "Blocker" "$(jq -r '.blocker//empty' <<<"$META")"
           set_text "Next Action" "$(jq -r '.next_action//empty' <<<"$META")"
 
-          echo "PROJECT_SYNC_OK project=$EXPECTED_PROJECT_TITLE item=$CONTENT_URL status=${TARGET_STATUS:-unchanged}"
+          echo "PROJECT_SYNC_OK project=$EXPECTED_PROJECT_TITLE item=$CONTENT_URL status=${TARGET_STATUS:-unchanged} stage=${TARGET_STAGE:-unchanged}"
