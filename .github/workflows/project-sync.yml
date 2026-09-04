@@ -103,7 +103,7 @@ jobs:
           gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 1000 --format json > "$ITEMS_FILE"
           gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 100 --format json > "$FIELDS_FILE"
 
-          ITEM_ID="$(jq -r --arg url "$CONTENT_URL" '.items[] | select(.content.url == $url) | .id' "$ITEMS_FILE" | head -n1)"
+          ITEM_ID="$(jq -r --arg url "$CONTENT_URL" 'first(.items[] | select(.content.url == $url) | .id) // empty' "$ITEMS_FILE")"
           if [[ -z "$ITEM_ID" || "$ITEM_ID" == "null" ]]; then
             echo "::warning::PROJECT_SYNC_DEFERRED reason=item_not_found"
             exit 0
@@ -154,11 +154,11 @@ jobs:
           PY
 
           field_id() {
-            jq -r --arg n "$1" '.fields[] | select((.name | ascii_downcase) == ($n | ascii_downcase)) | .id' "$FIELDS_FILE" | head -n1
+            jq -r --arg n "$1" 'first(.fields[] | select((.name | ascii_downcase) == ($n | ascii_downcase)) | .id) // empty' "$FIELDS_FILE"
           }
 
           option_id() {
-            jq -r --arg f "$1" --arg o "$2" '.fields[] | select((.name | ascii_downcase) == ($f | ascii_downcase)) | .options[]? | select((.name | ascii_downcase) == ($o | ascii_downcase)) | .id' "$FIELDS_FILE" | head -n1
+            jq -r --arg f "$1" --arg o "$2" 'first(.fields[] | select((.name | ascii_downcase) == ($f | ascii_downcase)) | .options[]? | select((.name | ascii_downcase) == ($o | ascii_downcase)) | .id) // empty' "$FIELDS_FILE"
           }
 
           set_select() {
