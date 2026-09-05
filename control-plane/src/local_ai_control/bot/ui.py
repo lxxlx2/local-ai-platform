@@ -105,3 +105,19 @@ def workflow_controls(job_id: str, status: str):
 
 
 BACK = back_for("home")
+
+
+def x_approval_card_keyboard(compact_sha: str) -> InlineKeyboardMarkup:
+    return inline([
+        [("✅ 批准", f"xapp:A:{compact_sha}"), ("❌ 拒绝", f"xapp:R:{compact_sha}")],
+        [("返回", "owner:approvals")],
+    ])
+
+
+def x_approvals_list_keyboard(items: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items[:6]:
+        label = f"{item['trigger_summary'][:14]} ({item['sha_display']})"
+        rows.append([(label, f"xapp:view:{item['sha_compact']}")])
+    rows.append([("返回", "home")])
+    return inline(rows)

@@ -10,7 +10,9 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from local_ai_control.bot.ui import (
     BACK, back_for, inline, media_menu, owner_dashboard, owner_task_menu,
     public_dashboard, system_menu, workflow_controls, workflow_menu,
+    x_approval_card_keyboard, x_approvals_list_keyboard,
 )
+from local_ai_control.services import x_revenue_approval
 from local_ai_control.services.capabilities import capability_intro, model_identity, routed_capability_text
 from local_ai_control.config.settings import Settings
 from local_ai_control.domain.identity import Role, identity_from_telegram
@@ -34,16 +36,16 @@ PUBLIC_HOME = "AI 助手\n\n你好！可以直接发送问题，或选择一个�
 SUPERVISOR_CONTROL_ACTIONS = {"pause", "resume", "cancel", "retry"}
 
 
-def owner_keyboard():
-    return owner_dashboard()
+def owner_keyboard(pending_count=0):
+    return owner_dashboard(pending_count=pending_count)
 
 
 def public_keyboard():
     return public_dashboard()
 
 
-def home_for(identity):
-    return (OWNER_HOME, owner_keyboard()) if identity.role is Role.OWNER else (PUBLIC_HOME, public_keyboard())
+def home_for(identity, pending_count=0):
+    return (OWNER_HOME, owner_keyboard(pending_count=pending_count)) if identity.role is Role.OWNER else (PUBLIC_HOME, public_keyboard())
 
 
 def safe_command(command, fallback="不可用"):
@@ -121,7 +123,8 @@ async def run():
         return sessions[0]["id"] if sessions else repo.create_session(ctx)
 
     async def respond_home(target, ctx):
-        title, keyboard = home_for(ctx)
+        pending_cnt = x_revenue_approval.get_pending_count(settings.x_revenue_artifacts_path) if ctx.role is Role.OWNER else 0
+        title, keyboard = home_for(ctx, pending_count=pending_cnt)
         await send_start_dashboard(target, title, keyboard)
 
     async def edit_page(query, text, keyboard=BACK):
@@ -227,7 +230,9 @@ async def run():
 
     @dp.callback_query(F.data == "home")
     async def home(query: CallbackQuery):
-        title, keyboard = home_for(identity(query))
+        ctx = identity(query)
+        pending_cnt = x_revenue_approval.get_pending_count(settings.x_revenue_artifacts_path) if ctx.role is Role.OWNER else 0
+        title, keyboard = home_for(ctx, pending_count=pending_cnt)
         await edit_page(query, title, keyboard)
 
     @dp.callback_query(F.data == "menu:media")
@@ -382,6 +387,103 @@ async def run():
             }[query.data]
         await edit_page(query, text, back_for(query.data))
 
+    @dp.callback_query(F.data == "owner:approvals")
+    async def owner_approvals(query: CallbackQuery):
+        ctx = identity(query)
+        try:
+            authorize(ctx, "owner:approvals")
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True)
+            return
+
+        items = x_revenue_approval.list_pending_approvals(settings.x_revenue_artifacts_path)
+        if not items:
+            await edit_page(
+                query,
+                "X 内容审批\n\n当前没有待审批的推文候选。\n所有外部发布功能保持关闭。",
+                inline([[("返回首页", "home")]])
+            )
+            return
+
+        if len(items) == 1:
+            item = items[0]
+            card = x_revenue_approval.format_approval_card(item)
+            await edit_page(query, card, x_approval_card_keyboard(item["sha_compact"]))
+        else:
+            text = f"X 内容审批\n\n待审批候选数：{len(items)}\n请选择一个候选进行审阅："
+            await edit_page(query, text, x_approvals_list_keyboard(items))
+
+    @dp.callback_query(F.data.startswith("xapp:"))
+    async def x_approval_action(query: CallbackQuery):
+        ctx = identity(query)
+        try:
+            authorize(ctx, "owner:approvals")
+        except AuthorizationDenied:
+            await query.answer("当前账号没有此操作权限。", show_alert=True)
+            return
+
+        parts = query.data.split(":", 2)
+        if len(parts) < 3:
+            await query.answer("无效的操作指令。", show_alert=True)
+            return
+
+        action = parts[1]
+        compact = parts[2]
+
+        try:
+            sha256_hex = x_revenue_approval.decode_compact_digest(compact)
+        except Exception:
+            await query.answer("无效的候选哈希格式。", show_alert=True)
+            return
+
+        if action == "view":
+            item = x_revenue_approval.get_candidate_by_sha(settings.x_revenue_artifacts_path, sha256_hex)
+            if not item:
+                await query.answer("未找到该推文候选。", show_alert=True)
+                return
+            card = x_revenue_approval.format_approval_card(item)
+            await edit_page(query, card, x_approval_card_keyboard(compact))
+            return
+
+        if action in ("A", "R"):
+            decision = "APPROVED" if action == "A" else "REJECTED"
+            actor_name = f"telegram_owner:{ctx.internal_user_id}"
+            try:
+                res = x_revenue_approval.apply_decision(
+                    settings.x_revenue_artifacts_path,
+                    sha256_hex,
+                    decision,
+                    actor_name,
+                )
+            except ValueError as exc:
+                reason_map = {
+                    "UNKNOWN_CANDIDATE": "未找到该推文候选。",
+                    "CANDIDATE_DIGEST_MISMATCH": "候选内容已被篡改或不匹配。",
+                    "ALREADY_FINALIZED": "该候选已被审批，不能重复操作。",
+                    "STALE_CALLBACK": "该候选已过期。",
+                    "CONCURRENT_DECISION_ACTIVE": "另一个审批操作正在进行中，请稍后重试。",
+                }
+                msg = reason_map.get(str(exc), f"操作失败: {exc}")
+                await query.answer(msg, show_alert=True)
+                return
+
+            status_str = "✅ 已批准" if action == "A" else "❌ 已拒绝"
+            result_card = (
+                f"{status_str} 该推文候选。\n\n"
+                f"候选哈希：{sha256_hex[:12]}…\n"
+                f"操作者：{actor_name}\n"
+                f"发布状态：外部发布已锁定（OFF）"
+            )
+            await edit_page(
+                query,
+                result_card,
+                inline([[("返回待审批列表", "owner:approvals")], [("返回首页", "home")]])
+            )
+            await query.answer(f"已记录决策：{decision}")
+            return
+
+        await query.answer("未知操作。", show_alert=True)
+
     @dp.callback_query(F.data.startswith(("owner:", "private:", "guidengji:")))
     async def private_route(query: CallbackQuery):
         ctx = identity(query)
@@ -401,9 +503,26 @@ async def run():
     async def invalid_callback(query: CallbackQuery):
         await query.answer("该操作不存在或已过期。", show_alert=True)
 
+    async def x_revenue_worker():
+        while True:
+            try:
+                if settings.owner_id:
+                    await x_revenue_approval.deliver_pending_notifications(
+                        bot,
+                        settings.owner_id,
+                        settings.x_revenue_artifacts_path,
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logging.warning("x_revenue notification error: %s", type(exc).__name__)
+            await asyncio.sleep(30)
+
+    x_worker_task = asyncio.create_task(x_revenue_worker())
     try:
         await dp.start_polling(bot)
     finally:
+        x_worker_task.cancel()
         runtime_executor.shutdown(); private_control.close(); private_repo.close(); public_repo.close(); supervisor_repo.close(); await bot.session.close()
 
 
