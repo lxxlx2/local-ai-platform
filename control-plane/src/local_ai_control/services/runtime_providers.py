@@ -412,12 +412,16 @@ class RuntimeProviderFactory:
             # Dependency-injected legacy test doubles never control real PIDs.
             self.lifecycle.stop(profile.profile_id); self._wait_down(provider)
 
-    def _start_and_capture(self,profile,provider):
+    def _reconcile_target_before_start(self,profile):
         if hasattr(self.lifecycle,"reconcile_before_start"):
-            self.lifecycle.reconcile_before_start(profile.profile_id,{
-                QWEN38.profile_id:lambda:_healthy(self.main),
-                QWEN36.profile_id:lambda:_healthy(self.fast),
-            })
+            self.lifecycle.reconcile_before_start(
+                profile.profile_id,
+                self._endpoint_probes(),
+            )
+
+    def _start_and_capture(self,profile,provider,*,reconciled=False):
+        if not reconciled:
+            self._reconcile_target_before_start(profile)
         self.lifecycle.start(profile.profile_id); self._wait(provider)
         if hasattr(self.lifecycle,"capture_started"):
             self.lifecycle.capture_started(profile.profile_id)
@@ -495,7 +499,8 @@ class RuntimeProviderFactory:
                 "previous runtime restore failed safely; zero-heavy-runtime retained"
             ) from restore_error
 
-    def _switch(self,target,provider,*,current=None,current_provider=None):
+    def _switch(self,target,provider,*,current=None,current_provider=None,
+                pre_start_validate=None):
         target_started=False; current_stop_proven=False
         try:
             if current and current_provider:
@@ -506,9 +511,23 @@ class RuntimeProviderFactory:
                 self._wait_for_post_stop_preflight(target)
             else:
                 self._authorize_cold_start(target)
-            # Treat start as potentially partial even when it raises. Cleanup
-            # must prove the target down before any rollback is attempted.
-            target_started=True; self._start_and_capture(target,provider)
+
+            if pre_start_validate is not None:
+                if not callable(pre_start_validate):
+                    raise TypeError("pre-start validation must be callable")
+                self._reconcile_target_before_start(target)
+                pre_start_validate()
+                target_started=True
+                self._start_and_capture(
+                    target,
+                    provider,
+                    reconciled=True,
+                )
+            else:
+                # Treat start as potentially partial even when it raises.
+                # Cleanup must prove the target down before rollback.
+                target_started=True
+                self._start_and_capture(target,provider)
         except Exception:
             if target_started:
                 try: self._stop_and_prove(target,provider)
@@ -525,6 +544,126 @@ class RuntimeProviderFactory:
         self._switch(QWEN36,self.fast,current=QWEN38 if state.main_healthy else None,
                      current_provider=self.main if state.main_healthy else None)
         return self.fast
+
+    @staticmethod
+    def _execution_roles(task_type):
+        normalized=str(task_type).strip().upper()
+        if normalized in {"CHAT","MAIN"}:
+            return (
+                ModelRole.MAIN,
+                ModelRole.FALLBACK,
+                ModelRole.FAST,
+            )
+        mapping={
+            "FAST":(ModelRole.FAST,),
+            "CHAT_FAST":(ModelRole.FAST,),
+            "CODE":(ModelRole.CODE,),
+            "REVIEW":(ModelRole.REVIEW,),
+            "VISION":(ModelRole.VISION,),
+            "VIDEO_UNDERSTANDING":(
+                ModelRole.VIDEO_UNDERSTANDING,
+            ),
+            "DEEP_REASONING":(ModelRole.DEEP,),
+        }
+        roles=mapping.get(normalized)
+        if roles is None:
+            raise RuntimeUnavailable(
+                "unsupported task type for exact heavy runtime"
+            )
+        return roles
+
+    def _prove_healthy_target_owned(self,profile_id):
+        """A healthy endpoint is not ownership proof."""
+        if not hasattr(
+            self.lifecycle,
+            "transition_source_state",
+        ):
+            raise HeavyModelConflict(
+                "exact ownership proof unavailable"
+            )
+        source=self.lifecycle.transition_source_state(
+            profile_id,
+            self._endpoint_probes(),
+        )
+        if source!="OWNED":
+            raise HeavyModelConflict(
+                "healthy target runtime is not exactly owned"
+            )
+
+    @contextmanager
+    def exact_profile_session(
+        self,
+        profile_id,
+        task_type="CHAT",
+        *,
+        execution_validate=None,
+    ):
+        """Use one exact planner-selected heavy profile.
+
+        Policy chooses the profile. This method enforces the
+        physical lifecycle and optionally invokes a fresh
+        execution validator at the final reuse/start boundary.
+        """
+        with self.lock:
+            if (
+                execution_validate is not None
+                and not callable(execution_validate)
+            ):
+                raise TypeError(
+                    "execution validation must be callable"
+                )
+
+            roles=self._execution_roles(task_type)
+            if not any(
+                self._eligible(role,profile_id)
+                for role in roles
+            ):
+                raise RuntimeUnavailable(
+                    "profile is not eligible for execution task"
+                )
+
+            state=self.state()
+
+            if profile_id==QWEN38.profile_id:
+                target=QWEN38
+                provider=self.main
+                target_healthy=state.main_healthy
+                current=QWEN36 if state.fast_healthy else None
+                current_provider=(
+                    self.fast if state.fast_healthy else None
+                )
+            elif profile_id==QWEN36.profile_id:
+                target=QWEN36
+                provider=self.fast
+                target_healthy=state.fast_healthy
+                current=QWEN38 if state.main_healthy else None
+                current_provider=(
+                    self.main if state.main_healthy else None
+                )
+            else:
+                raise RuntimeUnavailable(
+                    "unsupported heavy execution profile"
+                )
+
+            if target_healthy:
+                self._prove_healthy_target_owned(
+                    profile_id
+                )
+                if execution_validate is not None:
+                    execution_validate()
+                    self._prove_healthy_target_owned(
+                        profile_id
+                    )
+            else:
+                self._switch(
+                    target,
+                    provider,
+                    current=current,
+                    current_provider=current_provider,
+                    pre_start_validate=execution_validate,
+                )
+
+            yield provider
 
     @contextmanager
     def session(self,task_type="CHAT"):
