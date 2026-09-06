@@ -35,6 +35,7 @@ class Settings:
     public_max_message_bytes: int = 16000
     public_max_file_bytes: int = 10 * 1024**2
     public_max_video_bytes: int = 50 * 1024**2
+    x_revenue_artifacts_path: Path = Path("/Users/jerson/Documents/ChatGPT/全自动化模型/x-revenue/artifacts")
 
     @property
     def db_path(self):
@@ -45,6 +46,8 @@ class Settings:
     def load(cls):
         values = secret_values()
         get = lambda key: values.get(key) or os.getenv(key)
+        x_artifacts = get("X_REVENUE_ARTIFACTS_PATH")
+        x_artifacts_path = Path(x_artifacts) if x_artifacts else Path("/Users/jerson/Documents/ChatGPT/全自动化模型/x-revenue/artifacts")
         return cls(
             get("TELEGRAM_BOT_TOKEN"),
             get("TELEGRAM_OWNER_ID"),
@@ -53,4 +56,5 @@ class Settings:
             ROOT / "runtime/control-plane/private-memory.db",
             get("PRIVATE_DATABASE_URL"),
             get("PUBLIC_DATABASE_URL"),
+            x_revenue_artifacts_path=x_artifacts_path,
         )
