@@ -43,12 +43,13 @@ Do not resume Reviewer Mesh, broad provider screening, new model downloads or un
 
 Completed work has been synchronized and merged rather than left only in local branches/chat:
 
-- PR #42 `Telegram: unify X revenue approval in existing bot` merged to `main` on 2026-09-06.
-- PR #43 `Audit live local model inventory` merged to `main` on 2026-09-06.
-- The live inventory audit script and generated inventory are now durable in Git.
+- `local-ai-platform` PR #42 `Telegram: unify X revenue approval in existing bot` merged to `main` on 2026-09-06.
+- `local-ai-platform` PR #43 `Audit live local model inventory` merged to `main` on 2026-09-06.
+- `ChatGPT_mission_record` PR #10 `Add a real X market-content approval vertical slice` merged to `main` on 2026-09-06.
+- The live inventory audit script and generated inventory are durable in Git.
 - Issue #44 tracks direct-work model validation.
 
-Cross-repository X workflow work remains on `lxxlx2/ChatGPT_mission_record` PR #10. That PR is synced remotely but currently not mergeable and must be reconciled before merge. Do not recreate the X workflow from scratch.
+Do not recreate the X workflow or Telegram approval path from scratch. Read the merged repositories first.
 
 ## 4. Local model inventory
 
@@ -129,7 +130,7 @@ Important decisions:
 - external X publishing remains locked;
 - the Owner manually copies approved text into X because paid X API publishing is not currently justified.
 
-The local-ai Telegram integration is merged in PR #42. The X workflow implementation remains synced in `ChatGPT_mission_record` PR #10 and must be reconciled/merged rather than reimplemented.
+The local-ai Telegram integration is merged through `local-ai-platform` PR #42. The X workflow implementation is merged through `ChatGPT_mission_record` PR #10. Both are now Git source of truth and should be continued from their merged state.
 
 ## 8. Telegram state
 
