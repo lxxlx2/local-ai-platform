@@ -209,6 +209,7 @@ def marker_valid(path: Path, spec: dict[str, Any], stats: dict[str, Any]) -> boo
 
 def discover_model_dirs() -> list[Path]:
     found: set[Path] = set()
+    managed: set[Path] = set()
 
     if not MODELS_ROOT.exists():
         return []
@@ -217,7 +218,9 @@ def discover_model_dirs() -> list[Path]:
     queue = safe_json(QUEUE_PATH) or {}
     for spec in queue.get("models", []):
         try:
-            found.add(Path(spec["local_dir"]))
+            p = Path(spec["local_dir"]).resolve()
+            found.add(p)
+            managed.add(p)
         except Exception:
             pass
 
@@ -225,9 +228,10 @@ def discover_model_dirs() -> list[Path]:
     if MODELS_PY.exists():
         text = MODELS_PY.read_text(errors="ignore")
         for match in re.findall(r'local_path="([^"]+)"', text):
-            p = Path(match)
+            p = Path(match).resolve()
             if MODELS_ROOT == p or MODELS_ROOT in p.parents:
                 found.add(p)
+                managed.add(p)
 
     # Discover model-shaped directories to catch old/manual downloads.
     for root, dirs, files in os.walk(MODELS_ROOT):
@@ -267,7 +271,29 @@ def discover_model_dirs() -> list[Path]:
         if p.is_dir() and not p.is_symlink() and not p.name.startswith("."):
             found.add(p)
 
-    return sorted(found, key=lambda x: str(x).lower())
+    # Do not count internal model components or container directories
+    # as separate model packages when they belong to a known queue or
+    # registry model root.
+    canonical: set[Path] = set()
+
+    for candidate in found:
+        candidate = candidate.resolve()
+
+        if candidate in managed:
+            canonical.add(candidate)
+            continue
+
+        related_to_managed = any(
+            root in candidate.parents or candidate in root.parents
+            for root in managed
+        )
+
+        if related_to_managed:
+            continue
+
+        canonical.add(candidate)
+
+    return sorted(canonical, key=lambda x: str(x).lower())
 
 
 def external_cache_inventory() -> list[dict[str, Any]]:
