@@ -2,229 +2,178 @@
 
 Status type: CANONICAL CROSS-BRANCH SNAPSHOT
 
-Last consolidated: 2026-08-29
+Last consolidated: 2026-09-06
 
-Stable `main` HEAD at consolidation: `fcbb71d6f10f850ccfbb8dbb28015eae4ceed105`
+This file is the current high-level source of truth for ongoing execution. Historical implementation details remain in Issues, PRs, ADRs and qualification reports; do not reconstruct current state from old chat history when this file and live evidence are available.
 
-This file describes the whole project across active/review/reference branches. It does not claim that feature-branch work is merged or deployed.
-
-## 1. Executive summary
-
-Repository governance has been substantially consolidated. PR #20 merged the new README, Governance V2, ADR index, architecture decisions and audited download status into `main`. Historical Issue/branch cleanup then reduced the active GitHub surface without deleting unique implementation/evidence.
-
-Immediate sequence:
-
-1. finish the final legacy-doc branch retirement and review the new evidence-preservation commits on `docs/architecture-ledger`;
-2. merge those docs only after independent review and explicit Owner merge authorization;
-3. return to Context Architecture V2 Phase 1 and finish static verification/commit/push without rerunning the already-passed full suite unless code changes again;
-4. keep model downloads paused until network conditions improve and download-state drift is reconciled;
-5. resume independent Codex review when model quota is available;
-6. continue the master roadmap.
-
-No current docs/feature status implies merge, deployment or production activation.
-
-## 2. Source-of-truth rules
+## 1. Source-of-truth order
 
 Read in this order:
 
-1. live runtime evidence for current process/resource facts;
-2. merged `main` for stable code;
-3. this file for current cross-branch project state;
-4. `docs/architecture/INDEX.md` and accepted ADRs;
-5. active implementation Issue + exact branch/commit;
-6. qualification evidence;
-7. historical Issue bodies/docs;
-8. chat memory.
+1. live runtime/resource evidence for current machine state;
+2. merged `main` for stable code/docs;
+3. this file for current execution state;
+4. `docs/MODEL_WORK_CAPABILITY_VALIDATION_V1.md` for direct-work model decisions;
+5. `docs/LOCAL_MODEL_INVENTORY.md` for disk/download state;
+6. workload qualification evidence and accepted architecture policy;
+7. active Issue/PR exact refs;
+8. historical docs and chat memory.
 
-See `docs/GOVERNANCE.md`.
+## 2. Current execution priority
 
-## 3. Core provider/runtime state
+The project is no longer prioritizing broad infrastructure cleanup or generic benchmark expansion.
 
-### Local Qwen3.8 MAIN
+Current priority is to prove which already-downloaded local models can directly perform useful work in the existing money-making workflows.
 
-- Role: local MAIN/private reasoning and routine production.
-- Qualified production context remains 16K until a separate 24K/32K qualification changes policy.
-- Local Responses bridge / tool-loop foundation is implemented and previously qualified.
-- Qwen is suitable for bounded coding/repair and routine local work; long autonomous engineering/review loops have shown poor convergence and must remain bounded/decomposed.
-- A two-file independent review attempt of the Gemini robustness fix timed out at 300 seconds with no verdict after workspace-policy blockers were removed. See `docs/qualification/QWEN_BOUNDED_REVIEW_2026-08-29.md` on the architecture ledger until its docs PR is merged.
+Tracker: Issue #44 `Validate local models against real work tasks`.
 
-### Local Qwen3.6 FAST/FALLBACK
+Execution order:
 
-- Downloaded and validated as FAST/FALLBACK.
-- Normally stopped/on-demand.
+1. Whisper livestream/video transcription;
+2. Qwen3-TTS Base and VoiceDesign;
+3. Qwen3 Embedding + Reranker project retrieval;
+4. FLUX workflow image generation, gated by representative memory preflight;
+5. Qwen workflow-specific idle/batch roles, with X copy remaining blocked;
+6. LongCat video generation, gated by representative memory preflight;
+7. RAW Qwen only if a concrete owner-only work role justifies it.
 
-### Gemini
+Do not resume Reviewer Mesh, broad provider screening, new model downloads or unrelated benchmark work while this direct-work validation sequence is active.
 
-- Advisory reviewer/provider path with official Google API, privacy/egress controls and structured review is implemented on feature branches.
-- Large review bundles for routing, exact cancellation and durable-state/security returned PASS with zero findings after sanitization-aware review packaging.
-- Gemini provider robustness fix is committed/pushed on `fix/gemini-large-review-v01` at `4d229c08adf1ed0716b3922322dca258b625b569`.
-- Focused/failover/full tests passed for that fix, plus real Gemini API smoke.
-- Final independent non-Gemini review of that fix is still pending. The bounded Qwen review produced no verdict within 300 seconds.
-- Gemini supplementary execution/P3 structured patch path is not yet fully implemented or activated.
+## 3. Git synchronization state
 
-### Codex
+Completed work has been synchronized and merged rather than left only in local branches/chat:
 
-- Interactive provider priority is Codex -> Qwen -> Gemini supplementary for Owner-present engineering, while unattended/routine production remains local-first.
-- Codex model quota is currently unavailable, so independent Codex review work is paused.
-- Codex CLI may still be used as a local harness only when configured to the local Qwen provider and route attribution proves no OpenAI model usage.
+- `local-ai-platform` PR #42 `Telegram: unify X revenue approval in existing bot` merged to `main` on 2026-09-06.
+- `local-ai-platform` PR #43 `Audit live local model inventory` merged to `main` on 2026-09-06.
+- `ChatGPT_mission_record` PR #10 `Add a real X market-content approval vertical slice` merged to `main` on 2026-09-06.
+- The live inventory audit script and generated inventory are durable in Git.
+- Issue #44 tracks direct-work model validation.
 
-## 4. Repository governance state
+Do not recreate the X workflow or Telegram approval path from scratch. Read the merged repositories first.
 
-Governance baseline merged through PR #20 at `fcbb71d6f10f850ccfbb8dbb28015eae4ceed105` after Gemini independent review PASS with zero findings.
+## 4. Local model inventory
 
-Issue cleanup completed:
+The 2026-09-06 live disk audit found 10 independent installed model packages with about 168.145 GiB total payload.
 
-- closed/superseded/completed: #1, #2, #3, #4, #5, #6;
-- active roadmap/execution issues: #13, #14, #15, #16, #17, #18, #19.
+Eight queue targets are completion-marker validated. The normal Qwen3.6 and Qwen3.8 packages are also physically present outside that queue proof.
 
-Remote branch cleanup completed in two stages:
+Installed set:
 
-- 10 branches with no remaining execution value were deleted after containment review;
-- three historical branches with unique commits were first preserved through annotated archive tags, verified against exact target SHAs, then deleted.
+| Model | Primary intended work | Disk payload | Expected runtime memory | Direct-work state |
+| --- | --- | ---: | ---: | --- |
+| Qwen3.6-35B-A3B-4bit | bounded text / fallback | 19.026 GiB | 28 GiB | X copy `RESOURCE_BLOCKED`; other workflows require separate tests |
+| Qwen3.8-27B-8bit | main text / vision | 27.503 GiB | 34 GiB | X copy `RESOURCE_BLOCKED`; workflow-specific vision/text tests pending |
+| Qwen3.8 RAW 8-bit | owner-only RAW text | 27.500 GiB | 34 GiB | deferred, no justified work role yet |
+| Whisper large-v3 MLX | transcription | 2.872 GiB | 6 GiB | direct test next |
+| Qwen3-TTS Base 1.7B | narration | 4.232 GiB | 8 GiB | not tested |
+| Qwen3-TTS VoiceDesign 1.7B | designed voice narration | 4.210 GiB | 8 GiB | not tested |
+| FLUX.2 klein 4B BF16 | X/novel/sticker images | 22.110 GiB | 30 GiB | not tested; memory preflight first |
+| Qwen3 Embedding 8B | retrieval | 14.110 GiB | 20 GiB | not tested |
+| Qwen3 Reranker 8B | retrieval reranking | 15.267 GiB | 20 GiB | not tested |
+| LongCat Video q8 | generated video | 31.315 GiB | 44 GiB | not tested; memory preflight first |
 
-Archive tags:
+There are currently no `.incomplete` bytes in the audited model directories. Embedding, Reranker, LongCat and RAW Qwen are now fully downloaded; older docs that described them as partial are stale.
 
-- `archive/media-v02-quota-cutoff-20260828` -> `59a5cf22e774f26c0b103eeddc77680f8708d2b7`;
-- `archive/local-producer-v01` -> `c7887cb9c40675e113a1154f7f5528d8c6cfc721`;
-- `archive/supervisor-start-identity-v01` -> `c09fe9c80bd5c01fa9005c63a4c7cea7514c3aea`.
+## 5. Workload qualification policy remains authoritative
 
-`docs/architecture-ledger` was fast-forwarded to the merged governance baseline before new evidence-preservation commits were added.
+`docs/qualification/WORKLOAD_QUALIFICATION_POLICY.md` still governs machine-resource claims.
 
-The remaining legacy docs branch `docs/context-architecture-v2` was audited against frozen failover base `d218f82d39b06b41aac27aaf867ad54a66443563`. Its 11 unique commits are documentation-only. Long-term-value design/qualification records have now been copied to `docs/architecture-ledger`; the old Architecture Change Protocol is intentionally not restored because `main` contains the newer Governance V2 protocol. Preserve the exact legacy head with an archive tag before deleting that branch.
+Normal user applications such as Chrome, Codex/ChatGPT, IDEs and Unity must not be closed merely to obtain a model PASS.
 
-## 5. Important surviving branches
+A representative resource failure is valid architecture evidence. The system must route around it, defer the task, use another qualified path, or record the capability as unavailable for that deployment mode.
 
-| Branch | State | Purpose / current status |
-|---|---|---|
-| `main` | STABLE | Governance consolidation merged at `fcbb71d...`; stable code baseline still does not include all latest qualified feature work. |
-| `docs/architecture-ledger` | ACTIVE | Single long-lived docs/ADR/qualification ledger. Currently contains post-PR#20 evidence-preservation commits awaiting docs review/merge. |
-| `docs/context-architecture-v2` | RETIRING | Legacy aggregate docs branch at `1806d755...`. Its 11 unique commits beyond `d218f82...` are docs-only and their durable value has been migrated. Archive exact head before deletion. |
-| `feat/context-budget-manager-v01` | ACTIVE | Context V2 Phase 1. Local worktree has uncommitted implementation; compatibility test PASS, focused 57 PASS, full suite 686 PASS, diff check PASS. Post-test verification failed only because PYTHONPATH was missing after returning to repo root. |
-| `feat/codex-desktop-auto-failover-v01` | FROZEN_REVIEW | Qualified Codex -> Qwen same-job failover baseline at `d218f82d39b06b41aac27aaf867ad54a66443563`; independent Codex review paused by quota. Do not mutate baseline. |
-| `fix/gemini-large-review-v01` | FROZEN_REVIEW | Gemini large structured review robustness fix at `4d229c08...`; tests and real API smoke passed; non-Gemini independent review pending. |
-| `feat/local-qwen-generic-project-v03` | REFERENCE / FUTURE WORK | Generic-project implementation history for Issue #13; future work should align with shared provider/router architecture rather than assume the old Qwen-only path is canonical. |
-| `feat/local-qwen-owner-raw-v04` | REFERENCE / PLAN SOURCE | Earlier RAW/provider/product planning. RAW download target must be reconciled before resume. |
-| `feat/private-learning-engine-v01` | REFERENCE / FUTURE WORK | Training/learning-engine implementation history; not a currently active production path. |
+`Downloaded != Registered != Generic Qualified != Direct-Work Approved`.
 
-## 6. Context Architecture V2
+## 6. Qwen direct-work interpretation
 
-Architecture: ACCEPTED.
+### Qwen3.6
 
-Tracker: Issue #19.
+Historical representative workload qualification proved a bounded functional/runtime path.
 
-Phase 1 goal: add a host-side ContextBudgetManager so Chat/Memory can use more of the already-qualified context envelope without changing the Qwen production ceiling.
+On 2026-09-06 the model was evaluated specifically as a candidate for X/Twitter content creation under the Owner's normal workstation load. Two production memory preflights denied admission before the model started.
 
-Current local implementation evidence on `feat/context-budget-manager-v01`:
+Second measured state:
 
-- prior compatibility failure reproduced and fixed;
-- exact previous failure test: 1 PASS;
-- focused Context/Chat/Gateway tests: 57 PASS;
-- full control-plane suite: 686 PASS, 2 pre-existing Pytest collection warnings;
-- `git diff --check`: PASS;
-- runtime/model registry intentionally unchanged;
-- final standalone verification needs rerun with correct `PYTHONPATH`;
-- implementation not yet committed/pushed;
-- independent review not yet completed;
-- no production activation.
+- expected model memory: 28 GiB;
+- required reclaimable threshold under current policy: 23.8 GiB;
+- reclaimable memory: 22.45 GiB;
+- swap used: 1.4 GiB;
+- pressure: NORMAL;
+- result: `INSUFFICIENT_RECLAIMABLE_MEMORY`.
 
-Later phases: Qwen 24K/32K qualification, Gemini token-aware context tiers, then shared context/retrieval contracts for coding/X/novels/commerce/media.
+The model therefore has no valid X-writing quality verdict. The production decision is still explicit because availability itself fails the intended 7x24 workflow requirement.
 
-The full approved design is preserved as `docs/CONTEXT_ARCHITECTURE_V2.md` on the architecture ledger in addition to the concise ADR-0003.
+Current workflow status: `X_COPY = RESOURCE_BLOCKED / DO_NOT_USE_FOR_X_COPY`.
 
-## 7. Model download state
+### Qwen3.8
 
-Downloads are intentionally PAUSED because network conditions are currently poor. No download-related process was present during the 2026-08-29 audit. Quarantine count was zero. About 586 GiB disk space was free.
+Qwen3.8 has higher expected memory and prior representative cold-load evidence hit the relative swap-growth safety gate.
 
-Physically complete and marker/snapshot validated:
+Current workflow status: `X_COPY = RESOURCE_BLOCKED / DO_NOT_USE_FOR_X_COPY`.
 
-- Whisper Large V3: 2.872 GiB.
-- Qwen3-TTS Base: 4.232 GiB.
-- Qwen3-TTS VoiceDesign: 4.210 GiB.
-- FLUX.2 klein 4B bf16: 22.110 GiB.
+Qwen may still be useful for separately declared idle/batch novel drafting, bounded assistance or vision work. Those roles require their own direct-work evidence and must not inherit approval from generic MAIN/VISION registry status.
 
-These still need role-specific qualification before production use.
+## 7. X revenue workflow current state
 
-Incomplete/paused, using completed payload percentage rather than misleading cache-inflated percentage:
+The X workflow is already running as a real-source, human-approved vertical slice.
 
-- Qwen3 Embedding 8B: 9.469 / 14.110 GiB payload, about 67.1%; 10.723 GiB partial cache.
-- Qwen3 Reranker 8B: 3.969 / 15.267 GiB payload, about 26.0%; 23.633 GiB partial cache.
-- LongCat Video q8: 0.625 / 31.315 GiB, about 2.0%.
-- configured RAW MLX target: 0 / 27.500 GiB in its configured directory.
+Current architecture:
 
-Known download-state defects/drift:
+`Nasdaq/Kraken/Fed/SEC -> deterministic trigger -> deterministic analysis/candidate -> quality/integrity checks -> persisted artifact -> unified @Jersonliu_bot Owner approval -> manual copy/publish`
 
-1. the old status command reports Embedding/Reranker as 99.9% because duplicate/resumable `.incomplete` fragments can exceed expected size; canonical human progress must use payload percentage plus separate partial-cache bytes;
-2. stored manager state still contains stale PID/identity metadata even though no manager process exists;
-3. RAW queue config currently targets `raw-qwen38-27b-8bit` / `orcarouter/Qwen3.8-27B-Uncensored-MLX`, while historical runtime state tracks `raw-qwen38-27b-q6k` / `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`; partial data exists in the historical target directory;
-4. unrelated/older `.incomplete` files also exist under the main Qwen3.8 model directory and must not be deleted automatically.
+Important decisions:
 
-Do not resume RAW until target/revision/runtime/local-dir state is explicitly reconciled.
+- quiet market state returns `NO_ACTION` and sends no Telegram noise;
+- local Qwen is not used to generate X copy;
+- candidate generation remains deterministic until a local text model passes dedicated `X_COPY` qualification;
+- Telegram approval uses the existing bot and a single Telegram update consumer;
+- external X publishing remains locked;
+- the Owner manually copies approved text into X because paid X API publishing is not currently justified.
 
-See `docs/DOWNLOAD_STATUS.md`.
+The local-ai Telegram integration is merged through `local-ai-platform` PR #42. The X workflow implementation is merged through `ChatGPT_mission_record` PR #10. Both are now Git source of truth and should be continued from their merged state.
 
-## 8. Roadmap status
+## 8. Telegram state
 
-Master infrastructure roadmap: Issue #14.
+The existing `@Jersonliu_bot` is the single approval/control surface for X candidate decisions.
 
-Product end-state: Issue #15.
+The merged integration:
 
-Active execution/workflow issues:
+- discovers pending X artifacts;
+- binds approve/reject actions to exact candidate SHA256;
+- persists approval state atomically;
+- keeps external publishing disabled;
+- does not create a second Telegram polling/network client.
 
-- #13 Generic project adapter;
-- #16 Novel workflow engine;
-- #17 Revenue workflows;
-- #18 Interactive provider priority / P3 implementation;
-- #19 Context Architecture V2.
+## 9. Direct-work model validation rules
 
-Major remaining work includes:
+Use `docs/MODEL_WORK_CAPABILITY_VALIDATION_V1.md` and Issue #44.
 
-- Context V2 remaining phases;
-- Gemini supplementary execution/P3;
-- generic project adapter completion on shared provider/router abstractions;
-- download cleanup/resume and model qualification;
-- Embedding/Reranker/RAG;
-- FLUX/image production and Code Canvas/Qwen-Image evaluation;
-- Whisper/TTS providers;
-- X/Twitter production workflow;
-- commerce research agent;
-- novel project adapters/orchestration;
-- video/livestream pipeline;
-- Telegram unified task/review control surface;
-- training/adaptation pipeline;
-- eventual external multi-user isolation;
-- final integrated E2E/independent review/merge gate.
+Every model/workflow pair ends as one of:
 
-Closed Issues #1-#6 are historical/superseded/completed records and are no longer active sources of execution state.
+- `NOT_TESTED`;
+- `RESOURCE_BLOCKED`;
+- `FUNCTIONAL_FAIL`;
+- `QUALITY_FAIL`;
+- `LAB_ONLY`;
+- `WORKFLOW_PASS`;
+- `PRODUCTION_READY`.
 
-## 9. Branch protection constraint
+A blocked or failed model must be explicitly documented. Do not repeat deterministic failures just to obtain a PASS.
 
-`main` currently reports `protected=false`.
+Each valid result must preserve the model/profile, workload class, deployment mode, resource preflight, output evidence, runtime, cleanup and task-specific quality decision.
 
-The GitHub repository is private. Repository rulesets returned a plan-level 403 indicating that this feature requires GitHub Pro or a public repository. Classic branch-protection access through the current integration also returned 403. Do not claim `main` is protected until this is changed and re-verified through an eligible GitHub plan/UI/API.
+## 10. Safety and scope constraints
 
-Until then, protection is procedural:
+- Port 8199 belongs to another local project and must not be touched by local-model qualification work.
+- User work applications have priority over local AI runtimes.
+- Only exact-owned model processes may be stopped by qualification tooling.
+- No silent paid provider/API fallback.
+- External X publishing remains disabled.
+- Private media, credentials, runtime state and heavyweight generated outputs stay out of Git; safe metadata/hashes/results may be committed.
+- Do not treat a download marker or registry role as proof of work capability.
 
-- no direct feature merge without the documented review/Owner gate;
-- no force push to `main`;
-- no deleting `main`;
-- keep implementation on feature branches/worktrees;
-- verify exact refs before push/merge.
+## 11. Immediate next action
 
-## 10. Hard safety constraints
+Implement and run the first Issue #44 capability test: `Whisper large-v3 -> LIVESTREAM_STT` using real user-owned video/audio, representative workstation load, resource measurements, transcript artifact and cleanup proof.
 
-- Local-first routine production.
-- Host/Supervisor owns permissions.
-- No arbitrary PID kill or fuzzy process ownership.
-- Producer cannot satisfy its own required independent review.
-- Gemini/cloud egress remains privacy gated; no silent paid billing.
-- Models, secrets, runtime state, raw credentials, private caches, `.incomplete` download data and sensitive DBs remain outside Git.
-- Downloaded != qualified != deployed.
-- No merge/deploy/external publish/irreversible action is implied by a feature/docs commit.
-
-## 11. Next action after governance
-
-1. archive tag and delete `docs/context-architecture-v2` after verifying its exact head;
-2. independently review the docs-only delta currently on `docs/architecture-ledger` and merge it to `main` only after explicit Owner authorization;
-3. return to `feat/context-budget-manager-v01` and rerun only the remaining post-test verification with correct `PYTHONPATH`;
-4. do not repeat the already-passed 686-test full suite unless the implementation changes again;
-5. inspect final Context V2 Phase 1 diff, commit/push, update Issue #19, then proceed to independent review.
+After that result is known, update the validation ledger, Issue #44 and this current-status file if routing changes, then merge the evidence before moving to the next model.
