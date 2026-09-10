@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1",
+  "status": "STAGED_NOT_QUALIFIED",
+  "capability_alias": "MUSIC_MAIN",
+  "production_registry_unchanged": true,
+  "profiles": {
+    "acestep-v15-xl-sft": {
+      "role": "preferred_final_quality_candidate",
+      "upstream_repo": "ACE-Step/ACE-Step-1.5",
+      "backend": "mlx",
+      "deployment_mode": "ON_DEMAND_COLD_START",
+      "qualification": "REGISTERED_NOT_QUALIFIED"
+    },
+    "acestep-v15-xl-turbo": {
+      "role": "iteration_and_seed_exploration",
+      "upstream_repo": "ACE-Step/ACE-Step-1.5",
+      "backend": "mlx",
+      "deployment_mode": "ON_DEMAND_COLD_START",
+      "qualification": "REGISTERED_NOT_QUALIFIED"
+    },
+    "acestep-v15-xl-base": {
+      "role": "optional_base_only_editing_features",
+      "upstream_repo": "ACE-Step/ACE-Step-1.5",
+      "backend": "mlx",
+      "deployment_mode": "ON_DEMAND_COLD_START",
+      "qualification": "REGISTERED_NOT_QUALIFIED"
+    }
+  },
+  "runtime_isolation": {
+    "checkout_root": "/Users/jerson/AI/runtime/music/acestep-1.5",
+    "state_root": "/Users/jerson/AI/runtime/music/state",
+    "output_root": "/Users/jerson/AI/runtime/music/output",
+    "source_root": "/Users/jerson/AI/private/music-source",
+    "api_bind": "127.0.0.1",
+    "api_port": 8215
+  },
+  "policy": {
+    "on_demand_only": true,
+    "silent_cloud_fallback": false,
+    "public_source_audio": false,
+    "representative_workload_required": true,
+    "exact_owned_process_cleanup_only": true
+  }
+}
