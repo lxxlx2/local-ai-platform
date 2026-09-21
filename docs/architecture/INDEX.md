@@ -10,6 +10,7 @@ This index is the canonical entrypoint for architecture decisions. The detailed 
 | [ADR-0004](ADR-0004-repository-governance-v2.md) | ADR ledger + canonical current status + reduced docs-branch sprawl | ACCEPTED / IMPLEMENTED | PR #20 merged at `fcbb71d...`; historical Issue/branch cleanup completed; ongoing maintenance on `docs/architecture-ledger` |
 | [ADR-0005](ADR-0005-workload-aware-local-model-admission.md) | Representative-workload qualification and workload-aware local-model admission | ACCEPTED / IMPLEMENTING | Issues #19, #24; `../qualification/WORKLOAD_QUALIFICATION_POLICY.md`; workload-aware stack merged through `9aebb542...`; execution integration remains Draft in PR #31 |
 | [ADR-0006](ADR-0006-autonomous-review-mesh.md) | Qualified multi-model Autonomous Review Mesh with deterministic quorum and automatic fixer loop | ACCEPTED / IMPLEMENTATION QUEUED | Issues #32, #34; `../qualification/REVIEWER_QUALIFICATION_POLICY.md`; PR #31 false-PASS/TOCTOU incident is the first regression fixture |
+| [ADR-0007](ADR-0007-local-music-generation-and-reference-reproduction.md) | Isolated local music generation and reference-guided reproduction with ACE-Step 1.5 | ACCEPTED / IMPLEMENTING | Issue #47; `feat/local-music-reproduction-v01`; staged specialist registry in `../../config/music-model-registry-v0.1.json`; user-facing workflow in `lxxlx2/ai_video_product` |
 
 ## Status meanings
 
