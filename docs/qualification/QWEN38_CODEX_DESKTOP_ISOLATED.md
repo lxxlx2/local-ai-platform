@@ -74,3 +74,27 @@ Only \`WORKFLOW_PASS\` for \`CODEX_DESKTOP_LOCAL_FALLBACK\` after safe represent
 - \`control-plane/src/local_ai_control/services/qwen38_runtime.py\`
 - \`lxxlx2/codex-web-bridge\` independent project and modes
 - OpenAI Codex config provider documentation; LiteLLM Codex Desktop guide
+
+## Actual Owner Mac result: 2026-11-24 Bangkok (run 2026-11-23T17:30:32Z)
+
+Evidence artifact (private local file, not uploaded):
+`/Users/jerson/AI/runtime/direct-work-validation/qwen38-codex-api/20261123T173032Z/result.json`
+
+Owner-supplied terminal result, no independently uploaded JSON content:
+
+```text
+PREFLIGHT_ALLOWED = False
+PREFLIGHT_REASON = INSUFFICIENT_RECLAIMABLE_MEMORY
+RECLAIMABLE_GIB = 25.166595458984375
+SWAP_GIB = 0.0
+RESULT = RESOURCE_BLOCKED
+CLEANUP_OK = True
+CODEX_TOOL_E2E = NOT_TESTED
+PROTECTED_PORTS_ACCESSED = False
+```
+
+With current 8bit Qwen3.8 expected-memory budget of 34 GiB and the unchanged admission rule 85%, 28.90 GiB reclaimable is required. About 3.73 GiB was missing. No model started, so **there is no text API success, function-call success, or Codex Desktop integration evidence**.
+
+**Decision for this exact model/deployment:** `QWEN38_27B_8BIT x CODEX_DESKTOP_LOCAL_FALLBACK = RESOURCE_BLOCKED / DO_NOT_USE` under representative office workload. Do not repeat preflight without a meaningful change in actual resource conditions or model deployment. Preserve existing Codex Desktop, Claude API LiteLLM (127.0.0.1:48721) and codex-web-bridge (127.0.0.1:8199).
+
+**Candidate, not yet downloaded/tested:** Qwen3.8-27B MLX 6bit, separate directory/runtime, subject to new model-specific resource budget and tool-call E2E. The quantization change can decrease resource requirements but may affect answer quality. No promotion before actual results; keep 8bit weights until replacement has passed and separate deletion is authorized.
