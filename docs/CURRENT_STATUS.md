@@ -2,7 +2,7 @@
 
 Status type: CANONICAL CROSS-BRANCH SNAPSHOT
 
-Last consolidated: 2026-09-06
+Last consolidated: 2026-11-24 (local Codex fallback checkpoint; other 2026-09-06 workflow states are historical snapshots)
 
 This file is the current high-level source of truth for ongoing execution. Historical implementation details remain in Issues, PRs, ADRs and qualification reports; do not reconstruct current state from old chat history when this file and live evidence are available.
 
@@ -177,3 +177,13 @@ Each valid result must preserve the model/profile, workload class, deployment mo
 Implement and run the first Issue #44 capability test: `Whisper large-v3 -> LIVESTREAM_STT` using real user-owned video/audio, representative workstation load, resource measurements, transcript artifact and cleanup proof.
 
 After that result is known, update the validation ledger, Issue #44 and this current-status file if routing changes, then merge the evidence before moving to the next model.
+
+## 12. Local Codex Desktop Qwen3.8 fallback checkpoint (2026-11-24)
+
+The Owner elected to evaluate existing Qwen3.8-27B-8bit as a quota-free fallback for Codex Desktop. The isolated admission script was merged in PR #49, and executed on the Owner Mac.
+
+Representative result: `RESOURCE_BLOCKED` before model start, `INSUFFICIENT_RECLAIMABLE_MEMORY`; reclaimable 25.166595458984375 GiB, swap 0.0 GiB. Existing 34 GiB admission requires 28.90 GiB reclaimable, leaving an approximate 3.73 GiB deficit. Cleanup `True`; `CODEX_TOOL_E2E=NOT_TESTED`; protected ports were not accessed. Exact local private result path: `/Users/jerson/AI/runtime/direct-work-validation/qwen38-codex-api/20261123T173032Z/result.json`.
+
+Decision: `QWEN38_27B_8BIT x CODEX_DESKTOP_LOCAL_FALLBACK = RESOURCE_BLOCKED / DO_NOT_USE` in representative office workload. This does not judge model coding quality because no inference occurred. A Qwen3.8 6bit MLX quantization is a candidate for separate test only; not yet downloaded, qualified, or wired to Codex. The original production sidecar also lacks Codex-style Responses tool calls.
+
+Do not change current Codex Desktop state, Claude LiteLLM on 48721, Web Bridge on 8199, model files, preflight policy or swap limits. Follow `docs/qualification/QWEN38_CODEX_DESKTOP_ISOLATED.md` and Issue #44. No manual cleanup of Qwen weights has been authorized.
